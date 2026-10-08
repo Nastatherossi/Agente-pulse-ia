@@ -1,0 +1,1 @@
+export default function handler(_req:unknown,res:{status:(code:number)=>{json:(data:unknown)=>void}}) { res.status(403).json({error:{code:'REAL_AI_LOCKED',message:'IA real bloqueada até autenticação e autorização explícitas.'}}); }
