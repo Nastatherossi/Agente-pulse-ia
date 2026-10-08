@@ -54,3 +54,5 @@ IDs de identidade devem vir da sessão autenticada e nunca do modelo. Schemas es
 `vercel.json` configura o build, headers de segurança e funções em `api/`. Configure **Vercel Authentication para todos os deployments antes de publicar**. Não disponibilize um deployment sem proteção. Nenhum segredo deve usar prefixo `VITE_`.
 
 Não foi alterado `pulse-finance`, criado Worker de produção, conectado Supabase ou contratado serviço pago.
+
+Neste ambiente, o download padrão de navegador foi bloqueado. Os testes também suportam Chromium empacotado: `LAB_BUNDLED_CHROMIUM=true npm run test:e2e`. Se a extração do pacote for incompatível com o sistema, informe um executável já extraído com `LAB_CHROMIUM_PATH=/caminho/chromium` junto à flag anterior.
