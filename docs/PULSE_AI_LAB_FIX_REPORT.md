@@ -44,4 +44,8 @@ Não houve chamada OpenAI real confirmada nesta execução. O navegador entrou n
 
 O teste real deve ser concluído numa sessão Vercel autenticada com a mensagem obrigatória, consulta de saldo e mensagem ambígua. Não confundir os testes mock aprovados com homologação OpenAI ao vivo. Em caso de falha, o endpoint agora informa o código seguro e requestId; o log permite localizar a categoria sem registrar dados financeiros.
 
-Preview e confirmação final da proteção serão registrados após o build remoto.
+Preview testado no build remoto: https://pulse-ai-cszhc8915-matheusnastaro5-6769s-projects.vercel.app/
+
+Commit de código: `d9e96d95d93799b85b480a013b1bd823aa279c09`. Deployment `dpl_7o6eRNvkATFRcSkxHeMSpTzizyxU`: READY, source git, ambiente Preview (target null), branch correta, build remoto concluído em aproximadamente 21 segundos. Projeto existente mantém `ssoProtection.enabled=true` e `deploymentType=all`. Acesso anônimo ao endpoint redireciona para autenticação; não foi removida ou flexibilizada a proteção. Nenhum deployment desta correção foi publicado em produção.
+
+Estado final: correção e validação automatizada entregues; confirmação com modelo real ainda impedida pela autenticação do navegador. Ação mínima: acessar este Preview com conta Vercel autorizada e enviar os três casos descritos. Não fornecer a chave OpenAI no chat. Se houver novo erro, usar somente código e requestId para diagnóstico.
