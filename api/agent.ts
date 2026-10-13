@@ -1,5 +1,21 @@
-import { OpenAIProvider } from '../server/openai';
-import { todayBR } from '../shared/contracts';
+// Serverless entrypoint self-contained: avoid runtime ESM resolution of extensionless local imports.
+import { z } from 'zod';
+
+const todayBR=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const transactionArgs=z.object({type:z.enum(['receita','despesa']),amount:z.number().finite().positive().max(1000000).refine(v=>Math.abs(v*100-Math.round(v*100))<0.00001),description:z.string().trim().min(1).max(120),date:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/).refine(v=>{const d=new Date(v+'T12:00:00Z');return !isNaN(d.getTime())&&d.toISOString().slice(0,10)===v})}).strict();
+const toolCall=z.discriminatedUnion('name',[
+ z.object({name:z.literal('consultar_saldo'),arguments:z.object({}).strict()}).strict(),
+ z.object({name:z.literal('registrar_transacao'),arguments:transactionArgs}).strict(),
+ z.object({name:z.literal('listar_transacoes'),arguments:z.object({type:z.enum(['receita','despesa']).optional(),limit:z.number().int().min(1).max(100).default(20)}).strict()}).strict()
+]);
+const decisionSchema=z.object({intent:z.string().max(100),call:toolCall.optional(),clarification:z.string().max(500).optional()}).strict().refine(v=>Boolean(v.call)!==Boolean(v.clarification));
+
+async function interpret(message:string,today:string,key:string,model:string){
+ const response=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',signal:AbortSignal.timeout(20000),headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model,max_completion_tokens:350,response_format:{type:'json_object'},messages:[{role:'system',content:`Interprete uma única operação financeira. Hoje: ${today}. Retorne JSON com intent e call OU clarification. call é {name,arguments}. Ferramentas: consultar_saldo ({}), listar_transacoes ({limit:20,type opcional receita/despesa}), registrar_transacao ({type:receita/despesa,amount:número positivo com 2 casas,description:texto,date:AAAA-MM-DD}). Peça esclarecimento se faltar valor, descrição ou data; não assuma data. Nunca invente sucesso. Nunca forneça IDs de usuário/workspace, SQL, raciocínio privado ou ferramentas adicionais.`},{role:'user',content:message}]})});
+ if(!response.ok) throw new Error('Provedor indisponível');
+ const data=await response.json() as {choices?:{message?:{content?:string}}[]};
+ return decisionSchema.parse(JSON.parse(data.choices?.[0]?.message?.content||'{}'));
+}
 
 // Limite simples por instância: útil contra acidentes, NÃO é quota global em serverless.
 const requests = new Map<string, number[]>();
@@ -22,7 +38,7 @@ export default async function handler(req:Request,res:Response) {
  recent.push(now);requests.set(ip,recent);
  if(requests.size>1000) requests.clear();
  try {
-  const decision=await new OpenAIProvider(key,model,true).interpret(message,todayBR());
+  const decision=await interpret(message,todayBR(),key,model);
   return res.status(200).json({decision});
  } catch {
   return res.status(502).json({error:'INTERPRETATION_FAILED'});
