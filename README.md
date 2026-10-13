@@ -1,58 +1,75 @@
-# Pulse AI Lab
+# Pulse AI Lab V2
 
-Laboratório isolado do agente financeiro do Pulse. React + TypeScript + Vite, motor modular, adaptador Cloudflare simulado e Financial Core em memória. **Não acessa Supabase nem dados financeiros reais.**
+Laboratório privado de agente financeiro conversacional. **Tudo é fictício:** não acessa Supabase, contas bancárias ou o Pulse Finance de produção.
 
-## Executar
+## Começar
 
-Node.js 22.12+ ou 24. `npm ci`, depois `npm run dev`.
+Node.js 24, `npm ci`, depois `npm run dev`. Interface em http://127.0.0.1:5173; API local em http://127.0.0.1:3001. A simulação funciona imediatamente, sem chave e sem tokens.
 
-- Interface: http://127.0.0.1:5173
-- API de desenvolvimento: http://127.0.0.1:3001/api/health
-- `npm test`: contratos, core, orquestrador e segurança da API.
-- `npm run build`: TypeScript estrito e build de produção.
-- `npx playwright install chromium` e `npm run test:e2e`: interface desktop/mobile.
-- `npm run preview`: build estático local.
+Experimente, na mesma sessão:
 
-## Usar o laboratório
+1. `Gastei 120 reais no supermercado hoje.`
+2. `Gastei 80 reais no restaurante.`
+3. `Gastei 50 reais com transporte.`
+4. `Cara, onde estou gastando mais dinheiro? E o que você acha que eu deveria fazer?`
+5. `Quanto gastei este mês?` → `E no mês passado?` → `Qual foi a diferença?`
+6. `Se continuar nesse ritmo, quanto gastarei até o fim do mês?`
+7. `Prefiro respostas curtas e mais direto.`
+8. `Quero guardar 1000 para férias.`
 
-Saldo inicial fictício: R$ 2.500. Experimente:
+“Limpar conversa” mantém os lançamentos; “Nova sessão” reinicia dados e contexto. Mensagens repetidas não duplicam automaticamente uma escrita: o Pulse pede confirmação para um segundo lançamento igual.
 
-- `Qual meu saldo?`
-- `Gastei 50 em mercado hoje`
-- `Recebi R$ 1.234,56 de salário 2026-10-08`
-- `Listar transações` / `Listar despesas` / `Listar receitas`
+Uma data omitida só é reutilizada se uma transação anterior nesta sessão explicitou **o dia de hoje**, sem outro dia na mensagem atual. A resposta mostra a data utilizada. Em sessão nova, uma data ausente exige esclarecimento. “Ontem” e períodos relativos usam America/Sao_Paulo.
 
-Valores com vírgula e milhares no padrão brasileiro são aceitos. Informe `hoje` ou uma data ISO; datas ausentes pedem esclarecimento. Apenas uma operação por mensagem. Crédito, parcelas, transferências, estornos e comandos condicionais pedem esclarecimento.
+## Dois modos, duas sessões
 
-Clique em uma execução do histórico para inspecioná-la. Ative a falha simulada para verificar que o saldo não muda e o agente não confirma sucesso. “Nova sessão” limpa tudo com confirmação.
+- **Simulação:** provider determinístico, core local e sessionStorage por aba. Sem consumo. Linguagem fora dos padrões pode exigir esclarecimento.
+- **IA real:** OpenAI com function/tool calling oficial; orquestração, validação e core no backend. Frontend envia apenas mensagem, requestId e token opaco. Variáveis `OPENAI_API_KEY`, `OPENAI_MODEL` e `ENABLE_REAL_AI=true` apenas no servidor.
 
-As transações são salvas em `sessionStorage` por aba, com schema validado ao carregar; recarregar mantém os valores, mas o histórico do chat é apenas em memória. Não use dados reais. O armazenamento indisponível não impede o uso em memória. Sem dados compartilhados entre usuários no servidor.
+As sessões dos modos são separadas para impedir que um saldo local alterado pelo navegador seja tratado como verificado pelo servidor. O modo real não importa automaticamente dados da simulação local. Não cole chaves no chat nem use variáveis `VITE_` para segredos.
 
-## Estrutura
+## Ferramentas
 
-- `src/`: interface, estilos e estado da sessão fictícia.
-- `shared/contracts.ts`: schemas Zod e contratos tipados.
-- `shared/simulation.ts`: provider determinístico, identificado como simulação.
-- `shared/orchestrator.ts`: interpretação → validação → execução → confirmação.
-- `shared/core.ts`: regras financeiras em centavos e adaptador simulado com idempotência.
-- `server/openai.ts`: provider real preparado, apenas servidor, validando a resposta do modelo.
-- `server/`: Express local; `/api/agent` bloqueado por padrão.
-- `api/`: endpoints serverless para Vercel, também com IA real bloqueada.
-- `docs/CLOUDFLARE_CONTRACT.md`: contrato para integração futura.
-- `PULSE_AI_LAB_REPORT.md`: resultados reais, deploy e limitações.
+| Ferramenta | Função |
+|---|---|
+| consultar_saldo | Saldo consolidado fictício |
+| registrar_transacao | Receita/despesa explícita validada |
+| listar_transacoes | Lista com período e filtro opcional |
+| resumir_financas | Receitas, despesas, resultado, categorias e percentuais |
+| comparar_periodos | A, B, diferença e variação percentual (null se B é zero) |
+| consultar_gastos_categoria | Total, quantidade e registros de uma categoria |
+| projetar_despesas | Projeção determinística, com premissas e aviso de amostra |
+| atualizar_preferencias | Estilo e extensão explicitamente pedidos |
+| definir_objetivo | Objetivo fictício com valor informado pelo usuário |
 
-## IA real e segurança
+Centavos inteiros nos cálculos; entradas em reais com até duas casas. Novos lançamentos reconhecidos: supermercado/mercado/restaurante/almoço/jantar → Alimentação; transporte/gasolina/combustível/uber/ônibus → Transporte; bar/cinema/lazer → Lazer. Demais registros ficam sem categoria. Sem recategorização retroativa.
 
-**Modo real não está ativo e não consome tokens.** O menu de modo explica o bloqueio. A classe `OpenAIProvider` é um conector preparado, não uma integração homologada. Nenhuma chave foi configurada ou chamada de modelo realizada.
+O Inspector exibe chamadas em ordem, argumentos validados, resultados, duração, falhas, resposta final e tokens/modelo quando disponíveis. Não exibe credenciais, prompts privados ou raciocínio interno.
 
-Antes de habilitar: autorização de consumo, credenciais exclusivamente server-side, autenticação de sessão verificada e autorização por usuário, rate limiting e quotas. Depois conectar o provider ao orquestrador no backend e testar com ferramentas ainda simuladas. A flag `ENABLE_REAL_AI` isolada não libera o endpoint: ele continua retornando 403.
+## Verificar
 
-IDs de identidade devem vir da sessão autenticada e nunca do modelo. Schemas estritos rejeitam campos extras e ferramentas desconhecidas. Não há SQL arbitrário, logs de mensagens ou analytics. Confirmações são produzidas somente depois do retorno bem-sucedido do executor. A simulação no browser não constitui barreira de segurança para finanças reais: ao integrar ferramentas reais, mover toda execução para servidor/Worker.
+- `npm test`: V1, V2, autorização, contexto, cálculos, erros e backend com mocks OpenAI.
+- `npm run build`: TypeScript, bundle autocontido da nova função Vercel e build Vite.
+- `npx playwright install chromium` e `npm run test:e2e`: desktop/mobile.
+- Em ambientes com Chromium empacotado: `LAB_BUNDLED_CHROMIUM=true LAB_CHROMIUM_PATH=/caminho/chromium npm run test:e2e`.
+- `npm run preview`: frontend de produção local; para API, usar `npm run dev` ou Vercel.
 
-## Vercel
+`api/conversation.js` é **gerado** de `server/v2/handler.ts` por `npm run build:api` e versionado para garantir descoberta da rota e evitar a regressão de imports ESM na Vercel. Edite os módulos fonte, regenere e versione o bundle. A função não depende de Vite no runtime.
 
-`vercel.json` configura o build, headers de segurança e funções em `api/`. Configure **Vercel Authentication para todos os deployments antes de publicar**. Não disponibilize um deployment sem proteção. Nenhum segredo deve usar prefixo `VITE_`.
+## Limites e confiança
 
-Não foi alterado `pulse-finance`, criado Worker de produção, conectado Supabase ou contratado serviço pago.
+No modo real, contexto e estado fictício são criptografados/autenticados com AES-GCM em token de sessão com validade de seis horas, usando chave derivada no servidor com separação de domínio. O segredo do provedor não sai do servidor. Alterar a chave invalida sessões anteriores. Identidade de sessão é gerada pelo servidor, não pelo modelo.
 
-Neste ambiente, o download padrão de navegador foi bloqueado. Os testes também suportam Chromium empacotado: `LAB_BUNDLED_CHROMIUM=true npm run test:e2e`. Se a extração do pacote for incompatível com o sistema, informe um executável já extraído com `LAB_CHROMIUM_PATH=/caminho/chromium` junto à flag anterior.
+O servidor não aceita histórico, estado, resultados de ferramentas ou IDs de usuário/workspace enviados sem assinatura. O histórico assinado fornece referências; **somente a mensagem atual** pode autorizar escrita. Perguntas hipotéticas, instruções no histórico e tool calls com valor/data/descrição diferentes do pedido não autorizam registros. Escritas não suportadas exigem esclarecimento.
+
+Limites por interação: quatro chamadas de modelo, oito ferramentas, 35 segundos, contexto textual de até 42 mil caracteres e limite de consumo medido de 14 mil tokens. Saída limitada a 700 tokens por chamada. Sem retries automáticos. Guarda de seis requisições/minuto por instância, que não é uma quota global.
+
+Máximo de 300 transações fictícias; dez mensagens de contexto; quatro requestIds recentes para replay. Não é uma infraestrutura de produção: tokens podem ser copiados/retrocedidos pelo proprietário; chamadas paralelas e snapshots antigos não têm coordenação global. Nenhum dado real ou efeito financeiro externo deve ser conectado a esse mecanismo. Não há memória permanente, bancos novos ou filas.
+
+Os números e a confirmação financeira são renderizados a partir de resultados determinísticos. Texto do modelo com números financeiros é descartado; recomendações de categoria usam totais calculados e avisam sobre amostra limitada. Opiniões qualitativas não são consultoria financeira nem um diagnóstico psicológico.
+
+## Publicação
+
+Manter Vercel Authentication ativa para **todos** os deployments. Projeto existente `pulse-ai-lab`; publicar apenas Preview para esta missão. Não fazer merge automático na main. Em desenvolvimento, Express só escuta 127.0.0.1; não exponha o servidor local publicamente.
+
+Confira `docs/PULSE_AI_V2_REPORT.md` para arquitetura, testes e limitações da homologação com modelo real. A API V1 `/api/agent` foi preservada por compatibilidade; a interface V2 usa `/api/conversation`.
