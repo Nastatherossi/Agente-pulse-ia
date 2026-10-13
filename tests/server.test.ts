@@ -1,0 +1,5 @@
+import {it,expect} from 'vitest';
+import {app} from '../server/app';
+import {OpenAIProvider} from '../server/openai';
+it('API bloqueia IA real e retorna saúde sem segredos',async()=>{const server=app.listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));try{const address=server.address() as {port:number};const url=`http://127.0.0.1:${address.port}`;const health=await fetch(url+'/api/health');expect(await health.json()).toEqual({status:'ok',mode:'simulation',realAIEnabled:false});const response=await fetch(url+'/api/agent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'gastei 50'})});expect(response.status).toBe(403);}finally{await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));}});
+it('provider real exige autorização antes de consumir tokens',async()=>{const provider=new OpenAIProvider('fake','fake',false);await expect(provider.interpret('x','2026-10-08')).rejects.toThrow('não autorizada');});
