@@ -58,3 +58,8 @@ it('V2 handler integra OpenAI mock, registro, token, consulta e retry idempotent
  await handler({method:'POST',body:{message:'Qual meu saldo?',requestId:crypto.randomUUID(),sessionToken:result.sessionToken},socket:{remoteAddress:ip}},res);expect(result.trace.message).toContain('2.452,10');expect(fetch).toHaveBeenCalledTimes(4);
  const sent=fetch.mock.calls[2][1] as RequestInit;const payload=JSON.parse(sent.body as string);expect(payload.messages.some((m:any)=>m.role==='assistant'&&m.content.includes('2.452,10'))).toBe(true);expect(payload.store).toBe(false);
 });
+
+it('modelo sem ferramenta não pode confirmar escrita em sua resposta final',async()=>{const p=provider([{content:'Despesa registrada com sucesso.'}]);const r=await runConversation(p,undefined,'Oi',crypto.randomUUID(),today);expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.message).not.toContain('registrada');});
+it('modelo não afirma crescimento de gastos sem resultado calculado',()=>{expect(renderAnswer([],'Seus gastos aumentaram neste mês.',createSession())).not.toContain('aumentaram');});
+
+it.each([['supermercado','alimentacao','Alimentação'],['restaurante','ALIMENTAÇÃO','Alimentação'],['presente','sem categoria',undefined]])('normaliza categoria válida para %s sem inventar classificação',async(description,category,expected)=>{const p=provider([{calls:[tc('registrar_transacao',{type:'despesa',amount:10,description,date:today,category})]},{content:'Podemos conversar sobre o próximo passo.'}]);const r=await runConversation(p,undefined,`Gastei 10 com ${description} hoje`,crypto.randomUUID(),today);expect(r.trace.status).toBe('success');expect(r.session.state.transactions[0].category).toBe(expected);});

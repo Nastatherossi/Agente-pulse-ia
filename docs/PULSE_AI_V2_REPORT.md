@@ -30,7 +30,7 @@ Texto numérico do modelo não é copiado para a resposta financeira. O renderer
 
 ## Testes e resultados reais
 
-- `npm test`: **84 testes passaram**, incluindo os existentes e o novo arquivo V2.
+- `npm test`: **89 testes passaram**, incluindo os existentes e o novo arquivo V2.
 - `npm run build`: **TypeScript e build Vite aprovados**, com geração do endpoint autocontido.
 - Importação direta Node do bundle: handler carregou e GET retornou 405, sem erro de imports.
 - Playwright: **6 testes passaram**, três histórias em desktop 1440×1000 e mobile 390×844.

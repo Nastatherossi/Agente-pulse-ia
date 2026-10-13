@@ -28,7 +28,7 @@ export function renderAnswer(steps:Step[],draft:string,session:Session):string {
  const expenseSummary=analysis?.result as {categories?:{category:string;expenseCents:number}[];expenseCents?:number}|undefined;
  let advice='';
  if(expenseSummary?.expenseCents){const top=expenseSummary.categories?.find(c=>c.expenseCents>0);if(top)advice=session.state.preferences.detail==='curto'?`${top.category} lidera estes registros. Vale separar o essencial do ajustável. A amostra é pequena; sem renda e necessidades, não dá para julgar seu gasto.`:`${top.category} concentra a maior parcela destes registros. Antes de cortar gastos, vale separar o essencial do que você quer ajustar. Qual é sua prioridade financeira? Não dá para dizer que você gasta demais sem conhecer sua renda e suas necessidades.`;}
- const sanitized=/\d|R\$|por cento|saldo|despesas (aument|cresc|diminu)|voce (gastou|recebeu|tem)|registrei/i.test(draft)?'':draft.trim().slice(0,900);
+ const sanitized=/\d|R\$|por cento|porcento|reais|centavos|saldo|(despesas|gastos) (aument|cresc|diminu)|voce (gastou|recebeu|tem)|registrei|registrad[oa]|registramos|lancei|salvei|recorded|registered|pagamento (efetuado|concluido)/i.test(normalize(draft))?'':draft.trim().slice(0,900);
  if(!success.length)return sanitized||'Preciso de mais contexto para responder com segurança. O que você quer consultar ou registrar?';
  // Recommendations are grounded in computed summary; LLM wording remains useful for general conversation.
  return [facts,advice||(session.state.preferences.style==='direto'?'':sanitized)].filter(Boolean).join('\n\n');
@@ -54,7 +54,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
   try {
    if(steps.length>=limits.tools)throw new Error('TOOL_LIMIT');
    const call=validateCall(raw);
-   if(call.name==='registrar_transacao'){const expected=explicitTransaction(message,today,session);if(expected?.category&&!call.arguments.category)call.arguments.category=expected.category;}
+   if(call.name==='registrar_transacao'){const expected=explicitTransaction(message,today,session);const label=call.arguments.category as string|undefined;if(expected?.category&&(!label||normalize(label)===normalize(expected.category)))call.arguments.category=expected.category;else if(!expected?.category&&label&&normalize(label)==='sem categoria')delete call.arguments.category;}
    step.arguments=call.arguments;
    if(!authorizeWrite(call,message,today,session)){step.status='blocked';throw new Error('WRITE_NOT_AUTHORIZED');}
    const signature=JSON.stringify({name:call.name,arguments:call.arguments});

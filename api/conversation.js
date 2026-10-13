@@ -243,7 +243,7 @@ function renderAnswer(steps, draft, session) {
     const top = expenseSummary.categories?.find((c) => c.expenseCents > 0);
     if (top) advice = session.state.preferences.detail === "curto" ? `${top.category} lidera estes registros. Vale separar o essencial do ajust\xE1vel. A amostra \xE9 pequena; sem renda e necessidades, n\xE3o d\xE1 para julgar seu gasto.` : `${top.category} concentra a maior parcela destes registros. Antes de cortar gastos, vale separar o essencial do que voc\xEA quer ajustar. Qual \xE9 sua prioridade financeira? N\xE3o d\xE1 para dizer que voc\xEA gasta demais sem conhecer sua renda e suas necessidades.`;
   }
-  const sanitized = /\d|R\$|por cento|saldo|despesas (aument|cresc|diminu)|voce (gastou|recebeu|tem)|registrei/i.test(draft) ? "" : draft.trim().slice(0, 900);
+  const sanitized = /\d|R\$|por cento|porcento|reais|centavos|saldo|(despesas|gastos) (aument|cresc|diminu)|voce (gastou|recebeu|tem)|registrei|registrad[oa]|registramos|lancei|salvei|recorded|registered|pagamento (efetuado|concluido)/i.test(normalize(draft)) ? "" : draft.trim().slice(0, 900);
   if (!success.length) return sanitized || "Preciso de mais contexto para responder com seguran\xE7a. O que voc\xEA quer consultar ou registrar?";
   return [facts, advice || (session.state.preferences.style === "direto" ? "" : sanitized)].filter(Boolean).join("\n\n");
 }
@@ -278,7 +278,9 @@ async function runConversation(provider, sessionInput, message, requestId, today
       const call = validateCall(raw);
       if (call.name === "registrar_transacao") {
         const expected = explicitTransaction(message, today, session);
-        if (expected?.category && !call.arguments.category) call.arguments.category = expected.category;
+        const label = call.arguments.category;
+        if (expected?.category && (!label || normalize(label) === normalize(expected.category))) call.arguments.category = expected.category;
+        else if (!expected?.category && label && normalize(label) === "sem categoria") delete call.arguments.category;
       }
       step.arguments = call.arguments;
       if (!authorizeWrite(call, message, today, session)) {
