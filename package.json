@@ -5,10 +5,11 @@
   "main": "index.js",
   "scripts": {
     "dev": "concurrently -k \"tsx watch server/dev.ts\" \"vite\"",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && npm run build:api && vite build",
     "test": "vitest run",
     "preview": "vite preview --host 127.0.0.1",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "build:api": "node scripts/build-conversation.mjs"
   },
   "repository": {
     "type": "git",
@@ -38,6 +39,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "concurrently": "^10.0.6",
+    "esbuild": "^0.28.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
