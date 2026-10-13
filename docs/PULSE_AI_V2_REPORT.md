@@ -71,6 +71,12 @@ No turno anterior, o navegador dedicado não conseguiu autenticar no fluxo Googl
 
 ## Publicação e próximos passos
 
-Preview e PR serão preenchidos após build remoto. Não publicar em main automaticamente.
+PR de desenvolvimento: https://github.com/Nastatherossi/Agente-pulse-ia/pull/5 — base `feat/real-ai-private-lab`, sem merge automático.
+
+Preview do código final testado: https://pulse-ai-humqm8moi-matheusnastaro5-6769s-projects.vercel.app/
+
+Commit de código: `d56a5cb6818bf6c24b438f5b98ec675f0c376964`. Deployment `dpl_95eZM6a7dqYyGTQRxA8jZaQ69J1c`, source git, branch V2, ambiente Preview (target null): **READY**, build remoto em aproximadamente 32 segundos, sem aliasError. Projeto existente continua com Vercel Authentication enabled e deploymentType=all. A requisição anônima a `/api/conversation` retornou 302 com corpo “Protected by Vercel Authentication”. Não foi feito bypass, criado projeto novo ou publicado em produção.
+
+Na rodada final, **89 testes de backend e 6 testes de navegador passaram** depois dos guardas adicionais de confirmação sem ferramenta, alegações não sustentadas e normalização de categorias. O bundle final também carregou diretamente em Node e rejeitou GET com 405. A confirmação do funcionamento remoto com OpenAI real permanece pendente por ausência de sessão autenticada de teste; o acesso anônimo bloqueado não constitui homologação do handler real.
 
 Próximo passo: validar na sessão autorizada o cenário principal, as referências mensais e projeção com o modelo configurado; medir custo/latência com poucos exemplos e ajustar limites se necessário. Depois, criar staging separado para adaptador Worker/Core com autorização e idempotência duráveis antes de considerar qualquer dado real.
