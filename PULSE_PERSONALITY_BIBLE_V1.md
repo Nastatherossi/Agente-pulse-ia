@@ -98,7 +98,32 @@ O loop V2, cálculos em centavos, contexto limitado, categorias, comparações, 
 
 ## Evidências de validação
 
-- 118 testes unitários/backend: V1/V2 preservadas e 29 testes Personality, incluindo os 14 cenários obrigatórios, expiração, falha, idempotência, alteração de todos os campos, metas, ambiguidade, preferências, limpeza e tentativa de bypass.
+- 118 testes unitários/backend passaram: V1/V2 preservadas e 29 testes Personality, incluindo os 14 cenários obrigatórios, expiração, falha, idempotência, alteração de todos os campos, metas, ambiguidade, preferências, limpeza e tentativa de bypass.
 - TypeScript, geração da função serverless e build de produção passaram.
-- Oito testes Playwright passaram em desktop/mobile (rodada estável de 1,3 minuto), incluindo os seis fluxos V2 anteriores e dois de preferências/correção/recarga/confirmação/limpeza. A primeira rodada teve um timeout desktop durante recarga de desenvolvimento causada por edição de código, sem falha reproduzida na rodada estável. Preview será registrado após publicação.
+- Oito testes Playwright passaram em desktop/mobile (rodada estável de 1,3 minuto), incluindo os seis fluxos V2 anteriores e dois de preferências/correção/recarga/confirmação/limpeza. A primeira rodada teve um timeout desktop durante recarga de desenvolvimento causada por edição de código, sem falha reproduzida na rodada estável. Preview publicado e READY, detalhes abaixo.
 - OpenAI real: não homologada nesta rodada. Testes de provider/handler usam mocks; fluxos determinísticos são identificados como tal. Validação ao vivo depende de sessão autenticada no Preview; não será criado link de bypass nem removida proteção para viabilizá-la.
+
+
+## Entrega e Preview verificado
+
+- PR: https://github.com/Nastatherossi/Agente-pulse-ia/pull/6 (base `feat/pulse-ai-v2`, sem merge).
+- Preview: https://pulse-ai-b4xtv4xam-matheusnastaro5-6769s-projects.vercel.app/
+- Deployment: `dpl_3s75dgP1peXDNe9oquHGD9Qo2g2P`, estado READY, target Preview, fonte GitHub.
+- Código testado: `bdb1119c671ea848357f9683686c76fd5ce27949`; árvore local e remota idêntica `09f52d1db094cad6501f3ad065e8ed8a062d6c38` antes deste complemento documental.
+- Proteção verificada após publicação: projeto existente com `ssoProtection.enabled=true`, `deploymentType=all`. GET anônimo da página e `/api/conversation` retornou HTTP 302 e `Protected by Vercel Authentication`, redirecionando ao login.
+- Comandos aprovados: `npm test -- --maxWorkers=1` (118/118); `npm run build`; `LAB_BUNDLED_CHROMIUM=true LAB_CHROMIUM_PATH=/tmp/pulse-v2-browser/chromium npm run test:e2e -- --workers=1` (8/8); `git diff --check`.
+- Smoke test do bundle gerado: importação Node funciona e GET retorna 405. Inspeção do bundle cliente confirmou ausência do prompt de sistema.
+- Revisão visual mobile: controles existentes respeitados, layout sem transbordamento horizontal. Testes também verificam desktop e isolamento dos modos financeiros.
+- Nenhuma chamada paga à OpenAI foi feita. O teste do handler real usa fetch mock, incluindo confirmação com token assinado e repetição sem nova execução; isso NÃO é homologação com OpenAI ao vivo.
+- Pendência de homologação: acessar este Preview com sessão Vercel autenticada e fazer testes pontuais de interpretação real. Não é necessária nova infraestrutura ou remoção de autenticação. Nesta execução não havia sessão autenticada disponível; os acessos anônimos permanecem corretamente bloqueados.
+
+Arquivos alterados/criados nesta entrega:
+
+| Área | Arquivos |
+| --- | --- |
+| Política e orquestração | `shared/v2/agent.ts`, `shared/v2/personality.ts`, `shared/v2/policy.ts` |
+| Contratos e core fictício | `shared/v2/contracts.ts`, `shared/v2/finance.ts`, `shared/v2/simulation.ts` |
+| Servidor e bundle gerado | `server/v2/personality-prompt.ts`, `server/v2/openai.ts`, `server/v2/handler.ts`, `api/conversation.js` |
+| Interface preservada | `src/main.tsx`, `src/InspectorV2.tsx`, `src/style.css` |
+| Testes | `tests/personality.test.ts`, `tests/v2.test.ts`, `tests/e2e/lab.spec.ts` |
+| Documentação | `PULSE_PERSONALITY_BIBLE_V1.md`, `README.md` |
