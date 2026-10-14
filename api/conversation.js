@@ -331,6 +331,7 @@ function retrieveMemories(session, message, intent) {
   return selected;
 }
 var memoryContext = (records) => records.map(({ id, topic, content, status, confidence }) => ({ id, topic, content, status, confidence }));
+var statusLabel = { exploring: "em explora\xE7\xE3o", planned: "plano", declared_decision: "decis\xE3o declarada", abandoned: "abandonado", outdated: "desatualizado" };
 function applyMemoryAction(session, raw) {
   const action = memoryActionSchema.parse(raw);
   pruneMemories(session);
@@ -339,7 +340,7 @@ function applyMemoryAction(session, raw) {
     session.narrative.noticeAccepted = true;
     return action.enabled ? "Mem\xF3ria autom\xE1tica habilitada para objetivos e inten\xE7\xF5es dos temas suportados, sem salvar detalhes \xEDntimos. Ela vale s\xF3 nesta sess\xE3o do laborat\xF3rio; no modo real, o token expira em at\xE9 seis horas. Voc\xEA pode consultar e excluir mem\xF3rias; c\xF3pias antigas de tokens n\xE3o s\xE3o revogadas." : "Mem\xF3ria autom\xE1tica desativada. As mem\xF3rias existentes continuam dispon\xEDveis; voc\xEA pode exclu\xED-las.";
   }
-  if (action.kind === "list") return session.narrative.records.length ? "Mem\xF3rias armazenadas:\n" + session.narrative.records.map((r) => `${r.content} [${r.status}]`).join("\n") : "N\xE3o h\xE1 mem\xF3rias narrativas armazenadas.";
+  if (action.kind === "list") return session.narrative.records.length ? "Mem\xF3rias armazenadas:\n" + session.narrative.records.map((r) => `${r.content} (${statusLabel[r.status]}).`).join("\n") : "N\xE3o h\xE1 mem\xF3rias narrativas armazenadas.";
   if (action.kind === "clear") {
     session.narrative.records = [];
     session.narrative.tombstones = [...memoryTopics];
@@ -373,7 +374,7 @@ function memoryCommand(session, message) {
   const topic = topicOf(message);
   if (/lembra|retomar/.test(t) && topic && !/^lembre/.test(t)) {
     const record = session.narrative.records.find((r) => r.topic === topic && r.ownerId === session.id && !session.narrative.tombstones.includes(topic));
-    return record ? `${record.content} [${record.status}]` : "N\xE3o h\xE1 mem\xF3ria armazenada sobre esse assunto.";
+    return record ? `${record.content} ${record.status === "abandoned" ? "Esse assunto est\xE1 marcado como abandonado." : record.status === "outdated" ? "Essa informa\xE7\xE3o est\xE1 desatualizada." : "Podemos retomar a partir da\xED."}` : "N\xE3o h\xE1 mem\xF3ria armazenada sobre esse assunto.";
   }
   if (/esquece|esqueca|pode esquecer/.test(t) && topic) {
     const records = session.narrative.records.filter((r) => r.topic === topic && r.ownerId === session.id);

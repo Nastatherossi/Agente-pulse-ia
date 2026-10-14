@@ -63,10 +63,11 @@ export function retrieveMemories(session:Session,message:string,intent:string){
  return selected;
 }
 export const memoryContext=(records:MemoryRecord[])=>records.map(({id,topic,content,status,confidence})=>({id,topic,content,status,confidence}));
+const statusLabel:Record<MemoryRecord['status'],string>={exploring:'em exploração',planned:'plano',declared_decision:'decisão declarada',abandoned:'abandonado',outdated:'desatualizado'};
 export function applyMemoryAction(session:Session,raw:MemoryAction){
  const action=memoryActionSchema.parse(raw);pruneMemories(session);
  if(action.kind==='enable'){session.narrative.enabled=action.enabled;session.narrative.noticeAccepted=true;return action.enabled?'Memória automática habilitada para objetivos e intenções dos temas suportados, sem salvar detalhes íntimos. Ela vale só nesta sessão do laboratório; no modo real, o token expira em até seis horas. Você pode consultar e excluir memórias; cópias antigas de tokens não são revogadas.':'Memória automática desativada. As memórias existentes continuam disponíveis; você pode excluí-las.';}
- if(action.kind==='list')return session.narrative.records.length?'Memórias armazenadas:\n'+session.narrative.records.map(r=>`${r.content} [${r.status}]`).join('\n'):'Não há memórias narrativas armazenadas.';
+ if(action.kind==='list')return session.narrative.records.length?'Memórias armazenadas:\n'+session.narrative.records.map(r=>`${r.content} (${statusLabel[r.status]}).`).join('\n'):'Não há memórias narrativas armazenadas.';
  if(action.kind==='clear'){session.narrative.records=[];session.narrative.tombstones=[...memoryTopics];session.narrative.style.signals=[];clearContext(session);return 'Memórias narrativas apagadas. Preferências e dados financeiros preservados.';}
  const record=session.narrative.records.find(r=>r.id===action.id&&r.ownerId===session.id);if(!record)throw new Error('MEMORY_NOT_FOUND');
  if(action.kind==='delete'){session.narrative.records=session.narrative.records.filter(r=>r.id!==record.id);session.narrative.tombstones=[...new Set([...session.narrative.tombstones,record.topic])];clearContext(session);return 'Memória excluída da sessão atual.';}
@@ -80,7 +81,7 @@ export function memoryCommand(session:Session,message:string):string|undefined {
  if(/o que.*lembra.*mim|consultar.*memorias/.test(t))return applyMemoryAction(session,{kind:'list'});
  if(/^(limp|apag).*memorias/.test(t))return applyMemoryAction(session,{kind:'clear'});
  const topic=topicOf(message);
- if(/lembra|retomar/.test(t)&&topic&&!/^lembre/.test(t)){const record=session.narrative.records.find(r=>r.topic===topic&&r.ownerId===session.id&&!session.narrative.tombstones.includes(topic));return record?`${record.content} [${record.status}]`:'Não há memória armazenada sobre esse assunto.';}
+ if(/lembra|retomar/.test(t)&&topic&&!/^lembre/.test(t)){const record=session.narrative.records.find(r=>r.topic===topic&&r.ownerId===session.id&&!session.narrative.tombstones.includes(topic));return record?`${record.content} ${record.status==='abandoned'?'Esse assunto está marcado como abandonado.':record.status==='outdated'?'Essa informação está desatualizada.':'Podemos retomar a partir daí.'}`:'Não há memória armazenada sobre esse assunto.';}
  if(/esquece|esqueca|pode esquecer/.test(t)&&topic){const records=session.narrative.records.filter(r=>r.topic===topic&&r.ownerId===session.id);if(records.length!==1)return 'Não encontrei uma memória única sobre esse assunto.';return applyMemoryAction(session,{kind:'delete',id:records[0].id});}
  if(/^lembre (disso|que|da)/.test(t)&&topic&&!unsafe(message)){
   session.narrative.tombstones=session.narrative.tombstones.filter(v=>v!==topic);const enabled=session.narrative.enabled,accepted=session.narrative.noticeAccepted;session.narrative.enabled=true;session.narrative.noticeAccepted=true;observeMemory(session,message);session.narrative.enabled=enabled;session.narrative.noticeAccepted=accepted;
