@@ -10,7 +10,7 @@ export function classifyIntent(m:string):Intent {
  if(/sem (perguntar|confirmacao)|nao.*pedir confirmacao/.test(t)||requestedPreferences(m,{style:'neutro',detail:'curto',proactivity:'discreto',explanation:'minima',examples:false})||/preferencias/.test(t))return 'preferencias';
  if(/corrig|corr[eij]|alter|exclu|apagu|apaga|remov|pera[, ]|aquele .* foi|nao era|eram? r?\$|mudar.*meta/.test(t))return 'alteracao';
  if(/o que (voce )?acha|opiniao|orient|ajud|deveria|gastando muito|vale a pena/.test(t))return 'orientacao';
- if(/^(eu )?(gastei|paguei|recebi|ganhei|registra|registre|registrar)\b/.test(t)&&!/[?]|\b(se|talvez|pensando|comprasse)\b/.test(t))return 'execucao';
+ if(/^(eu )?(gastei|paguei|comprei|recebi|ganhei|registra|registre|registrar)\b/.test(t)&&!/[?]|\b(se|talvez|pensando|comprasse)\b/.test(t))return 'execucao';
  if(/[?]|saldo|listar|extrato|quanto|gastos|financas|categoria|projec|ritmo|compar/.test(t))return 'consulta';
  return 'conversa';
 }

@@ -22,3 +22,19 @@ test('IA real: API → simulador do servidor → Inspector (mock, zero OpenAI)',
  await send(page,'Aquele celular foi R$ 1.800, não R$ 1.900.');await expect(page.getByTestId('balance')).toHaveText('R$ 600,00');await expect(page.locator('.inspector')).toContainText('pending');await page.reload();await expect(page.getByTestId('balance')).toHaveText('R$ 600,00');await page.locator('.profile-note summary').click();await expect(page.getByLabel('Proatividade',{exact:true})).toHaveValue('proativo');await expect(page.getByLabel('Estilo',{exact:true})).toHaveValue('formal');await expect(page.getByLabel('Explicações',{exact:true})).toHaveValue('completa');await expect(page.getByLabel('Exemplos',{exact:true})).toBeChecked();
  await send(page,'Sim.');await expect(page.getByTestId('balance')).toHaveText('R$ 700,00');await expect(page.locator('.inspector')).toContainText('confirmed');await send(page,'Sim.');await expect(page.getByTestId('balance')).toHaveText('R$ 700,00');await send(page,'Exclui aquele celular.');await send(page,'Limpa nossa conversa.');await expect(page.locator('.message')).toHaveCount(1);await send(page,'Sim.');await expect(page.getByTestId('balance')).toHaveText('R$ 700,00');await page.screenshot({path:`test-results/personality-${test.info().project.name}.png`,fullPage:true});expect(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth)).toBe(false);
  });
+
+test('regressão despesa real mock: categoria outras, confirmação e fallback visível',async({page})=>{
+ let session=createSession();
+ await page.route('**/api/conversation',async route=>{
+  const request=route.request().postDataJSON();let calls=0;
+  const provider={mode:'real' as const,next:async()=>request.message==='Gastei R$ 1.900 num celular.'&&calls++===0?{calls:[{id:'model-call',name:'registrar_transacao',arguments:{type:'despesa',amount:1900,description:'celular',date:today(),category:'outras'}}]}:{content:'Qual o valor e a descrição?'}};
+  const output=await runConversation(provider,session,request.message,request.requestId,today());session=output.session;
+  await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({trace:output.trace,state:session.state,sessionToken:'opaque-mock-token'})});
+ });
+ await page.goto('/');await page.getByRole('button',{name:/Modo simulação/}).click();await page.getByRole('button',{name:'Ativar IA real para esta sessão',exact:true}).click();
+ await send(page,'Gastei R$ 1.900 num celular.');await expect(page.getByTestId('balance')).toHaveText('R$ 600,00');await expect(page.locator('.execution-status')).toContainText('Executado');
+ await send(page,'Aquele celular foi R$ 1.800, não R$ 1.900.');await expect(page.getByTestId('balance')).toHaveText('R$ 600,00');await expect(page.locator('.inspector')).toContainText('pending');
+ await send(page,'Sim.');await expect(page.getByTestId('balance')).toHaveText('R$ 700,00');await send(page,'Sim.');await expect(page.getByTestId('balance')).toHaveText('R$ 700,00');
+ await send(page,'Quero comprar um celular de R$ 1.900.');await expect(page.getByTestId('balance')).toHaveText('R$ 700,00');
+ await send(page,'Comprei um carregador por R$ 47,90.');await expect(page.getByTestId('balance')).toHaveText('R$ 652,10');await expect(page.locator('.inspector')).toContainText('política determinística');await expect(page.locator('.bubble').last()).toContainText('47,90');
+});

@@ -89,7 +89,7 @@ O loop V2, cálculos em centavos, contexto limitado, categorias, comparações, 
 
 - Dados fictícios, nenhum banco novo, Supabase, conta financeira, pagamento ou transferência real.
 - Chave OpenAI só no servidor; nenhum valor secreto recuperado ou registrado nesta implementação.
-- Logs operacionais existentes incluem somente evento, requestId e código de erro; nenhum conteúdo financeiro por padrão.
+- Logs operacionais incluem evento, requestId, código de erro e diagnóstico sanitizado de campo/código/motivo; nenhum conteúdo financeiro por padrão.
 - Vercel Authentication protege todos os deployments do projeto existente; nenhuma configuração de proteção foi enfraquecida.
 - O simulador local é manipulável pelo dono do navegador. Não constitui uma fronteira de segurança para dinheiro real.
 - O modo real usa snapshots criptografados/autenticados **sem armazenamento central**. A cadeia atual impede repetição acidental e confirmação obsoleta; porém alguém que tenha guardado um token antigo pode reenviar o snapshot, criar ramos concorrentes ou restaurar uma pendência ainda não expirada. Limpar conversa não revoga cópias antigas de tokens. Não há garantia global/durável de uso único entre instâncias ou snapshots. Exigir isso em produção requer estado autoritativo e ledger de idempotência/versão no servidor.
@@ -127,3 +127,8 @@ Arquivos alterados/criados nesta entrega:
 | Interface preservada | `src/main.tsx`, `src/InspectorV2.tsx`, `src/style.css` |
 | Testes | `tests/personality.test.ts`, `tests/v2.test.ts`, `tests/e2e/lab.spec.ts` |
 | Documentação | `PULSE_PERSONALITY_BIBLE_V1.md`, `README.md` |
+
+
+## Correção após homologação de despesas
+
+Fatos passados agora incluem “Comprei um celular por R$ 1.900”. Aliases genéricos de categoria retornados pelo modelo são normalizados como ausência, mantendo classificações determinísticas e recusando categorias específicas inventadas. Valores/tipos/datas/descrições divergentes continuam bloqueados. Se o modelo não solicitar ferramentas para um fato inteiro inequívoco, o fallback determinístico validado é identificado no Inspector. Consulte [PULSE_EXPENSE_AUTH_FIX_REPORT.md](docs/PULSE_EXPENSE_AUTH_FIX_REPORT.md) para causa reproduzida, diagnósticos, regressões, Preview e estado da homologação.

@@ -8,7 +8,7 @@ export class SimulationProviderV2 implements Provider {
   const last=messages.at(-1);if(last?.role==='tool')return {content:''};
   const message=last?.content||'',text=normalize(message);
   const write=explicitTransaction(message,this.today,session);if(write)return {calls:[call('registrar_transacao',write)]};
-  if(/^(eu )?(gastei|paguei|recebi|ganhei|registre)\b/.test(text)&&!text.includes('?'))return {content:'Qual o valor, a descrição e a data? Se for uma hipótese, posso conversar sem registrar.'};
+  if(/^(eu )?(gastei|paguei|comprei|recebi|ganhei|registre)\b/.test(text)&&!text.includes('?'))return {content:'Qual o valor, a descrição e a data? Se for uma hipótese, posso conversar sem registrar.'};
   const p=resolvePeriod(message,this.today,session.memory)||session.memory.periods[0]||monthPeriod(this.today);
   if(/diferenca|aumentaram|mais que|compar/.test(text))return {calls:[call('comparar_periodos',{periodA:session.memory.periods.length===2?session.memory.periods[1]:monthPeriod(this.today),periodB:session.memory.periods.length===2?session.memory.periods[0]:monthPeriod(this.today,-1),metric:'despesas'})]};
   if(/ritmo|projec|fim do mes/.test(text))return {calls:[call('projetar_despesas',{period:monthPeriod(this.today),asOf:this.today})]};

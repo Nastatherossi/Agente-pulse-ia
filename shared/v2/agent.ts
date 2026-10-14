@@ -1,7 +1,8 @@
+import {z} from 'zod';
 import {createSession,sessionSchema,validateCall,brl,normalize,type Session,type Trace,type Step,type Provider,type ModelMessage,type ValidCall} from './contracts.js';
 import {FinancialCoreV2} from './finance.js';
 import {classifyIntent,isConfirmation,isCancellation,isClear,prepareOperation,purchaseImpact,clearContext} from './personality.js';
-import {authorizeWrite,explicitTransaction,requestedPreferences,requestedGoal} from './policy.js';
+import {authorizeWrite,explicitTransaction,requestedPreferences,requestedGoal,normalizeTransactionCall,transactionAuthorizationFailure} from './policy.js';
 export const LIMITS={steps:4,tools:8,timeoutMs:35000,tokens:14000};
 export const messageHash=async(text:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))).map(n=>n.toString(16).padStart(2,'0')).join('');
 export const errorMessage=(code:string)=>({OPENAI_AUTH_FAILED:'A chave OpenAI não foi aceita. Verifique a configuração do laboratório.',OPENAI_QUOTA_EXCEEDED:'A OpenAI informou falta de créditos ou limite de uso.',OPENAI_RATE_LIMITED:'A OpenAI está limitando requisições. Aguarde antes de tentar de novo.',MODEL_INCOMPATIBLE:'O modelo não aceitou o contrato de ferramentas.',OPENAI_TIMEOUT:'A OpenAI não respondeu no prazo.',REAL_AI_LOCKED:'IA real bloqueada na configuração do laboratório.',INVALID_SESSION:'Esta sessão perdeu a validade. Inicie uma nova sessão.',STEP_LIMIT:'Parei no limite de etapas. Tente uma pergunta mais específica.',TOKEN_LIMIT:'Parei no limite de consumo desta interação.',LOOP_DETECTED:'A consulta se repetiu. Parei para evitar um loop.'} as Record<string,string>)[code]||'Não consegui concluir esta interação. Nenhum sucesso de ferramenta foi inventado.';
@@ -51,7 +52,7 @@ function remember(call:ValidCall,session:Session){
 }
 export async function runConversation(provider:Provider,sessionInput:Session|undefined,message:string,requestId:string,today:string,options:{failTools?:boolean;limits?:Partial<typeof LIMITS>}={}){
  const session=structuredClone(sessionSchema.parse(sessionInput||createSession())),limits={...LIMITS,...options.limits},started=performance.now(),steps:Step[]=[];
- const personalityIntent=classifyIntent(message);let confirmation:Trace['confirmation']='none',directAnswer:string|undefined;
+ const personalityIntent=classifyIntent(message);let interpretationSource:Trace['interpretationSource']=provider.mode==='real'?'model':undefined;let confirmation:Trace['confirmation']='none',directAnswer:string|undefined;
  const base={requestId,mode:provider.mode,intent:'Conversa financeira',durationMs:0};
  const hash=await messageHash(message),previous=session.lastRequests.find(r=>r.id===requestId);
  if(previous){if(previous.messageHash!==hash)throw new Error('IDEMPOTENCY_CONFLICT');return {session,trace:previous.trace as Trace};}
@@ -62,16 +63,16 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
   const start=performance.now(),step:Step={order:steps.length+1,id:raw.id,name:raw.name,status:'error',durationMs:0};
   try {
    if(steps.length>=limits.tools)throw new Error('TOOL_LIMIT');
-   const call=validateCall(raw);
-   if(call.name==='registrar_transacao'){const expected=explicitTransaction(message,today,session);const label=call.arguments.category as string|undefined;if(expected?.category&&(!label||normalize(label)===normalize(expected.category)))call.arguments.category=expected.category;else if(!expected?.category&&label&&normalize(label)==='sem categoria')delete call.arguments.category;}
+   const call=validateCall(normalizeTransactionCall(raw,message,today,session));
+
    step.arguments=call.arguments;
    if(personalityIntent==='execucao'&&call.name!=='registrar_transacao'){step.status='blocked';throw new Error('INTENT_TOOL_NOT_ALLOWED');}
-   if((personalityIntent!=='execucao'&&call.name==='registrar_transacao')||!authorizeWrite(call,message,today,session)){step.status='blocked';throw new Error('WRITE_NOT_AUTHORIZED');}
+   if((personalityIntent!=='execucao'&&call.name==='registrar_transacao')||!authorizeWrite(call,message,today,session)){step.status='blocked';step.error={code:'WRITE_NOT_AUTHORIZED',reason:call.name==='registrar_transacao'?transactionAuthorizationFailure(call,message,today,session)||'INTENT_MISMATCH':'WRITE_SCOPE_MISMATCH',message:'Os argumentos da ferramenta não correspondem ao pedido atual. Nenhuma transação foi registrada.'};throw new Error('WRITE_NOT_AUTHORIZED');}
    const signature=JSON.stringify({name:call.name,arguments:call.arguments});
    if(seen.has(signature))throw new Error('LOOP_DETECTED');seen.add(signature);
    if(options.failTools)throw new Error('EXECUTION_FAILED');
    step.result=core.execute(call,`${requestId}:${signature}`);step.status='success';remember(call,session);
-  }catch(error){const code=error instanceof Error?error.message:'EXECUTION_FAILED';const safeCodes=['INTENT_TOOL_NOT_ALLOWED','UNKNOWN_TOOL','TOOL_LIMIT','WRITE_NOT_AUTHORIZED','LOOP_DETECTED','EXECUTION_FAILED','IDEMPOTENCY_CONFLICT','SESSION_FULL','INVALID_PROJECTION_DATE'];step.error={code:safeCodes.includes(code)?code:'VALIDATION_FAILED',message:code==='WRITE_NOT_AUTHORIZED'?'Registro não autorizado. Informe uma instrução definitiva com tipo, valor, descrição e data.':code==='LOOP_DETECTED'?'Chamada repetida bloqueada.':code==='EXECUTION_FAILED'?'Falha simulada; esta ferramenta não foi executada.':'Ferramenta ou argumentos inválidos; esta chamada não alterou dados.'};}
+  }catch(error){const code=error instanceof Error?error.message:'EXECUTION_FAILED';const safeCodes=['INTENT_TOOL_NOT_ALLOWED','UNKNOWN_TOOL','TOOL_LIMIT','WRITE_NOT_AUTHORIZED','LOOP_DETECTED','EXECUTION_FAILED','IDEMPOTENCY_CONFLICT','SESSION_FULL','INVALID_PROJECTION_DATE'];step.error=step.error||{code:safeCodes.includes(code)?code:'VALIDATION_FAILED',message:code==='WRITE_NOT_AUTHORIZED'?'O pedido atual não autoriza estes argumentos. Nenhuma transação foi registrada.':code==='LOOP_DETECTED'?'Chamada repetida bloqueada.':code==='EXECUTION_FAILED'?'Falha simulada; esta ferramenta não foi executada.':'Ferramenta ou argumentos inválidos; esta chamada não alterou dados.'};if(error instanceof z.ZodError)step.error.issues=error.issues.slice(0,8).map(issue=>({field:['type','amount','description','date','category'].includes(String(issue.path[0]))?String(issue.path[0]):'arguments',code:issue.code}));}
   step.durationMs=Math.round(performance.now()-start);steps.push(step);return step;
  }
  try{
@@ -92,7 +93,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
    session.memory.pending=undefined;session.memory.operation=undefined;
    const expected=explicitTransaction(message,today,session);
    const duplicate=expected&&session.lastRequests.some(r=>r.messageHash===hash&&(r.trace as Trace)?.steps?.some(s=>s.name==='registrar_transacao'&&s.status==='success'));
-   if(duplicate){session.memory.pending=expected;status='clarification';draft='Esta mensagem já foi registrada nesta sessão. Quer confirmar que é uma segunda despesa/receita igual? Responda “confirmar” para um novo registro fictício.';}
+   if(duplicate){session.memory.pending=expected;status='clarification';directAnswer='Esta mensagem já foi registrada nesta sessão. Quer confirmar que é uma segunda despesa/receita igual? Responda “confirmar” para um novo registro fictício.';}
    else {
     const pref=requestedPreferences(message,session.state.preferences);
     if(pref){await execute({id:crypto.randomUUID(),name:'atualizar_preferencias',arguments:pref});}
@@ -102,7 +103,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
      const next=await Promise.race([provider.next(msgs,session,controller.signal),new Promise<never>((_,reject)=>{const abort=()=>reject(new Error('OPENAI_TIMEOUT'));if(controller.signal.aborted)abort();else controller.signal.addEventListener('abort',abort,{once:true});})]);
      model=next.model||model;for(const key of ['inputTokens','outputTokens','totalTokens'] as const)usage[key]+=next.usage?.[key]||0;
      if(usage.totalTokens>limits.tokens)throw new Error('TOKEN_LIMIT');
-     if(!next.calls?.length){draft=next.content||'';if(!steps.length&&/[?]|preciso|qual /i.test(draft))status='clarification';break;}
+     if(!next.calls?.length){if(personalityIntent==='execucao'&&expected&&!steps.length){interpretationSource='deterministic_fallback';const result=await execute({id:crypto.randomUUID(),name:'registrar_transacao',arguments:expected});if(result.status!=='success'){status='error';errorCode=result.error?.code;}break;}draft=next.content||'';if(!steps.length&&/[?]|preciso|qual /i.test(draft))status='clarification';break;}
      if(next.calls.length>limits.tools-steps.length)throw new Error('TOOL_LIMIT');
      msgs.push({role:'assistant',content:null,tool_calls:next.calls.map(c=>({id:c.id,type:'function',function:{name:c.name,arguments:JSON.stringify(c.arguments)}}))});
      for(const call of next.calls){const result=await execute(call);msgs.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result.status==='success'?{ok:true,result:result.result}:{ok:false,error:result.error})});if(result.status!=='success'){errorCode=result.error?.code;status=errorCode==='WRITE_NOT_AUTHORIZED'?'clarification':'error';}}
@@ -119,7 +120,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  if(status==='error')answer=[steps.filter(s=>s.status==='success').map(s=>readable(s,session.state.preferences.detail)).join('\n\n'),errorMessage(errorCode||'EXECUTION_FAILED')].filter(Boolean).join('\n\n');
  if(status==='clarification'&&steps.some(s=>s.status==='blocked'))answer=steps.find(s=>s.status==='blocked')!.error!.message;
  const intent=steps.length>1?'Análise com múltiplas ferramentas':steps[0]?.name==='registrar_transacao'?'Registro financeiro':steps[0]?.name==='atualizar_preferencias'?'Preferência explícita':steps[0]?.name==='comparar_periodos'?'Comparação de períodos':steps.length?'Consulta financeira':status==='clarification'?'Esclarecimento necessário':'Conversa';
- const trace:Trace={...base,intent:personalityIntent==='conversa'?intent:personalityIntent,proactivity:session.state.preferences.proactivity,pendingOperation:session.memory.operation,confirmation,status,message:answer,steps,durationMs:Math.round(performance.now()-started),model,usage:provider.mode==='real'?usage:undefined,errorCode};
+ const trace:Trace={...base,interpretationSource,intent:personalityIntent==='conversa'?intent:personalityIntent,proactivity:session.state.preferences.proactivity,pendingOperation:session.memory.operation,confirmation,status,message:answer,steps,durationMs:Math.round(performance.now()-started),model,usage:provider.mode==='real'?usage:undefined,errorCode};
  session.history=[...session.history,{role:'user' as const,content:message.slice(0,1800)},{role:'assistant' as const,content:answer.slice(0,1800)}].slice(-10);
  session.lastRequests=[...session.lastRequests,{id:requestId,messageHash:hash,trace}].slice(-4);return {session,trace};
 }
