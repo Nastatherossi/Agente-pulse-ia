@@ -1,3 +1,5 @@
+import {observeMemory,observeStyle,conversationTone,retrieveMemories,memoryContext,memoryCommand} from './memory-engine.js';
+import {conversationalReply} from './conversation.js';
 import {z} from 'zod';
 import {createSession,sessionSchema,validateCall,brl,normalize,type Session,type Trace,type Step,type Provider,type ModelMessage,type ValidCall} from './contracts.js';
 import {FinancialCoreV2} from './finance.js';
@@ -37,7 +39,7 @@ export function renderAnswer(steps:Step[],draft:string,session:Session,intent=cl
  if(success.some(s=>s.name==='simular_compra')&&intent==='orientacao')advice='A compra reduz o dinheiro disponível. Pode fazer sentido se for importante agora; se esse valor for sua reserva para imprevistos, eu consideraria preservar mais caixa. Quais despesas essenciais ainda precisam ser cobertas?';
  if(intent==='orientacao'&&advice&&session.state.preferences.explanation==='completa')advice+=' Essa perspectiva considera apenas os valores informados ou registrados; renda, compromissos futuros e necessidades pessoais podem mudar a decisão.';
  if(intent==='orientacao'&&advice&&session.state.preferences.examples)advice+=' Por exemplo, adiar a compra ou buscar uma alternativa pode preservar caixa para despesas essenciais.';
- const sanitized=/\d|R\$|por cento|porcento|reais|centavos|saldo|(despesas|gastos) (aument|cresc|diminu)|voce (gastou|recebeu|tem)|registrei|registrad[oa]|registramos|lancei|salvei|recorded|registered|pagamento (efetuado|concluido)/i.test(normalize(draft))?'':draft.trim().slice(0,900);
+ const sanitized=/\d|R\$|por cento|porcento|reais|centavos|saldo|(despesas|gastos) (aument|cresc|diminu)|voce (gastou|recebeu|tem)|memorizei|guardei|lembrarei|vou lembrar|salvei.*memoria|registrei|registrad[oa]|registramos|lancei|salvei|recorded|registered|pagamento (efetuado|concluido)/i.test(normalize(draft))?'':draft.trim().slice(0,900);
  if(!success.length&&intent==='execucao')return 'Informe um valor positivo e uma descrição para registrar. A data padrão é a data de hoje indicada no laboratório.';
  if(!success.length)return sanitized||'Preciso de mais contexto para responder com segurança. O que você quer consultar ou registrar?';
  // Recommendations are grounded in computed summary; LLM wording remains useful for general conversation.
@@ -56,6 +58,9 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  const base={requestId,mode:provider.mode,intent:'Conversa financeira',durationMs:0};
  const hash=await messageHash(message),previous=session.lastRequests.find(r=>r.id===requestId);
  if(previous){if(previous.messageHash!==hash)throw new Error('IDEMPOTENCY_CONFLICT');return {session,trace:previous.trace as Trace};}
+ const priorHistory=session.history.length;const command=memoryCommand(session,message);const contextInvalidated=command!==undefined&&priorHistory>0&&session.history.length===0;
+ if(command===undefined){observeMemory(session,message);if(personalityIntent==='conversa'||personalityIntent==='orientacao')observeStyle(session,message);}
+ const retrieved=retrieveMemories(session,message,personalityIntent),tone=conversationTone(session,message);
  const core=new FinancialCoreV2(session.state),usage={inputTokens:0,outputTokens:0,totalTokens:0};let model:string|undefined,status:Trace['status']='success',draft='',errorCode:string|undefined;
  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),limits.timeoutMs);const seen=new Set<string>();
  const msgs:ModelMessage[]=[...session.history.slice(-10),{role:'user',content:message}];
@@ -80,7 +85,8 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
   const op=session.memory.operation;
   if(!confirm)session.memory.operation=undefined;
   if(op&&Date.now()>=op.expiresAt){session.memory.operation=undefined;confirmation='expired';}
-  if(isClear(message)){clearContext(session);directAnswer='Conversa limpa. Os dados fictícios foram preservados.';}
+  if(command!==undefined){directAnswer=command;}
+  else if(isClear(message)){clearContext(session);directAnswer='Conversa limpa. Os dados fictícios foram preservados.';}
   else if(isCancellation(message)){session.memory.operation=undefined;session.memory.pending=undefined;confirmation='cancelled';directAnswer='Operação cancelada. Os registros foram preservados.';}
   else if(confirm&&op){session.memory.operation=undefined;session.memory.pending=undefined;if(confirmation==='expired'){directAnswer='A confirmação expirou. Solicite a alteração novamente.';}else{if(options.failTools)throw new Error('EXECUTION_FAILED');const result=core.confirm(op);steps.push({order:1,id:op.id,name:op.kind==='goal'?'alterar_objetivo':op.kind==='delete'?'excluir_transacao':'editar_transacao',arguments:{operationId:op.id},status:'success',result,durationMs:0});confirmation='confirmed';}}
   else if(confirm&&!session.memory.pending){directAnswer='Não há operação pendente válida para confirmar.';}
@@ -96,7 +102,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
    if(duplicate){session.memory.pending=expected;status='clarification';directAnswer='Esta mensagem já foi registrada nesta sessão. Quer confirmar que é uma segunda despesa/receita igual? Responda “confirmar” para um novo registro fictício.';}
    else {
     const pref=requestedPreferences(message,session.state.preferences);
-    if(pref){await execute({id:crypto.randomUUID(),name:'atualizar_preferencias',arguments:pref});}
+    if(pref){await execute({id:crypto.randomUUID(),name:'atualizar_preferencias',arguments:pref});if(/estilo|formal|descontra|diret|neutro/.test(normalize(message)))session.narrative.style.explicitStyle=true;if(/redefin|restaur|reset/.test(normalize(message)))session.narrative.style.explicitStyle=false;}
     else for(let i=0;i<limits.steps;i++){
      if(controller.signal.aborted)throw new Error('OPENAI_TIMEOUT');
      if(msgs.reduce((n,m)=>n+(m.content?.length||0),0)>42000)throw new Error('CONTEXT_LIMIT');
@@ -116,11 +122,11 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  finally {clearTimeout(timer);}
  session.state=core.snapshot();
  if(personalityIntent==='execucao'&&!steps.length&&!errorCode)status='clarification';
- let answer=directAnswer||renderAnswer(steps,draft,session,personalityIntent);
+ let answer=directAnswer||(provider.mode==='simulation'&&!steps.length?conversationalReply(message,session):undefined)||renderAnswer(steps,draft,session,personalityIntent);
  if(status==='error')answer=[steps.filter(s=>s.status==='success').map(s=>readable(s,session.state.preferences.detail)).join('\n\n'),errorMessage(errorCode||'EXECUTION_FAILED')].filter(Boolean).join('\n\n');
  if(status==='clarification'&&steps.some(s=>s.status==='blocked'))answer=steps.find(s=>s.status==='blocked')!.error!.message;
  const intent=steps.length>1?'Análise com múltiplas ferramentas':steps[0]?.name==='registrar_transacao'?'Registro financeiro':steps[0]?.name==='atualizar_preferencias'?'Preferência explícita':steps[0]?.name==='comparar_periodos'?'Comparação de períodos':steps.length?'Consulta financeira':status==='clarification'?'Esclarecimento necessário':'Conversa';
- const trace:Trace={...base,interpretationSource,intent:personalityIntent==='conversa'?intent:personalityIntent,proactivity:session.state.preferences.proactivity,pendingOperation:session.memory.operation,confirmation,status,message:answer,steps,durationMs:Math.round(performance.now()-started),model,usage:provider.mode==='real'?usage:undefined,errorCode};
+ const trace:Trace={...base,contextInvalidated,retrievedMemoryIds:retrieved.map(r=>r.id),conversationTone:tone,memoryMetrics:{stored:session.narrative.records.length,retrieved:retrieved.length,contextCharacters:retrieved.length?JSON.stringify(memoryContext(retrieved)).length:0,extractionCalls:0},interpretationSource,intent:personalityIntent==='conversa'?intent:personalityIntent,proactivity:session.state.preferences.proactivity,pendingOperation:session.memory.operation,confirmation,status,message:answer,steps,durationMs:Math.round(performance.now()-started),model,usage:provider.mode==='real'?usage:undefined,errorCode};
  session.history=[...session.history,{role:'user' as const,content:message.slice(0,1800)},{role:'assistant' as const,content:answer.slice(0,1800)}].slice(-10);
  session.lastRequests=[...session.lastRequests,{id:requestId,messageHash:hash,trace}].slice(-4);return {session,trace};
 }

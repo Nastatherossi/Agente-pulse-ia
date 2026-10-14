@@ -7,9 +7,10 @@ export const isClear=(m:string)=>/^(limpa|limpar|apaga|apagar) (nossa |a )?conve
 export function classifyIntent(m:string):Intent {
  const t=normalize(m);
  if(isConfirmation(m)||isCancellation(m))return 'confirmacao';
- if(/sem (perguntar|confirmacao)|nao.*pedir confirmacao/.test(t)||requestedPreferences(m,{style:'neutro',detail:'curto',proactivity:'discreto',explanation:'minima',examples:false})||/preferencias/.test(t))return 'preferencias';
+ if(/sem (perguntar|confirmacao)|nao.*pedir confirmacao/.test(t)||requestedPreferences(m,{style:'neutro',detail:'curto',proactivity:'discreto',explanation:'minima',examples:false,emojis:false})||/preferencias/.test(t))return 'preferencias';
  if(/corrig|corr[eij]|alter|exclu|apagu|apaga|remov|pera[, ]|aquele .* foi|nao era|eram? r?\$|mudar.*meta/.test(t))return 'alteracao';
  if(/o que (voce )?acha|opiniao|orient|ajud|deveria|gastando muito|vale a pena/.test(t))return 'orientacao';
+ if(requestedGoal(m))return 'conversa';
  if(/^(eu )?(gastei|paguei|comprei|recebi|ganhei|registra|registre|registrar)\b/.test(t)&&!/[?]|\b(se|talvez|pensando|comprasse)\b/.test(t))return 'execucao';
  if(/[?]|saldo|listar|extrato|quanto|gastos|financas|categoria|projec|ritmo|compar/.test(t))return 'consulta';
  return 'conversa';

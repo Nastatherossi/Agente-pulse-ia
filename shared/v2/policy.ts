@@ -38,7 +38,7 @@ export function requestedPreferences(message:string,current:Session['state']['pr
  const text=normalize(message);
  if(/(redefin|restaur|reset).*(preferenc|comunicac)/.test(text))return defaultPreferences();
  const next={...current};let found=false;
- if(!/(prefir|fala comigo|falar comigo|pode ser|pode explicar|respostas|seja|mais direto|mais descontraido|estilo|modo|proativ|dicas|so responda|explicac|exemplos)/.test(text))return undefined;
+ if(!/(prefir|fala comigo|falar comigo|pode ser|pode explicar|respostas|seja|mais direto|mais descontraido|estilo|modo|proativ|dicas|so responda|explicac|exemplos|emojis)/.test(text))return undefined;
  if(/neutro/.test(text)){next.style='neutro';found=true;}
  if(/diret/.test(text)){next.style='direto';found=true;}if(/descontraid/.test(text)){next.style='descontraido';found=true;}if(/formal/.test(text)){next.style='formal';found=true;}
  if(/curt|breve/.test(text)){next.detail='curto';found=true;}if(/explicar melhor|detalhad/.test(text)){next.detail='detalhado';found=true;}
@@ -46,14 +46,15 @@ export function requestedPreferences(message:string,current:Session['state']['pr
  if(/discret|nao precisa.*dicas|so responda|sem dicas/.test(text)){next.proactivity='discreto';found=true;}
  if(/(menos|sem|pouca|minima).*explicac/.test(text)){next.explanation='minima';found=true;}else if(/(mais|completa).*explicac|explicac.*completa/.test(text)){next.explanation='completa';found=true;}
  if(/exemplos/.test(text)){next.examples=!/(sem|nao).*exemplos/.test(text);found=true;}
+ if(/emojis/.test(text)){next.emojis=!/(sem|nao).*emojis/.test(text);found=true;}
  return found?next:undefined;
 }
 export function requestedGoal(message:string){
- const text=normalize(message.trim());if(!/^(quero (juntar|economizar|guardar)|defina|minha meta|meu objetivo)/.test(text))return undefined;
+ const text=normalize(message.trim());if(!/^(crie (uma )?meta|registre (uma )?meta|defina|minha meta|meu objetivo)/.test(text))return undefined;
  const dates=message.match(/\d{4}-\d{2}-\d{2}/g)||[];
  const stripped=message.replace(/\d{4}-\d{2}-\d{2}/g,'');if(/-\s*\d/.test(stripped))return undefined;const numbers=stripped.match(/\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?/g)||[];
  if(numbers.length!==1||dates.length>1)return undefined;const raw=numbers[0],amount=Number(raw.includes(',')?raw.replace(/\./g,'').replace(',','.'): /^\d{1,3}(?:\.\d{3})+$/.test(raw)?raw.replace(/\./g,''):raw);
- const description=stripped.replace(raw,'').replace(/R\$/gi,'').replace(/^(quero (juntar|economizar|guardar)|defina|minha meta|meu objetivo)/i,'').replace(/\b(reais|para|ate|de|e)\b/gi,' ').replace(/[.!]+$/,'').replace(/\s+/g,' ').trim()||'objetivo financeiro';
+ const description=stripped.replace(raw,'').replace(/R\$/gi,'').replace(/^(crie (uma )?meta|registre (uma )?meta|defina|minha meta|meu objetivo)/i,'').replace(/\b(reais|para|ate|de|e)\b/gi,' ').replace(/[.!]+$/,'').replace(/\s+/g,' ').trim()||'objetivo financeiro';
  const parsed=goal.safeParse({description,amount,targetDate:dates[0]});return parsed.success?parsed.data:undefined;
 }
 /** Normalize only neutral category aliases; all financial fields remain strictly typed. */
