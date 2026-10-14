@@ -74,3 +74,8 @@ Registros inequívocos de despesas passadas, milhares/centavos, categoria neutra
 Suíte da V1 e regressões de despesas permanecem no projeto. O modo real continua usando OpenAI no servidor com ferramentas simuladas. Testes automatizados usam mocks; a homologação ao vivo desta V2 precisa de acesso autenticado ao Preview e não será declarada a partir de mocks.
 
 200 testes backend e 14 testes desktop/mobile aprovados; TypeScript e build aprovados. Arquivos, arquitetura, PR e Preview são registrados no documento do Memory Engine. Sem Workers de produção, Supabase, WhatsApp real, operação financeira real ou alteração no repositório pulse-finance.
+
+
+## Preview e PR
+
+[PR #7](https://github.com/Nastatherossi/Agente-pulse-ia/pull/7), branch `feat/pulse-personality-v2`, sem merge. [Preview protegido](https://pulse-ai-af24q9ozl-matheusnastaro5-6769s-projects.vercel.app/) READY no código `9e7ce0358e1bf3150af735aa2232143120a39ca7`. Página/API protegidas por Vercel Authentication. 200 testes backend, 14 desktop/mobile e build aprovados. OpenAI ao vivo ainda não homologada; provas, limitações e próximos passos no documento do Memory Engine.

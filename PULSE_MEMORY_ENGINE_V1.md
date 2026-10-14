@@ -109,7 +109,7 @@ Testes anteriores de Personality V1 e financeiro foram executados. A mudança in
 
 Simulação usa templates e temas fechados, não compreensão geral. A extração conservadora pode deixar intenções não suportadas sem memória. Mudança de cidade não guarda nomes de cidades; casamento não guarda datas, valores ou detalhes íntimos. O modo real conversa livremente pelo modelo, mas extração/persistência continuam neste escopo conservador. Não há lembranças de conta permanentes, inferência sensível, embeddings, banco novo ou cadastro de produção.
 
-Resultado local final: 200 testes unitários/backend e 14 testes Playwright desktop/mobile aprovados. Os fluxos financeiros e Personality V1 foram preservados; os testes de memória real usam mocks. TypeScript, build:api e Vite aprovados. Smoke Node do bundle importou a função e retornou GET 405; inspeção do asset cliente confirmou ausência do prompt de sistema. `git diff --check` aprovado. Testes OpenAI são mocks, sem consumo real nesta rodada. PR e Preview serão anexados após a publicação. OpenAI ao vivo desta V2 só será declarada com evidência; mocks e modo simulado não equivalem a essa homologação.
+Resultado local final: 200 testes unitários/backend e 14 testes Playwright desktop/mobile aprovados. Os fluxos financeiros e Personality V1 foram preservados; os testes de memória real usam mocks. TypeScript, build:api e Vite aprovados. Smoke Node do bundle importou a função e retornou GET 405; inspeção do asset cliente confirmou ausência do prompt de sistema. `git diff --check` aprovado. Testes OpenAI são mocks, sem consumo real nesta rodada. PR e Preview verificados abaixo. OpenAI ao vivo desta V2 só será declarada com evidência; mocks e modo simulado não equivalem a essa homologação.
 
 
 ## Arquivos desta evolução
@@ -124,3 +124,17 @@ Resultado local final: 200 testes unitários/backend e 14 testes Playwright desk
 | Documentação | `PULSE_PERSONALITY_BIBLE_V2.md`, `PULSE_MEMORY_ENGINE_V1.md`, `README.md` |
 
 23 arquivos criados/alterados; `shared/v2/finance.ts` permaneceu intacto. As duas primeiras regressões da integração foram detectadas pelos testes (validação de pendência e espera assíncrona de checkbox real), corrigidas antes da rodada final. Publicação apenas após os checks aprovados.
+
+
+## Entrega verificada
+
+- Branch: `feat/pulse-personality-v2`; PR https://github.com/Nastatherossi/Agente-pulse-ia/pull/7 (base V1 corrigida, sem merge na main).
+- Preview final: https://pulse-ai-af24q9ozl-matheusnastaro5-6769s-projects.vercel.app/
+- Deployment `dpl_FuDk35jAK8gRaChN5TNAGq28815Q`, estado READY, target Preview, fonte GitHub no projeto existente pulse-ai-lab.
+- Código validado: `9e7ce0358e1bf3150af735aa2232143120a39ca7`. Árvore local/remota idêntica `3ee3ef14dc9b44a57e6ff8c59e7d68ab596b2f93` antes deste complemento documental.
+- Proteção consultada após publicar: SSO enabled=true, deploymentType=all. GET anônimo da página e `/api/conversation`: HTTP 302, Protected by Vercel Authentication, redirecionamento ao login. Sem bypass ou mudança de autenticação.
+- 200/200 testes backend e 14/14 Playwright desktop/mobile passaram; TypeScript e build local/remoto aprovados. Smoke do bundle final: importação Node e GET405.
+- OpenAI Personality V2 **não homologada ao vivo nesta rodada**. Providers/handler/ações de memória e cadeia de token foram validados com mocks. Sem chamada paga ou recuperação da chave real. Falta acesso autenticado ao Preview para fazer testes pontuais com o modelo real.
+- Próximo passo de homologação: habilitar memória na sessão do Preview autenticado, declarar intenção de carreira/negócio, limpar conversa, retomar assunto, alterar/abandonar/excluir memória e confirmar que um registro simples permanece discreto. Depois, preparar identidade e armazenamento autoritativos antes de conectar WhatsApp em outra missão.
+- No modo real, é necessário iniciar nova sessão quando o token de até seis horas expirar. Nenhuma persistência permanente por conta é prometida.
+- Main, pulse-finance e Supabase não receberam alterações; Financial Core segue fictício e operações existentes continuam exigindo confirmação.
