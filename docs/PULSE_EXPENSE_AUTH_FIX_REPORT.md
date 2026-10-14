@@ -29,7 +29,7 @@ A suíte nova `tests/expense-authorization.test.ts` cobre os quatro fatos realiz
 
 O fluxo Playwright novo usa provider real mockado, category outras, core/sessão/Inspector, correção com confirmação, repetição, intenção futura sem escrita e fallback visível. Roda em desktop e mobile. Todos os fluxos anteriores V1/V2/Personality permanecem na suíte.
 
-Resultado final: **155/155 testes unitários/backend e 10/10 testes Playwright desktop/mobile passaram**. TypeScript, build:api e build Vite passaram. `git diff --check` passou. A primeira execução E2E não iniciou Chromium porque o executável temporário de uma sessão anterior havia sido removido; o binário foi reextraído da dependência existente e a rodada completa passou. Preview é registrado após publicação. Testes automatizados usam mocks ou simulação; nenhuma chamada paga em massa ou chave real foi utilizada.
+Resultado final: **155/155 testes unitários/backend e 10/10 testes Playwright desktop/mobile passaram**. TypeScript, build:api e build Vite passaram. `git diff --check` passou. A primeira execução E2E não iniciou Chromium porque o executável temporário de uma sessão anterior havia sido removido; o binário foi reextraído da dependência existente e a rodada completa passou. Preview publicado, detalhes abaixo. Testes automatizados usam mocks ou simulação; nenhuma chamada paga em massa ou chave real foi utilizada.
 
 ## Arquivos
 
@@ -49,3 +49,15 @@ Resultado final: **155/155 testes unitários/backend e 10/10 testes Playwright d
 Edição/exclusão e substituição de meta continuam passando exclusivamente pela pendência e confirmação existentes. O modelo não recebe ferramenta de edição. Proatividade não altera permissões. Limites de snapshots e idempotência global documentados na Bible continuam válidos: não há armazenamento central nem garantia contra restaurar tokens antigos. Nenhum Supabase, pulse-finance ou dado financeiro real foi acessado.
 
 O projeto Vercel existente foi consultado e continua com Vercel Authentication para todos os deployments. A homologação com OpenAI ao vivo desta correção permanece pendente enquanto não houver sessão autenticada disponível no Preview. Os testes do provider real com fetch mock não equivalem a homologação paga ao vivo; não será removida proteção nem criado bypass para testar.
+
+
+## Preview e entrega verificados
+
+- PR #6 atualizado: https://github.com/Nastatherossi/Agente-pulse-ia/pull/6 . Branch mantida `feat/pulse-personality-v1`.
+- Preview: https://pulse-ai-hxfhh6m3p-matheusnastaro5-6769s-projects.vercel.app/
+- Deployment `dpl_EpkDpUsLkixC78TsDd6R2tQB7AEL`, READY, target Preview, fonte GitHub.
+- Commit de código testado: `82ab51a2d04474427fdcf3e8665b20c8af52fff4`. Árvores local/remota idênticas: `4e48bb62cd1f8621fd1a7e678c3ae8ab44af26bb` antes deste complemento documental.
+- Após publicar, projeto consultado novamente: `ssoProtection.enabled=true`, `deploymentType=all`. Página e API retornam HTTP 302, proteção Vercel Authentication e redirecionamento ao login em acesso anônimo.
+- 155 testes backend + dez Playwright aprovados; build local e remoto aprovado. Importação Node do bundle serverless confirmou GET 405. Sem segredo recuperado ou configuração de autenticação alterada.
+- OpenAI ao vivo desta correção: **não homologada**. Sem sessão autenticada disponível nesta execução; acessos anônimos ficaram corretamente bloqueados. A ação mínima restante é retestar os exemplos no novo Preview com sessão Vercel autenticada. Nenhum bypass, relaxamento de proteção ou chamada paga em massa foi realizado.
+- Main, pulse-finance e Supabase permaneceram intocados. Dados simulados e regras de confirmação preservados.
