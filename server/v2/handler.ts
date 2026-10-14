@@ -1,3 +1,4 @@
+import {clearContext} from '../../shared/v2/personality.js';
 import {z} from 'zod';
 import {runConversation,errorMessage} from '../../shared/v2/agent.js';
 import {todayBR,createSession} from '../../shared/v2/contracts.js';
@@ -17,7 +18,7 @@ export default async function handler(req:Request,res:Response){
  try{
   // No unsigned client history, financial state, tool results or identity accepted.
   const session=body.data.sessionToken?decodeSession(body.data.sessionToken,key):undefined;
-  if(body.data.clearConversation){const cleared=session||createSession();cleared.history=[];cleared.memory={periods:[]};return res.status(200).json({state:cleared.state,sessionToken:encodeSession(cleared,key),trace:{requestId:body.data.requestId,mode:'real',intent:'Limpar conversa',status:'success',message:'Conversa limpa. Os dados fictícios foram preservados.',steps:[],durationMs:0}});}
+  if(body.data.clearConversation){const cleared=session||createSession();clearContext(cleared);return res.status(200).json({state:cleared.state,sessionToken:encodeSession(cleared,key),trace:{requestId:body.data.requestId,mode:'real',intent:'Limpar conversa',status:'success',message:'Conversa limpa. Os dados fictícios foram preservados.',steps:[],durationMs:0}});}
   const output=await runConversation(new OpenAIConversationProvider(key,model),session,body.data.message!,body.data.requestId,todayBR(),{failTools:body.data.failTools});
   const sessionToken=encodeSession(output.session,key);
   if(output.trace.errorCode)console.warn(JSON.stringify({event:'pulse_v2_error',requestId:output.trace.requestId,code:output.trace.errorCode}));

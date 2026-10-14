@@ -19,7 +19,7 @@ Experimente, na mesma sessão:
 
 “Limpar conversa” mantém os lançamentos; “Nova sessão” reinicia dados e contexto. Mensagens repetidas não duplicam automaticamente uma escrita: o Pulse pede confirmação para um segundo lançamento igual.
 
-Uma data omitida só é reutilizada se uma transação anterior nesta sessão explicitou **o dia de hoje**, sem outro dia na mensagem atual. A resposta mostra a data utilizada. Em sessão nova, uma data ausente exige esclarecimento. “Ontem” e períodos relativos usam America/Sao_Paulo.
+Na Personality V1, registros definitivos sem data usam **hoje em America/Sao_Paulo**, data padrão exibida na interface. Datas explícitas e “ontem” continuam suportados. Hipóteses nunca autorizam registros.
 
 ## Dois modos, duas sessões
 
@@ -39,10 +39,11 @@ As sessões dos modos são separadas para impedir que um saldo local alterado pe
 | comparar_periodos | A, B, diferença e variação percentual (null se B é zero) |
 | consultar_gastos_categoria | Total, quantidade e registros de uma categoria |
 | projetar_despesas | Projeção determinística, com premissas e aviso de amostra |
-| atualizar_preferencias | Estilo e extensão explicitamente pedidos |
-| definir_objetivo | Objetivo fictício com valor informado pelo usuário |
+| atualizar_preferencias | Estilo, extensão, proatividade, explicações e exemplos explícitos |
+| definir_objetivo | Nova meta fictícia explícita; substituir existente exige confirmação |
+| simular_compra | Impacto hipotético em centavos, sem registrar despesa |
 
-Centavos inteiros nos cálculos; entradas em reais com até duas casas. Novos lançamentos reconhecidos: supermercado/mercado/restaurante/almoço/jantar → Alimentação; transporte/gasolina/combustível/uber/ônibus → Transporte; bar/cinema/lazer → Lazer. Demais registros ficam sem categoria. Sem recategorização retroativa.
+Centavos inteiros nos cálculos; entradas em reais com até duas casas. Novos lançamentos reconhecidos: supermercado/mercado/restaurante/almoço/jantar → Alimentação; transporte/gasolina/combustível/uber/ônibus → Transporte; bar/cinema/lazer → Lazer. Demais registros ficam sem categoria. Alterar categoria de registro existente exige confirmação, assim como valor, descrição, data, exclusão e substituição de meta.
 
 O Inspector exibe chamadas em ordem, argumentos validados, resultados, duração, falhas, resposta final e tokens/modelo quando disponíveis. Não exibe credenciais, prompts privados ou raciocínio interno.
 
@@ -66,10 +67,14 @@ Limites por interação: quatro chamadas de modelo, oito ferramentas, 35 segundo
 
 Máximo de 300 transações fictícias; dez mensagens de contexto; quatro requestIds recentes para replay. Não é uma infraestrutura de produção: tokens podem ser copiados/retrocedidos pelo proprietário; chamadas paralelas e snapshots antigos não têm coordenação global. Nenhum dado real ou efeito financeiro externo deve ser conectado a esse mecanismo. Não há memória permanente, bancos novos ou filas.
 
-Os números e a confirmação financeira são renderizados a partir de resultados determinísticos. Texto do modelo com números financeiros é descartado; recomendações de categoria usam totais calculados e avisam sobre amostra limitada. Opiniões qualitativas não são consultoria financeira nem um diagnóstico psicológico.
+Os números e a confirmação financeira são renderizados a partir de resultados determinísticos. Texto do modelo com números financeiros é descartado; orientações, somente quando solicitadas, usam totais calculados e avisam sobre amostra limitada. Registros e consultas simples não recebem conselhos. Opiniões qualitativas não são consultoria financeira nem um diagnóstico psicológico.
 
 ## Publicação
 
 Manter Vercel Authentication ativa para **todos** os deployments. Projeto existente `pulse-ai-lab`; publicar apenas Preview para esta missão. Não fazer merge automático na main. Em desenvolvimento, Express só escuta 127.0.0.1; não exponha o servidor local publicamente.
 
 Confira `docs/PULSE_AI_V2_REPORT.md` para arquitetura, testes e limitações da homologação com modelo real. A API V1 `/api/agent` foi preservada por compatibilidade; a interface V2 usa `/api/conversation`.
+
+## Pulse Personality V1
+
+A evolução na branch `feat/pulse-personality-v1` aplica discrição por padrão, preferências explícitas e confirmação em código antes de editar/excluir transações ou substituir metas. Novos registros sem data usam a data de hoje (São Paulo), exibida na interface. Consulte [PULSE_PERSONALITY_BIBLE_V1.md](./PULSE_PERSONALITY_BIBLE_V1.md) para regras, exemplos, testes e limites de replay dos snapshots.

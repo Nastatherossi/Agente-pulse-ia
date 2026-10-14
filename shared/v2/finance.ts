@@ -1,6 +1,6 @@
-import {financialState,validateCall,normalize,type State,type Call,type Period} from './contracts.js';
+import {financialState,goal,transaction,validateCall,normalize,defaultPreferences,pendingOperation,type State,type Call,type Period,type PendingOperation} from './contracts.js';
 const cents=(n:number)=>Math.round(n*100);
-export const initialState=():State=>({initialBalanceCents:250000,transactions:[],preferences:{style:'descontraido',detail:'curto'}});
+export const initialState=():State=>({initialBalanceCents:250000,transactions:[],preferences:defaultPreferences()});
 export const balanceCents=(state:State)=>state.initialBalanceCents+state.transactions.reduce((n,t)=>n+cents(t.amount)*(t.type==='receita'?1:-1),0);
 export function summary(state:State,period:Period,type?:'receita'|'despesa'){
  const transactions=state.transactions.filter(t=>t.date>=period.start&&t.date<=period.end&&(!type||type===t.type));
@@ -23,6 +23,13 @@ export function projection(state:State,period:Period,asOf:string){
 export class FinancialCoreV2 {
  private state:State;private completed=new Map<string,{payload:string;result:unknown}>();
  constructor(state:State=initialState()){this.state=structuredClone(financialState.parse(state));}
+ confirm(raw:PendingOperation,now=Date.now()):unknown {
+  const op=pendingOperation.parse(raw);if(now<op.createdAt||now>=op.expiresAt)throw new Error('CONFIRMATION_EXPIRED');
+  if(this.completed.has(op.id))throw new Error('CONFIRMATION_USED');
+  if(op.kind==='goal'){if(JSON.stringify(this.state.goal)!==JSON.stringify(op.before)||!op.after)throw new Error('STALE_CONFIRMATION');this.state.goal=goal.parse(op.after);}
+  else {const index=this.state.transactions.findIndex(t=>t.id===op.targetId);if(index<0||JSON.stringify(this.state.transactions[index])!==JSON.stringify(op.before))throw new Error('STALE_CONFIRMATION');if(op.kind==='delete')this.state.transactions.splice(index,1);else {if(!op.after||!('id' in op.after)||op.after.id!==op.targetId)throw new Error('STALE_CONFIRMATION');this.state.transactions[index]=transaction.extend({id:pendingOperation.shape.targetId.unwrap()}).parse(op.after);}}
+  const result={operationId:op.id,before:op.before,after:op.after,balanceCents:balanceCents(this.state)};this.completed.set(op.id,{payload:JSON.stringify(op),result});return structuredClone(result);
+ }
  snapshot(){return structuredClone(this.state);}
  execute(raw:Call,executionId:string):unknown {
   const call=validateCall(raw),payload=JSON.stringify({name:call.name,arguments:call.arguments}),existing=this.completed.get(executionId);
@@ -37,7 +44,8 @@ export class FinancialCoreV2 {
    case 'consultar_gastos_categoria':{const p=a.period as Period,transactions=this.state.transactions.filter(t=>t.type==='despesa'&&normalize(t.category||'sem categoria')===normalize(a.category as string)&&t.date>=p.start&&t.date<=p.end);result={category:a.category,period:p,totalCents:transactions.reduce((n,t)=>n+cents(t.amount),0),count:transactions.length,transactions};break;}
    case 'projetar_despesas':result=projection(this.state,a.period as Period,a.asOf as string);break;
    case 'atualizar_preferencias':this.state.preferences=a as State['preferences'];result={preferences:this.state.preferences};break;
-   case 'definir_objetivo':this.state.goal=a as State['goal'];result={goal:this.state.goal};break;
+   case 'simular_compra':{const availableCents=a.available?cents(a.available as number):balanceCents(this.state);result={availableCents,purchaseCents:cents(a.amount as number),remainingCents:availableCents-cents(a.amount as number),basis:a.available?'valor informado nesta mensagem':'saldo fictício da sessão',hypothetical:true};break;}
+   case 'definir_objetivo':if(this.state.goal)throw new Error('CONFIRMATION_REQUIRED');this.state.goal=a as State['goal'];result={goal:this.state.goal};break;
   }
   this.completed.set(executionId,{payload,result:structuredClone(result)});return result;
  }
