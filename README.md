@@ -15,7 +15,7 @@ Experimente, na mesma sessão:
 5. `Quanto gastei este mês?` → `E no mês passado?` → `Qual foi a diferença?`
 6. `Se continuar nesse ritmo, quanto gastarei até o fim do mês?`
 7. `Prefiro respostas curtas e mais direto.`
-8. `Quero guardar 1000 para férias.`
+8. `Defina 1000 para férias.`
 
 “Limpar conversa” mantém os lançamentos; “Nova sessão” reinicia dados e contexto. Mensagens repetidas não duplicam automaticamente uma escrita: o Pulse pede confirmação para um segundo lançamento igual.
 
@@ -78,3 +78,14 @@ Confira `docs/PULSE_AI_V2_REPORT.md` para arquitetura, testes e limitações da 
 ## Pulse Personality V1
 
 A evolução na branch `feat/pulse-personality-v1` aplica discrição por padrão, preferências explícitas e confirmação em código antes de editar/excluir transações ou substituir metas. Novos registros sem data usam a data de hoje (São Paulo), exibida na interface. Consulte [PULSE_PERSONALITY_BIBLE_V1.md](./PULSE_PERSONALITY_BIBLE_V1.md) para regras, exemplos, testes e limites de replay dos snapshots.
+
+
+## Personality V2 + Memory Engine
+
+Na branch `feat/pulse-personality-v2`, o Pulse conversa sobre trabalho, ideias e mudanças de vida sem exigir histórico financeiro. Memória automática fica desativada até habilitar no Memory Inspector; objetivos/intencões dos temas suportados podem ser guardados sem chamadas extras de modelo. Recarregar e limpar conversa preservam memórias na sessão; corrigir/excluir/limpar memórias também limpa contexto anterior e invalida pendências, mantendo transações.
+
+Experimente: habilitar memória → “Estou pensando em largar meu emprego” → “Vou vender pipoca” → limpar conversa → “Lembra daquela ideia de vender pipoca?” → “Desisti de vender pipoca” → “Esquece aquela ideia de vender pipoca”.
+
+Desejo de poupar é narrativa; para criar meta estruturada, use “Crie uma meta de 2000 para casamento” ou “Defina 1000 para férias”. Regras de registro/correção/confirmar e proatividade financeira discreta foram preservadas. Nenhuma integração WhatsApp ou produção foi conectada.
+
+Consulte [Personality Bible V2](./PULSE_PERSONALITY_BIBLE_V2.md) e [Memory Engine V1](./PULSE_MEMORY_ENGINE_V1.md) para arquitetura, extração seletiva, controles, persistência e limitações. No modo real, a memória existe no token de sessão de até seis horas, sem armazenamento central; excluir não revoga cópias antigas. Isso é memória de demonstração por sessão, não memória permanente por usuário em produção.

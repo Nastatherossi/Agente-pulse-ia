@@ -4,3 +4,9 @@
 .workspace{align-items:start}.composer{margin-top:0}@media(min-width:961px){.chat{position:sticky;top:16px}.messages{height:440px}.inspector-body{max-height:850px;overflow:auto}}@media(max-width:960px){.chat{position:static}}
 
 .preference-controls{display:flex;flex-wrap:wrap;gap:12px;padding:12px 0}.preference-controls label{display:flex;gap:6px;align-items:center}.preference-controls select{background:#172331;color:#e3edf4;border:1px solid #344453;border-radius:6px;padding:6px}.profile-note summary{cursor:pointer}
+
+.memory-inspector{margin-top:24px}.memory-body{padding:24px;color:#aab6c7;line-height:1.6}.memory-toggle{display:flex;align-items:center;gap:8px}.memory-buttons{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.memory-row{border-top:1px solid #303449;padding:16px 0}.memory-row small{display:block;font-size:11px;color:#8a93aa}.memory-row strong{color:#e3e5f0}.memory-row textarea{display:block;width:100%;min-height:80px;margin:8px 0;background:#181925;color:#eef;border:1px solid #404356;border-radius:8px;padding:10px}.memory-row select{background:#181925;color:#eef;padding:8px}.memory-body .inspector-note{overflow-wrap:anywhere}
+
+.memory-row p{overflow-wrap:anywhere}
+
+.memory-recovered{display:inline-block;color:#91ddbe;font-size:11px;margin-left:8px}

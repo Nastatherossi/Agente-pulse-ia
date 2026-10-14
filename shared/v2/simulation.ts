@@ -1,3 +1,4 @@
+import {conversationalReply} from './conversation.js';
 import {normalize,type Provider,type ModelMessage,type Session,type ModelResult,todayBR} from './contracts.js';
 import {explicitTransaction,resolvePeriod,monthPeriod,requestedGoal} from './policy.js';
 const call=(name:string,args:unknown)=>({id:crypto.randomUUID(),name,arguments:args});
@@ -7,6 +8,7 @@ export class SimulationProviderV2 implements Provider {
  async next(messages:ModelMessage[],session:Session):Promise<ModelResult>{
   const last=messages.at(-1);if(last?.role==='tool')return {content:''};
   const message=last?.content||'',text=normalize(message);
+  const open=conversationalReply(message,session);if(open&&!requestedGoal(message)&&!/^(gastei|paguei|comprei|recebi|registra|registre|defina|minha meta|meu objetivo)\b/.test(text))return {content:open};
   const write=explicitTransaction(message,this.today,session);if(write)return {calls:[call('registrar_transacao',write)]};
   if(/^(eu )?(gastei|paguei|comprei|recebi|ganhei|registre)\b/.test(text)&&!text.includes('?'))return {content:'Qual o valor, a descrição e a data? Se for uma hipótese, posso conversar sem registrar.'};
   const p=resolvePeriod(message,this.today,session.memory)||session.memory.periods[0]||monthPeriod(this.today);

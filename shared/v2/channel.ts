@@ -1,0 +1,6 @@
+import {runConversation} from './agent.js';
+import type {Provider,Session} from './contracts.js';
+export type AgentContext={identity:{subject:string;workspaceId:string;authentication:'signed_lab_session'|'local_simulation'};sessionId:string;channel:'web'|'test'|'whatsapp'};
+/** Only the caller with an already verified demo session may construct this context. No phone authentication. */
+export function demoContext(session:Session,channel:AgentContext['channel'],authentication:AgentContext['identity']['authentication']):AgentContext{return {identity:{subject:session.id,workspaceId:`demo:${session.id}`,authentication},sessionId:session.id,channel};}
+export function processMessage(provider:Provider,session:Session,message:string,requestId:string,today:string,context:AgentContext,options:NonNullable<Parameters<typeof runConversation>[5]>={}){if(provider.mode==='real'&&context.identity.authentication!=='signed_lab_session')throw new Error('IDENTITY_MISMATCH');if(context.sessionId!==session.id||context.identity.subject!==session.id||context.identity.workspaceId!==`demo:${session.id}`)throw new Error('IDENTITY_MISMATCH');return runConversation(provider,session,message,requestId,today,options).then(output=>{output.trace.channel=context.channel;return output;});}
