@@ -4,6 +4,8 @@ import {FinancialCoreV2,summary,compare,projection,balanceCents} from '../shared
 import {SimulationProviderV2} from '../shared/v2/simulation';
 import {runConversation,LIMITS,renderAnswer} from '../shared/v2/agent';
 import {monthPeriod} from '../shared/v2/policy';
+import {classifyIntent} from '../shared/v2/personality';
+import {personalityPrompt} from '../server/v2/personality-prompt';
 import {encodeSession,decodeSession} from '../server/v2/session';
 import {OpenAIConversationProvider,toolDefinitions} from '../server/v2/openai';
 import handler from '../server/v2/handler';
@@ -63,3 +65,9 @@ it('modelo sem ferramenta não pode confirmar escrita em sua resposta final',asy
 it('modelo não afirma crescimento de gastos sem resultado calculado',()=>{expect(renderAnswer([],'Seus gastos aumentaram neste mês.',createSession())).not.toContain('aumentaram');});
 
 it.each([['supermercado','alimentacao','Alimentação'],['restaurante','ALIMENTAÇÃO','Alimentação'],['presente','sem categoria',undefined]])('normaliza categoria válida para %s sem inventar classificação',async(description,category,expected)=>{const p=provider([{calls:[tc('registrar_transacao',{type:'despesa',amount:10,description,date:today,category})]},{content:'Podemos conversar sobre o próximo passo.'}]);const r=await runConversation(p,undefined,`Gastei 10 com ${description} hoje`,crypto.randomUUID(),today);expect(r.trace.status).toBe('success');expect(r.session.state.transactions[0].category).toBe(expected);});
+
+it('conversa pessoal com pontuação interrogativa não vira consulta financeira',()=>{expect(classifyIntent('Tô pensando em sair do meu emprego?')).toBe('conversa');expect(classifyIntent('Hoje foi um dia horrível.')).toBe('conversa');expect(classifyIntent('Gastei R$ 80 no mercado.')).toBe('execucao');expect(classifyIntent('Qual meu saldo?')).toBe('consulta');expect(classifyIntent('Tenho R$ 2.000 e quero comprar um celular de R$ 1.900. O que acha?')).toBe('orientacao');});
+it('resposta conversacional com pergunta de acompanhamento é sucesso sem ferramenta',async()=>{const p=provider([{content:'Parece uma mudança importante. O que está fazendo você considerar sair do emprego?'}]);const r=await runConversation(p,undefined,'Tô pensando em sair do meu emprego?',crypto.randomUUID(),today);expect(r.trace.status).toBe('success');expect(r.trace.intent).toBe('Conversa aberta');expect(r.trace.steps).toHaveLength(0);expect(r.trace.message).toContain('O que está fazendo');expect(r.session.state.transactions).toHaveLength(0);});
+it('consulta financeira sem período segue como esclarecimento e não confunde modo orientação',async()=>{const p=provider([{content:'Qual período você quer consultar?'}]);const r=await runConversation(p,undefined,'Quanto gastei?',crypto.randomUUID(),today);expect(r.trace.status).toBe('clarification');expect(r.trace.intent).toBe('consulta');expect(r.trace.steps).toHaveLength(0);});
+
+it('prompt sinaliza conversa aberta e permite acompanhamento sem erro operacional',()=>{const prompt=personalityPrompt(createSession(),today,'Tô pensando em sair do meu emprego?');expect(prompt).toContain('Intenção classificada para a mensagem atual: conversa');expect(prompt).toContain('uma pergunta de acompanhamento legítima não significa que falte informação operacional');});

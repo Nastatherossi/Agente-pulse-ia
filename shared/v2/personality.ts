@@ -6,13 +6,14 @@ export const isCancellation=(m:string)=>/^(nao[,! .]*|cancela|cancelar|nao,? dei
 export const isClear=(m:string)=>/^(limpa|limpar|apaga|apagar) (nossa |a )?conversa[.!]*$/.test(normalize(m.trim()));
 export function classifyIntent(m:string):Intent {
  const t=normalize(m);
+ const financialContext=/saldo|extrato|transac|despesa|receita|finan|orcamento|conta|divida|cartao|gasto|gastei|econom|invest|renda|salario|dinheiro|compra|comprar|preco|custo|categoria|meta|objetivo/.test(t)||/\br\$|\b\d+[.,]?\d*\s*(reais|real)\b/.test(t);
  if(isConfirmation(m)||isCancellation(m))return 'confirmacao';
  if(/sem (perguntar|confirmacao)|nao.*pedir confirmacao/.test(t)||requestedPreferences(m,{style:'neutro',detail:'curto',proactivity:'discreto',explanation:'minima',examples:false,emojis:false})||/preferencias/.test(t))return 'preferencias';
  if(/corrig|corr[eij]|alter|exclu|apagu|apaga|remov|pera[, ]|aquele .* foi|nao era|eram? r?\$|mudar.*meta/.test(t))return 'alteracao';
- if(/o que (voce )?acha|opiniao|orient|ajud|deveria|gastando muito|vale a pena/.test(t))return 'orientacao';
+ if(financialContext&&(/o que (voce )?acha|opiniao|orient|deveria|gastando muito|vale a pena/.test(t)))return 'orientacao';
  if(requestedGoal(m))return 'conversa';
  if(/^(eu )?(gastei|paguei|comprei|recebi|ganhei|registra|registre|registrar)\b/.test(t)&&!/[?]|\b(se|talvez|pensando|comprasse)\b/.test(t))return 'execucao';
- if(/[?]|saldo|listar|extrato|quanto|gastos|financas|categoria|projec|ritmo|compar/.test(t))return 'consulta';
+ if(/saldo|listar|extrato|transac|gastos|financas|categoria|projec|ritmo|compar|orcamento|renda|salario|divida|conta|despesa|receita|invest/.test(t)||financialContext&&/\bquanto\b|\bsobra\b|\bqual foi a diferenca\b/.test(t))return 'consulta';
  return 'conversa';
 }
 const number=(s:string)=>Number(s.includes(',')?s.replace(/\./g,'').replace(',','.'): /^\d{1,3}(?:\.\d{3})+$/.test(s)?s.replace(/\./g,''):s);
