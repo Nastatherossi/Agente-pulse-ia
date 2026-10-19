@@ -21,7 +21,7 @@ A causa está demonstrada por esses dois condicionais no caminho `classifyIntent
 
 - `shared/v2/personality.ts`: pontuação interrogativa deixou de ser sinal suficiente de consulta; orientação e consulta dependem de contexto financeiro. A conversa pessoal permanece como intenção explícita `conversa`.
 - `shared/v2/agent.ts`: perguntas de acompanhamento em conversas e orientações deixam de ser classificadas como esclarecimento. `clarification` continua disponível para mensagens de consulta que realmente pedem dados necessários e para execução financeira sem dados suficientes. Uma conversa sem ferramenta recebe a intenção legível `Conversa aberta` e status `success`.
-- `server/v2/personality-prompt.ts`: o prompt transmite a intenção atual ao modelo e explicita que perguntas abertas de acompanhamento não são lacunas operacionais; nenhuma segurança financeira ou regra de autorização foi relaxada.
+- `server/v2/personality-prompt.ts` e `api/conversation.js` (bundle serverless gerado): o prompt transmite a intenção atual ao modelo e explicita que perguntas abertas de acompanhamento não são lacunas operacionais; nenhuma segurança financeira ou regra de autorização foi relaxada.
 - `src/InspectorV2.tsx` e `src/main.tsx`: trace bem-sucedido sem ferramenta aparece como “Respondido” / “Conversa respondida”; operação financeira continua como “Executado”. O Inspector explica que não houve ferramenta porque nenhuma era necessária.
 - `tests/v2.test.ts`, `tests/e2e/lab.spec.ts`: cobertura da intenção conversacional com “?”, pergunta de acompanhamento, esclarecimento de período financeiro, prompt, UI sem ferramentas e coexistência com registro objetivo.
 - `public/manus-routes.json`: manifesta a rota `/` para validação local de Preview.
@@ -37,5 +37,7 @@ A causa está demonstrada por esses dois condicionais no caminho `classifyIntent
 
 ## Publicação
 
-- Branch / PR / Preview: atualização pendente de publicação; serão inseridos após a confirmação dos respectivos resultados.
+- Branch: [`feat/pulse-conversation-manus`](https://github.com/Nastatherossi/Agente-pulse-ia/tree/feat/pulse-conversation-manus), commit `4abf1dcb9f52157a7d66c01a602fc79e34f4372f`.
+- PR #8: [Pulse Personality V2.1: open conversation intent and status](https://github.com/Nastatherossi/Agente-pulse-ia/pull/8), aberto contra `feat/pulse-personality-v2`; sem merge.
+- Preview Vercel: [pulse-ai-bm9m1j5d7-matheusnastaro5-6769s-projects.vercel.app](https://pulse-ai-bm9m1j5d7-matheusnastaro5-6769s-projects.vercel.app/), `READY` no commit de implementação `4abf1dcb9f52157a7d66c01a602fc79e34f4372f`. O projeto mantém SSO para todos os deployments; verificação HTTP anônima retornou `302` para o endpoint SSO. O deployment tem `target: null`; nenhuma promoção foi feita.
 - Não fazer merge. Nenhuma promoção para produção.
