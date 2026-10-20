@@ -259,3 +259,16 @@ describe('Lembrança: o modelo responde, não um atalho por palavra-chave',()=>{
   r=await send(model(),r.session,'Esquece aquela ideia de sair do emprego');expect(r.session.narrative.records).toHaveLength(0);
  });
 });
+
+describe('Transparência: quem respondeu',()=>{
+ it('resposta do modelo é marcada como model, com o número de chamadas',async()=>{
+  const r=await send(model({content:'Opa, tudo certo?'}),undefined,'oi');expect(r.trace.respondedBy).toBe('model');expect(r.trace.modelCalls).toBe(1);
+ });
+ it('resposta escrita pelo código (confirmação, comando de memória) é marcada como code',async()=>{
+  const s=createSession();
+  const list=await send(model(),s,'O que você lembra sobre mim?');expect(list.trace.respondedBy).toBe('code');expect(list.trace.modelCalls).toBe(0);
+  const r0=await send(model({calls:[tc('registrar_varios',{natureza:'fato_ocorrido',lancamentos:[{type:'despesa',amount:40,description:'Uber',date:today,evidencia:'40 de Uber'},{type:'despesa',amount:20,description:'café',date:today,evidencia:'20 de café'}]})]}),undefined,'Gastei 40 de Uber e 20 de café');
+  expect(r0.trace.respondedBy).toBe('model');
+  const r=await send(model(),r0.session,'sim');expect(r.trace.respondedBy).toBe('code');expect(r.trace.modelCalls).toBe(0);
+ });
+});

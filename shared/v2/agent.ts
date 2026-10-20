@@ -82,7 +82,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  if(command===undefined&&!risk)observeMemory(session,message);
  const retrieved=retrieveMemories(session,message,'conversa'),tone=conversationTone(session,message);
  const core=new FinancialCoreV2(session.state),usage={inputTokens:0,outputTokens:0,totalTokens:0};
- let model:string|undefined,status:Trace['status']='success',draft='',errorCode:string|undefined,writesThisTurn=0;
+ let model:string|undefined,status:Trace['status']='success',draft='',errorCode:string|undefined,writesThisTurn=0,modelCalls=0;
  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),limits.timeoutMs);const seen=new Set<string>();
  const msgs:ModelMessage[]=[...session.history.slice(-10),{role:'user',content:message}];
  const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn});
@@ -151,6 +151,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
    for(let i=0;i<limits.steps;i++){
     if(controller.signal.aborted)throw new Error('OPENAI_TIMEOUT');
     if(msgs.reduce((n,m)=>n+(m.content?.length||0),0)>42000)throw new Error('CONTEXT_LIMIT');
+    modelCalls++;
     const next=await Promise.race([provider.next(msgs,session,controller.signal),new Promise<never>((_,reject)=>{const abort=()=>reject(new Error('OPENAI_TIMEOUT'));if(controller.signal.aborted)abort();else controller.signal.addEventListener('abort',abort,{once:true});})]);
     model=next.model||model;for(const key of ['inputTokens','outputTokens','totalTokens'] as const)usage[key]+=next.usage?.[key]||0;
     if(usage.totalTokens>limits.tokens)throw new Error('TOKEN_LIMIT');
@@ -174,7 +175,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  const analytic=success.some(s=>['resumir_financas','comparar_periodos','projetar_despesas','simular_compra'].includes(s.name));
  kind=kind||(success.some(s=>DATA_WRITES.has(s.name)&&s.name!=='atualizar_preferencias')?'execucao':success.some(s=>s.name==='atualizar_preferencias')?'preferencias':analytic&&answer.length>success.map(s=>readable(s,session.state.preferences.detail)).join('\n\n').length?'orientacao':success.length?'consulta':'conversa');
  const label=steps.length>1?'Análise com múltiplas ferramentas':steps[0]?.name==='registrar_transacao'?'Registro financeiro':steps[0]?.name==='atualizar_preferencias'?'Preferência explícita':steps[0]?.name==='comparar_periodos'?'Comparação de períodos':steps.length?'Consulta financeira':status==='clarification'?'Esclarecimento necessário':'Conversa aberta';
- const trace:Trace={...base,contextInvalidated,retrievedMemoryIds:retrieved.map(r=>r.id),conversationTone:tone,memoryMetrics:{stored:session.narrative.records.length,retrieved:retrieved.length,contextCharacters:retrieved.length?JSON.stringify(memoryContext(retrieved)).length:0,extractionCalls:0},interpretationSource,intent:kind==='conversa'?label:kind,proactivity:session.state.preferences.proactivity,pendingOperation:session.memory.operation,confirmation,status,message:answer,steps,durationMs:Math.round(performance.now()-started),model,usage:provider.mode==='real'?usage:undefined,errorCode};
+ const trace:Trace={...base,respondedBy:modelCalls>0&&provider.mode==='real'?'model':'code',modelCalls,contextInvalidated,retrievedMemoryIds:retrieved.map(r=>r.id),conversationTone:tone,memoryMetrics:{stored:session.narrative.records.length,retrieved:retrieved.length,contextCharacters:retrieved.length?JSON.stringify(memoryContext(retrieved)).length:0,extractionCalls:0},interpretationSource,intent:kind==='conversa'?label:kind,proactivity:session.state.preferences.proactivity,pendingOperation:session.memory.operation,confirmation,status,message:answer,steps,durationMs:Math.round(performance.now()-started),model,usage:provider.mode==='real'?usage:undefined,errorCode};
  session.history=[...session.history,{role:'user' as const,content:message.slice(0,1800)},{role:'assistant' as const,content:answer.slice(0,1800)}].slice(-10);
  session.lastRequests=[...session.lastRequests,{id:requestId,messageHash:hash,trace}].slice(-4);return {session,trace};
 }
