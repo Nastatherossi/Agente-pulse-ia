@@ -35,6 +35,7 @@ export function groundedText(draft:string,ctx:GroundingContext):string{
  const kept=sentences.filter(sentence=>{
   const n=normalize(sentence);
   if(WRITE_CLAIM.test(n)&&!ctx.wroteData)return false;
+  if(FAKE_CONFIRMATION.test(n))return false;
   if(MEMORY_CLAIM.test(n)&&!ctx.memoryWritten)return false;
   if(PERSONAL_FINANCE.test(n)&&!consulted)return false;
   const values=[...n.matchAll(MONEY)].flatMap(m=>amountsIn(m[0]));
@@ -42,4 +43,18 @@ export function groundedText(draft:string,ctx:GroundingContext):string{
   return true;
  });
  return kept.join(' ').trim().slice(0,900);
+}
+
+/** Sentences that imitate the system's own confirmation prompt. Only code may ask "sim ou cancelar". */
+const FAKE_CONFIRMATION=/responda .?sim.? ou .?cancelar|expira em 5 minutos/;
+export const imitatesConfirmation=(text:string)=>FAKE_CONFIRMATION.test(normalize(text));
+/** The model asks, in plain text, to confirm a write instead of proposing it through a tool. */
+export const asksToConfirmInText=(text:string)=>{const t=normalize(text);return /\?/.test(t)&&/\b(confirma|confirmar|posso|quer que eu|deseja que eu|devo)\b.{0,40}\b(exclu|apag|remov|alter|corrig|registr|lanc|anot)/.test(t)||imitatesConfirmation(text);};
+/**
+ * When the code already rendered the numbers (receipt, balance, summary, simulation), the model's comment
+ * must be qualitative: any sentence with a number or a money word is dropped. A model paraphrasing a
+ * computed value can get it wrong ("sobram uns 50 conto" for R$ 500) and the code-written line is already there.
+ */
+export function withoutNumbers(text:string):string{
+ return text.split(/(?<=[.!?…])\s+|\n+/).filter(x=>x.trim()&&!/\d|\b(mil|conto|contos|pila|pilas|reais|real|centavos|por cento)\b/.test(normalize(x))&&!imitatesConfirmation(x)).join(' ').trim();
 }

@@ -352,3 +352,39 @@ describe('Evidência parafraseada pelo modelo (bateria real)',()=>{
   expect(r.session.state.transactions).toHaveLength(0);
  });
 });
+
+describe('Bateria real (20/10, 19h): regressões',()=>{
+ it('simulação sem valor dito pelo usuário usa o saldo, não "valor informado" inventado pelo modelo',async()=>{
+  const r=await send(model({calls:[tc('simular_compra',{amount:2000,available:2500})]},{content:'Dá pra fazer, mas fica justo.'}),undefined,'Estou pensando em comprar um celular de 2 mil');
+  expect(r.trace.steps[0].result).toMatchObject({basis:'saldo fictício da sessão',remainingCents:50000});expect(r.trace.message).not.toContain('valor informado');
+ });
+ it('valor dito pelo usuário continua aceito como dinheiro disponível',async()=>{
+  const r=await send(model({calls:[tc('simular_compra',{amount:1900,available:2000})]},{content:'Fica bem apertado.'}),undefined,'Tenho 2000 guardados e quero comprar um celular de 1900');
+  expect(r.trace.steps[0].result).toMatchObject({basis:'valor informado nesta mensagem',remainingCents:10000});
+ });
+ it('comentário do modelo não repete nem erra números já mostrados pelo código',async()=>{
+  const r=await send(model({calls:[tc('simular_compra',{amount:2000})]},{content:'Se você comprar, vai sobrar uns 50 conto. É troca de um que quebrou?'}),undefined,'Estou pensando em comprar um celular de 2 mil');
+  expect(r.trace.message).toContain(brl(50000));expect(r.trace.message).not.toContain('50 conto');expect(r.trace.message).toContain('É troca de um que quebrou?');
+ });
+ it('modelo que pede confirmação em texto é orientado a usar a ferramenta; quem confirma é o código',async()=>{
+  const s=await withRecord(280,'tênis','Comprei um tênis por 280');
+  const p=model({content:'Confirma excluir o lançamento do tênis, R$ 280,00? Responda “sim” ou “cancelar”.'},{calls:[tc('propor_exclusao_transacao',{alvo:{descricao:'tênis'},evidencia:'Apaga o tênis'})]});
+  const r=await send(p,s,'Apaga o tênis');
+  expect((p.next as any).mock.calls.length).toBe(2);expect(r.trace.confirmation).toBe('pending');expect(r.session.memory.operation?.kind).toBe('delete');
+ });
+ it('confirmação imitada nunca chega ao usuário, mesmo se o modelo insistir',async()=>{
+  const fake='Confirma excluir o tênis? Responda “sim” ou “cancelar”. Expira em 5 minutos.';
+  const r=await send(model({content:fake},{content:fake}),await withRecord(280,'tênis','Comprei um tênis por 280'),'Apaga o tênis');
+  expect(r.trace.message).not.toContain('Responda');expect(r.session.memory.operation).toBeUndefined();
+ });
+ it('“sim” depois de um registro concluído não propõe registrar de novo a mensagem anterior',async()=>{
+  let r=await send(model({calls:[tc('registrar_transacao',expense(999,'cassino','registre 999 de cassino'))]}),undefined,'registre 999 de cassino');expect(r.session.state.transactions).toHaveLength(1);
+  r=await send(model({calls:[tc('registrar_transacao',expense(999,'cassino','registre 999 de cassino'))]},{content:'Ok!'}),r.session,'sim');
+  expect(r.session.state.transactions).toHaveLength(1);expect(r.session.memory.operation).toBeUndefined();
+ });
+ it('“sim” a uma pergunta do modelo (nada registrado antes) ainda funciona via confirmação',async()=>{
+  let r=await send(model({content:'Quer que eu registre a luz e a taxa?'},{content:'Quer que eu registre a luz e a taxa?'}),undefined,'Paguei 230 da luz e 15 de taxa do boleto');
+  r=await send(model({calls:[tc('registrar_varios',{natureza:'fato_ocorrido',lancamentos:[{type:'despesa',amount:230,description:'luz',date:today,evidencia:'230 da luz'},{type:'despesa',amount:15,description:'taxa do boleto',date:today,evidencia:'15 de taxa do boleto'}]})]}),r.session,'sim');
+  expect(r.trace.confirmation).toBe('pending');expect(r.session.state.transactions).toHaveLength(0);
+ });
+});

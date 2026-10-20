@@ -611,6 +611,7 @@ function groundedText(draft, ctx) {
   const kept = sentences.filter((sentence) => {
     const n = normalize(sentence);
     if (WRITE_CLAIM.test(n) && !ctx.wroteData) return false;
+    if (FAKE_CONFIRMATION.test(n)) return false;
     if (MEMORY_CLAIM.test(n) && !ctx.memoryWritten) return false;
     if (PERSONAL_FINANCE.test(n) && !consulted) return false;
     const values = [...n.matchAll(MONEY)].flatMap((m) => amountsIn(m[0]));
@@ -618,6 +619,15 @@ function groundedText(draft, ctx) {
     return true;
   });
   return kept.join(" ").trim().slice(0, 900);
+}
+var FAKE_CONFIRMATION = /responda .?sim.? ou .?cancelar|expira em 5 minutos/;
+var imitatesConfirmation = (text) => FAKE_CONFIRMATION.test(normalize(text));
+var asksToConfirmInText = (text) => {
+  const t = normalize(text);
+  return /\?/.test(t) && /\b(confirma|confirmar|posso|quer que eu|deseja que eu|devo)\b.{0,40}\b(exclu|apag|remov|alter|corrig|registr|lanc|anot)/.test(t) || imitatesConfirmation(text);
+};
+function withoutNumbers(text) {
+  return text.split(/(?<=[.!?…])\s+|\n+/).filter((x) => x.trim() && !/\d|\b(mil|conto|contos|pila|pilas|reais|real|centavos|por cento)\b/.test(normalize(x)) && !imitatesConfirmation(x)).join(" ").trim();
 }
 
 // shared/v2/agent.ts
@@ -671,7 +681,7 @@ function renderAnswer(steps, draft, session, context = {}) {
   const lookupOnly = success.length > 0 && success.every((s) => LOOKUPS.has(s.name));
   const grounding = { message: context.message || "", history: context.history ?? session.history.filter((h) => h.role === "user").map((h) => h.content), steps, wroteData };
   if (!success.length) return groundedText(draft, grounding) || "Pode me contar um pouco mais?";
-  const commentary = wroteData || lookupOnly ? "" : groundedText(draft, grounding);
+  const commentary = wroteData || lookupOnly ? "" : withoutNumbers(groundedText(draft, grounding));
   return [facts, commentary].filter(Boolean).join("\n\n");
 }
 function remember(call, session) {
@@ -710,12 +720,14 @@ async function runConversation(provider, sessionInput, message, requestId, today
   if (command === void 0 && !risk) observeMemory(session, message);
   const retrieved = retrieveMemories(session, message, "conversa"), tone = conversationTone(session, message);
   const core = new FinancialCoreV2(session.state), usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-  let model, status = "success", draft = "", errorCode, writesThisTurn = 0, modelCalls = 0, retries = 0;
+  let model, status = "success", draft = "", errorCode, writesThisTurn = 0, modelCalls = 0, retries = 0, nudges = 0;
   const hints = /* @__PURE__ */ new Map();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), limits.timeoutMs);
   const seen = /* @__PURE__ */ new Set();
   const msgs = [...session.history.slice(-10), { role: "user", content: message }];
-  const previousUserMessage = [...session.history].reverse().find((h) => h.role === "user")?.content;
+  const lastTrace = session.lastRequests.at(-1)?.trace;
+  const previousTurnWrote = Boolean(lastTrace?.steps?.some((s) => s.status === "success" && DATA_WRITES.has(s.name)));
+  const previousUserMessage = previousTurnWrote ? void 0 : [...session.history].reverse().find((h) => h.role === "user")?.content;
   const policyContext = () => ({ message, today, session: { ...session, state: core.snapshot() }, risk, repeatedMessage, writesThisTurn, previousUserMessage, affirmation: isConfirmation(message) });
   const hold = (op, text, label2) => {
     session.memory.operation = op;
@@ -801,6 +813,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       if (seen.has(signature)) throw new Error("LOOP_DETECTED");
       seen.add(signature);
       if (options.failTools) throw new Error("EXECUTION_FAILED");
+      if (call.name === "simular_compra" && call.arguments.available != null && !amountsIn(message).some((v) => Math.round(v * 100) === Math.round(Number(call.arguments.available) * 100))) delete call.arguments.available;
       if (WRITE_TOOLS.has(call.name)) handleWrite(call, step, signature);
       else run(call.name, call.arguments, step, signature);
     } catch (error) {
@@ -854,6 +867,11 @@ async function runConversation(provider, sessionInput, message, requestId, today
         for (const key of ["inputTokens", "outputTokens", "totalTokens"]) usage[key] += next.usage?.[key] || 0;
         if (usage.totalTokens > limits.tokens) throw new Error("TOKEN_LIMIT");
         if (!next.calls?.length) {
+          if (nudges < 1 && asksToConfirmInText(next.content || "") && i < limits.steps - 1) {
+            nudges++;
+            msgs.push({ role: "assistant", content: next.content || "" }, { role: "system", content: "N\xE3o pe\xE7a confirma\xE7\xE3o em texto. Se o usu\xE1rio pediu para registrar, corrigir ou excluir um lan\xE7amento que existe, chame a ferramenta agora: o sistema mostra a confirma\xE7\xE3o. Se n\xE3o h\xE1 lan\xE7amento correspondente ou nada a fazer, responda normalmente, sem perguntar se deve registrar." });
+            continue;
+          }
           draft = next.content || "";
           break;
         }
@@ -980,7 +998,18 @@ Bom: Lembro, o que xinga. O que ele aprontou hoje?
 Bom: Obrigado por me dizer. Liga agora pro CVV no 188 ou pro 192, ou chama algu\xE9m de confian\xE7a pra ficar com voc\xEA. Eu continuo aqui na conversa.
 
 Usu\xE1rio: gastei 50 no mercado
-(Registro: chame a ferramenta. O recibo \xE9 escrito pelo sistema; n\xE3o acrescente nada.)`;
+(Registro: chame a ferramenta. O recibo \xE9 escrito pelo sistema; n\xE3o acrescente nada.)
+
+Usu\xE1rio: Apaga o t\xEAnis
+(Exclus\xE3o: chame propor_exclusao_transacao. Nunca escreva voc\xEA mesmo "Confirma\u2026? Responda sim ou cancelar": a confirma\xE7\xE3o \xE9 do sistema.)
+
+(N\xE3o h\xE1 nenhum gasto no mercado registrado.) Usu\xE1rio: N\xE3o gastei 50 no mercado, foi meu irm\xE3o
+Ruim: Quer que eu corrija e exclua esse gasto dos seus registros?
+Bom: Beleza, ent\xE3o n\xE3o anoto nada.
+
+(O sistema acabou de mostrar uma simula\xE7\xE3o com os n\xFAmeros.) Usu\xE1rio: Estou pensando em comprar um celular de 2 mil
+Ruim: Se voc\xEA comprar, vai sobrar uns 50 conto.
+Bom: D\xE1 pra fazer, mas fica bem justo. \xC9 troca de um que quebrou ou vontade de um novo?`;
 var RULES = `REGRAS DE OPERA\xC7\xC3O
 Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real. Nunca mencione ao usu\xE1rio nomes de campos ou de ferramentas (natureza, evidencia, registrar_transacao\u2026); se uma ferramenta der erro, corrija a chamada ou pergunte em linguagem comum.
 Nem toda mensagem \xE9 uma opera\xE7\xE3o. "Sim", "n\xE3o", "pode", "claro" respondem \xE0 sua \xFAltima pergunta da conversa; confirma\xE7\xF5es de opera\xE7\xF5es pendentes j\xE1 foram tratadas pelo c\xF3digo antes de chegar a voc\xEA, ent\xE3o n\xE3o as trate como comandos financeiros.

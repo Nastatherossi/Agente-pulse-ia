@@ -3,8 +3,8 @@ import {z} from 'zod';
 import {createSession,sessionSchema,validateModelCall,brl,WRITE_TOOLS,type Session,type Trace,type Step,type Provider,type ModelMessage,type ModelCall,type PendingOperation} from './contracts.js';
 import {FinancialCoreV2} from './finance.js';
 import {isConfirmation,isCancellation,isClear,clearContext,describeOperation,type Intent} from './personality.js';
-import {riskSignal,decideCreate,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
-import {groundedText} from './grounding.js';
+import {amountsIn,riskSignal,decideCreate,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
+import {groundedText,withoutNumbers,asksToConfirmInText} from './grounding.js';
 /** Tool errors the model can fix by itself: the error (with the schema message) goes back to it for another try. */
 const RETRYABLE=new Set(['VALIDATION_FAILED','UNKNOWN_TOOL']);
 export const LIMITS={steps:4,tools:8,timeoutMs:35000,tokens:14000};
@@ -47,7 +47,7 @@ export function renderAnswer(steps:Step[],draft:string,session:Session,context:A
  const lookupOnly=success.length>0&&success.every(s=>LOOKUPS.has(s.name));
  const grounding={message:context.message||'',history:context.history??session.history.filter(h=>h.role==='user').map(h=>h.content),steps,wroteData};
  if(!success.length)return groundedText(draft,grounding)||'Pode me contar um pouco mais?';
- const commentary=wroteData||lookupOnly?'':groundedText(draft,grounding);
+ const commentary=wroteData||lookupOnly?'':withoutNumbers(groundedText(draft,grounding));
  return [facts,commentary].filter(Boolean).join('\n\n');
 }
 function remember(call:{name:string;arguments:Record<string,unknown>},session:Session){
@@ -84,11 +84,15 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  if(command===undefined&&!risk)observeMemory(session,message);
  const retrieved=retrieveMemories(session,message,'conversa'),tone=conversationTone(session,message);
  const core=new FinancialCoreV2(session.state),usage={inputTokens:0,outputTokens:0,totalTokens:0};
- let model:string|undefined,status:Trace['status']='success',draft='',errorCode:string|undefined,writesThisTurn=0,modelCalls=0,retries=0;
+ let model:string|undefined,status:Trace['status']='success',draft='',errorCode:string|undefined,writesThisTurn=0,modelCalls=0,retries=0,nudges=0;
  const hints=new Map<string,string>(); // validation messages for the model only; never logged or returned
  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),limits.timeoutMs);const seen=new Set<string>();
  const msgs:ModelMessage[]=[...session.history.slice(-10),{role:'user',content:message}];
- const previousUserMessage=[...session.history].reverse().find(h=>h.role==='user')?.content;
+ // A bare "sim" may take values from the user's previous message only when that message was NOT already
+ // recorded (the model had asked in plain text). Otherwise "sim" after a receipt would propose a duplicate.
+ const lastTrace=session.lastRequests.at(-1)?.trace as Trace|undefined;
+ const previousTurnWrote=Boolean(lastTrace?.steps?.some(s=>s.status==='success'&&DATA_WRITES.has(s.name)));
+ const previousUserMessage=previousTurnWrote?undefined:[...session.history].reverse().find(h=>h.role==='user')?.content;
  const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn,previousUserMessage,affirmation:isConfirmation(message)});
  const hold=(op:PendingOperation,text:string,label:Intent)=>{session.memory.operation=op;pendingAnswer=text;confirmation='pending';status='clarification';kind=label;};
  const refuse=(step:Step,reason:string|undefined)=>{step.status='blocked';step.error={code:'WRITE_NOT_AUTHORIZED',reason,message:blockedMessage(reason)};if(reason!=='RISK_CONTEXT'){blockedAnswer=blockedMessage(reason);status='clarification';}};
@@ -130,6 +134,9 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
    const signature=JSON.stringify({name:call.name,arguments:call.arguments});
    if(seen.has(signature))throw new Error('LOOP_DETECTED');seen.add(signature);
    if(options.failTools)throw new Error('EXECUTION_FAILED');
+   // "available" is the user's own money only when the user said it; otherwise the core uses the session balance
+   // (the model was filling it with the balance it had looked up and the answer said "valor informado nesta mensagem").
+   if(call.name==='simular_compra'&&call.arguments.available!=null&&!amountsIn(message).some(v=>Math.round(v*100)===Math.round(Number(call.arguments.available)*100)))delete call.arguments.available;
    if(WRITE_TOOLS.has(call.name))handleWrite(call,step,signature);
    else run(call.name,call.arguments,step,signature);
   }catch(error){const code=error instanceof Error?error.message:'EXECUTION_FAILED';const safeCodes=['UNKNOWN_TOOL','TOOL_LIMIT','LOOP_DETECTED','EXECUTION_FAILED','IDEMPOTENCY_CONFLICT','SESSION_FULL','INVALID_PROJECTION_DATE','CONFIRMATION_REQUIRED','PENDING_OPERATION_EXISTS'];step.error={code:safeCodes.includes(code)?code:'VALIDATION_FAILED',message:code==='LOOP_DETECTED'?'Chamada repetida bloqueada.':code==='EXECUTION_FAILED'?'Falha simulada; esta ferramenta não foi executada.':'Ferramenta ou argumentos inválidos; esta chamada não alterou dados.'};if(error instanceof z.ZodError)hints.set(step.id,error.issues.slice(0,4).map(i=>`${i.path.join('.')}: ${i.message}`).join('; ').slice(0,400));if(error instanceof z.ZodError)step.error.issues=error.issues.slice(0,8).map(issue=>({field:['type','amount','description','date','category','evidencia','natureza'].includes(String(issue.path[0]))?String(issue.path[0]):'arguments',code:issue.code}));}
@@ -159,7 +166,12 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
     const next=await Promise.race([provider.next(msgs,session,controller.signal),new Promise<never>((_,reject)=>{const abort=()=>reject(new Error('OPENAI_TIMEOUT'));if(controller.signal.aborted)abort();else controller.signal.addEventListener('abort',abort,{once:true});})]);
     model=next.model||model;for(const key of ['inputTokens','outputTokens','totalTokens'] as const)usage[key]+=next.usage?.[key]||0;
     if(usage.totalTokens>limits.tokens)throw new Error('TOKEN_LIMIT');
-    if(!next.calls?.length){draft=next.content||'';break;}
+    if(!next.calls?.length){
+     // The model asked to confirm a write in plain text (or imitated the system's confirmation) instead of
+     // proposing it. Only the code may ask for confirmation, so it gets one nudge to use the tool or just answer.
+     if(nudges<1&&asksToConfirmInText(next.content||'')&&i<limits.steps-1){nudges++;msgs.push({role:'assistant',content:next.content||''},{role:'system',content:'Não peça confirmação em texto. Se o usuário pediu para registrar, corrigir ou excluir um lançamento que existe, chame a ferramenta agora: o sistema mostra a confirmação. Se não há lançamento correspondente ou nada a fazer, responda normalmente, sem perguntar se deve registrar.'});continue;}
+     draft=next.content||'';break;
+    }
     if(next.calls.length>limits.tools-steps.length)throw new Error('TOOL_LIMIT');
     msgs.push({role:'assistant',content:null,tool_calls:next.calls.map(c=>({id:c.id,type:'function',function:{name:c.name,arguments:JSON.stringify(c.arguments)}}))});
     for(const call of mergeCreates(next.calls)){if(pendingAnswer||blockedAnswer)break;const result=await execute(call);msgs.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result.status==='success'?{ok:true,result:result.result}:{ok:false,error:{...result.error,...(hints.get(result.id)?{hint:hints.get(result.id)}:{})}})});if(result.status==='error'){if(RETRYABLE.has(result.error?.code||'')){retries++;if(retries>2){errorCode=result.error?.code;status='error';}}else{errorCode=result.error?.code;status='error';}}}
