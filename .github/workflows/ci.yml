@@ -27,7 +27,11 @@ jobs:
       - name: TypeScript and production build
         run: npm run build
       - name: Generated API bundle matches the sources
-        run: git diff --exit-code -- api/conversation.js || (echo "api/conversation.js is stale: run npm run build:api and commit it" && exit 1)
+        run: |
+          if ! git diff --exit-code -- api/conversation.js; then
+            echo "api/conversation.js is stale - run npm run build:api and commit it"
+            exit 1
+          fi
       - name: Install Chromium for browser tests
         run: npx playwright install --with-deps chromium
       - name: Browser tests (desktop and mobile)
