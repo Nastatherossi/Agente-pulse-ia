@@ -104,8 +104,10 @@ export function memoryCommand(session:Session,message:string):string|undefined {
  if(/o que.*lembra.*mim|consultar.*memorias/.test(t))return applyMemoryAction(session,{kind:'list'});
  if(/^(limp|apag).*memorias/.test(t))return applyMemoryAction(session,{kind:'clear'});
  const topic=topicOf(message);
- if(/lembra|retomar/.test(t)&&topic&&!/^lembre/.test(t)){const record=session.narrative.records.find(r=>r.topic===topic&&r.ownerId===session.id&&!session.narrative.tombstones.includes(topic));return record?`${record.content} ${record.status==='abandoned'?'Esse assunto está marcado como abandonado.':record.status==='outdated'?'Essa informação está desatualizada.':'Podemos retomar a partir daí.'}`:'Não há memória armazenada sobre esse assunto.';}
- if(/esquece|esqueca|pode esquecer/.test(t)&&topic){const records=session.narrative.records.filter(r=>r.topic===topic&&r.ownerId===session.id);if(records.length!==1)return 'Não encontrei uma memória única sobre esse assunto.';return applyMemoryAction(session,{kind:'delete',id:records[0].id});}
+ // "Lembra do…?" is NOT a command: it goes to the model with the conversation history and the retrieved
+ // memories (a keyword shortcut here answered "Não há memória" while the subject was right there in the chat).
+ // Only an explicit request to forget something remembered; "esquece meu chefe, hoje foi bom" is conversation.
+ if(/(esquece|esqueca|pode esquecer|apaga|apague)( (essa|aquela|esta|a|da|de|dessa|daquela))? (ideia|memoria|lembranca|informacao)|(esquece|esqueca) que eu/.test(t)&&topic){const records=session.narrative.records.filter(r=>r.topic===topic&&r.ownerId===session.id);if(records.length!==1)return 'Não encontrei uma memória única sobre esse assunto.';return applyMemoryAction(session,{kind:'delete',id:records[0].id});}
  if(/^lembre (disso|que|da)/.test(t)&&topic&&!unsafe(message)){
   session.narrative.tombstones=session.narrative.tombstones.filter(v=>v!==topic);const enabled=session.narrative.enabled,accepted=session.narrative.noticeAccepted;session.narrative.enabled=true;session.narrative.noticeAccepted=true;observeMemory(session,message);session.narrative.enabled=enabled;session.narrative.noticeAccepted=accepted;
   return session.narrative.records.some(r=>r.topic===topic)?'Informação registrada como memória narrativa, sem criar uma operação financeira.':'Não consegui identificar uma informação adequada para lembrar.';

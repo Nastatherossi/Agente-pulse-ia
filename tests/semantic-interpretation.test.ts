@@ -238,3 +238,24 @@ describe('Grounding da resposta',()=>{
   expect(decideCreate(call,ctxp)).toEqual(decideCreate(call,ctxp));expect(decideCreate(call,ctxp).decision).toBe('execute');
  });
 });
+
+describe('Lembrança: o modelo responde, não um atalho por palavra-chave',()=>{
+ const enabled=()=>{const s=createSession();applyMemoryAction(s,{kind:'enable',enabled:true,noticeAccepted:true});return s;};
+ it('“Lembra do que eu tava falando do meu chefe?” chega ao modelo com o histórico (bug do Preview)',async()=>{
+  const s=createSession();s.history=[{role:'user',content:'cara, meu chefe só me xinga, é foda'},{role:'assistant',content:'Pô, aí complica. É sempre assim?'},{role:'user',content:'KKKKK mano eu consegui perder meu ônibus'},{role:'assistant',content:'Kkkkk, essa é nova!'}];
+  const p=model({content:'Lembro, o que xinga. O que ele aprontou hoje?'});
+  const r=await send(p,s,'Lembra do que eu tava falando do meu chefe? Hoje ele veio com outra.');
+  expect(p.next).toHaveBeenCalled();const sent=(p.next as any).mock.calls[0][0];expect(sent.some((m:any)=>String(m.content).includes('meu chefe só me xinga'))).toBe(true);
+  expect(r.trace.message).toBe('Lembro, o que xinga. O que ele aprontou hoje?');expect(r.trace.message).not.toContain('Não há memória');
+ });
+ it('com memória salva, a lembrança também é respondida pelo modelo (a memória vai como dado)',async()=>{
+  let r=await send(model({content:'Faz sentido pensar com calma.'}),enabled(),'Estou pensando em sair do emprego');expect(r.session.narrative.records).toHaveLength(1);
+  const p=model({content:'Lembro sim, você tava pensando em sair. Mudou alguma coisa?'});r=await send(p,r.session,'Lembra daquilo do emprego?');
+  expect(p.next).toHaveBeenCalled();expect(r.trace.retrievedMemoryIds).toHaveLength(1);
+ });
+ it('“esquece meu chefe” é conversa e não apaga memória; pedido explícito apaga',async()=>{
+  let r=await send(model({content:'Ok.'}),enabled(),'Estou pensando em sair do emprego');
+  r=await send(model({content:'Boa, bola pra frente.'}),r.session,'Esquece meu chefe, hoje foi um dia bom');expect(r.session.narrative.records).toHaveLength(1);expect(r.trace.message).toBe('Boa, bola pra frente.');
+  r=await send(model(),r.session,'Esquece aquela ideia de sair do emprego');expect(r.session.narrative.records).toHaveLength(0);
+ });
+});
