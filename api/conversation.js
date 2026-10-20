@@ -405,6 +405,10 @@ function knownCategory(description) {
   if (/\b(bar|cinema|lazer)\b/.test(text)) return "Lazer";
   return void 0;
 }
+function backing(ctx) {
+  if (ctx.affirmation && ctx.previousUserMessage && amountsIn(ctx.message).length === 0) return { text: ctx.previousUserMessage, viaPrevious: true };
+  return { text: ctx.message, viaPrevious: false };
+}
 var HIGH_VALUE_REAIS = 5e3;
 var OLDEST_DAYS = 366;
 var cents2 = (n) => Math.round(n * 100);
@@ -451,19 +455,21 @@ function entryFrom(a, message) {
 function blockForEntry(e, evidence2, ctx) {
   if (e.date > ctx.today) return "FUTURE_DATE";
   if (e.date < dateOffset(ctx.today, -OLDEST_DAYS)) return "DATE_TOO_OLD";
-  if (!hasAmount(ctx.message, e.amount)) return "AMOUNT_NOT_IN_MESSAGE";
-  if (!contains(ctx.message, evidence2)) return "EVIDENCE_NOT_IN_MESSAGE";
+  const { text } = backing(ctx);
+  if (!hasAmount(text, e.amount)) return "AMOUNT_NOT_IN_MESSAGE";
+  if (!contains(text, evidence2)) return "EVIDENCE_NOT_IN_MESSAGE";
   return void 0;
 }
 function confirmForEntry(e, ctx) {
-  const t = normalize(ctx.message), values = amountsIn(ctx.message);
+  const { text, viaPrevious } = backing(ctx), t = normalize(text), values = amountsIn(text);
+  if (viaPrevious) return "CONFIRM_FROM_PREVIOUS_MESSAGE";
   if (ctx.repeatedMessage) return "REPEATED_MESSAGE";
-  if (tentative(ctx.message)) return "TENTATIVE_LANGUAGE";
+  if (tentative(text)) return "TENTATIVE_LANGUAGE";
   if (values.length > 1) return "MULTIPLE_AMOUNTS";
   if (e.amount > HIGH_VALUE_REAIS) return "HIGH_VALUE";
-  if (e.date !== ctx.today && e.date !== dateOffset(ctx.today, -1) && !ctx.message.includes(e.date)) return "RELATIVE_DATE";
+  if (e.date !== ctx.today && e.date !== dateOffset(ctx.today, -1) && !text.includes(e.date)) return "RELATIVE_DATE";
   if (e.type === "receita" && expenseCue(t) && !incomeCue(t) || e.type === "despesa" && incomeCue(t) && !expenseCue(t)) return "TYPE_UNCLEAR";
-  if (!sharesStem(ctx.message, e.description)) return "DESCRIPTION_NOT_IN_MESSAGE";
+  if (!sharesStem(text, e.description)) return "DESCRIPTION_NOT_IN_MESSAGE";
   if (ctx.writesThisTurn > 0) return "SECOND_WRITE_IN_TURN";
   return void 0;
 }
@@ -472,7 +478,7 @@ function decideCreate(call, ctx) {
   if (ctx.risk) return { decision: "block", reason: "RISK_CONTEXT" };
   if (a.natureza !== "fato_ocorrido") return { decision: "block", reason: "NOT_A_FACT" };
   const items = call.name === "registrar_varios" ? a.lancamentos : [a];
-  const entries = items.map((i) => entryFrom(i, ctx.message));
+  const entries = items.map((i) => entryFrom(i, backing(ctx).text));
   for (let i = 0; i < entries.length; i++) {
     const reason2 = blockForEntry(entries[i], String(items[i].evidencia), ctx);
     if (reason2) return { decision: "block", reason: reason2 };
@@ -551,6 +557,8 @@ function confirmLead(reason) {
       return "Esta mensagem j\xE1 foi registrada nesta sess\xE3o. Quer registrar uma segunda despesa/receita igual?";
     case "MULTIPLE_ENTRIES":
       return "Vou registrar estes lan\xE7amentos juntos:";
+    case "CONFIRM_FROM_PREVIOUS_MESSAGE":
+      return "Confirma o registro do que voc\xEA me contou?";
     case "TENTATIVE_LANGUAGE":
       return "S\xF3 para confirmar: isso j\xE1 aconteceu e devo registrar?";
     case "MULTIPLE_AMOUNTS":
@@ -698,7 +706,8 @@ async function runConversation(provider, sessionInput, message, requestId, today
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), limits.timeoutMs);
   const seen = /* @__PURE__ */ new Set();
   const msgs = [...session.history.slice(-10), { role: "user", content: message }];
-  const policyContext = () => ({ message, today, session: { ...session, state: core.snapshot() }, risk, repeatedMessage, writesThisTurn });
+  const previousUserMessage = [...session.history].reverse().find((h) => h.role === "user")?.content;
+  const policyContext = () => ({ message, today, session: { ...session, state: core.snapshot() }, risk, repeatedMessage, writesThisTurn, previousUserMessage, affirmation: isConfirmation(message) });
   const hold = (op, text, label2) => {
     session.memory.operation = op;
     pendingAnswer = text;
@@ -966,7 +975,7 @@ Usu\xE1rio: gastei 50 no mercado
 var RULES = `REGRAS DE OPERA\xC7\xC3O
 Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real. Nunca mencione ao usu\xE1rio nomes de campos ou de ferramentas (natureza, evidencia, registrar_transacao\u2026); se uma ferramenta der erro, corrija a chamada ou pergunte em linguagem comum.
 Nem toda mensagem \xE9 uma opera\xE7\xE3o. "Sim", "n\xE3o", "pode", "claro" respondem \xE0 sua \xFAltima pergunta da conversa; confirma\xE7\xF5es de opera\xE7\xF5es pendentes j\xE1 foram tratadas pelo c\xF3digo antes de chegar a voc\xEA, ent\xE3o n\xE3o as trate como comandos financeiros.
-Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho literal da mensagem atual que cont\xE9m o valor. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. Cart\xE3o, Pix ou dinheiro n\xE3o mudam o registro. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores.
+Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho literal da mensagem atual que cont\xE9m o valor. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Cart\xE3o, Pix ou dinheiro n\xE3o mudam o registro. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
 amount \xE9 n\xFAmero JSON em reais (R$ 1.900 = 1900; R$ 1.900,50 = 1900.50; "3 mil" = 3000), nunca string ou centavos. date em YYYY-MM-DD: sem data = hoje; "ontem" = ontem; nunca data futura. description curta, sem verbo, valor ou data ("almo\xE7o", "Uber", "celular"). category: escolha uma de ${CATEGORIES.join(", ")}; se nenhuma servir com seguran\xE7a, ou se o usu\xE1rio disser que n\xE3o sabe, OMITA category. N\xE3o invente categoria.
 Corre\xE7\xF5es e exclus\xF5es de lan\xE7amentos existentes: propor_edicao_transacao ou propor_exclusao_transacao; o c\xF3digo mostra antes/depois e pede confirma\xE7\xE3o. Se o alvo for amb\xEDguo, consulte listar_transacoes ou pergunte.
 Metas: definir_objetivo s\xF3 quando o usu\xE1rio pedir uma meta com valor. "Quero guardar para o casamento" \xE9 inten\xE7\xE3o, n\xE3o meta. Substituir meta existente gera confirma\xE7\xE3o.

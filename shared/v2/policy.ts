@@ -22,7 +22,16 @@ export function knownCategory(description:string):string|undefined{
  * write; they can only downgrade "execute" to "confirm".
  */
 export type WriteDecision={decision:'execute'|'confirm'|'block';reason?:string};
-export type PolicyContext={message:string;today:string;session:Session;risk:boolean;repeatedMessage:boolean;writesThisTurn:number};
+export type PolicyContext={message:string;today:string;session:Session;risk:boolean;repeatedMessage:boolean;writesThisTurn:number;
+ /** The user's previous message and whether the current one is a bare yes. Used only when the model asked in plain text
+  *  ("quer que eu registre?") and the user said "sim": the values must then come from that previous message, and the
+  *  record still goes through a code-written confirmation. */
+ previousUserMessage?:string;affirmation?:boolean};
+/** Which user message backs a new record: the current one, or the previous one when the current is a bare "sim". */
+function backing(ctx:PolicyContext):{text:string;viaPrevious:boolean}{
+ if(ctx.affirmation&&ctx.previousUserMessage&&amountsIn(ctx.message).length===0)return {text:ctx.previousUserMessage,viaPrevious:true};
+ return {text:ctx.message,viaPrevious:false};
+}
 export const HIGH_VALUE_REAIS=5000;
 const OLDEST_DAYS=366;
 const cents=(n:number)=>Math.round(n*100);
@@ -69,19 +78,21 @@ function entryFrom(a:Record<string,unknown>,message:string):NewEntry{
 function blockForEntry(e:NewEntry,evidence:string,ctx:PolicyContext):string|undefined{
  if(e.date>ctx.today)return 'FUTURE_DATE';
  if(e.date<dateOffset(ctx.today,-OLDEST_DAYS))return 'DATE_TOO_OLD';
- if(!hasAmount(ctx.message,e.amount))return 'AMOUNT_NOT_IN_MESSAGE';
- if(!contains(ctx.message,evidence))return 'EVIDENCE_NOT_IN_MESSAGE';
+ const {text}=backing(ctx);
+ if(!hasAmount(text,e.amount))return 'AMOUNT_NOT_IN_MESSAGE';
+ if(!contains(text,evidence))return 'EVIDENCE_NOT_IN_MESSAGE';
  return undefined;
 }
 function confirmForEntry(e:NewEntry,ctx:PolicyContext):string|undefined{
- const t=normalize(ctx.message),values=amountsIn(ctx.message);
+ const {text,viaPrevious}=backing(ctx),t=normalize(text),values=amountsIn(text);
+ if(viaPrevious)return 'CONFIRM_FROM_PREVIOUS_MESSAGE';
  if(ctx.repeatedMessage)return 'REPEATED_MESSAGE';
- if(tentative(ctx.message))return 'TENTATIVE_LANGUAGE';
+ if(tentative(text))return 'TENTATIVE_LANGUAGE';
  if(values.length>1)return 'MULTIPLE_AMOUNTS'; // counts repeats too: "50 no mercado e 50 na farmácia" is two records
  if(e.amount>HIGH_VALUE_REAIS)return 'HIGH_VALUE';
- if(e.date!==ctx.today&&e.date!==dateOffset(ctx.today,-1)&&!ctx.message.includes(e.date))return 'RELATIVE_DATE';
+ if(e.date!==ctx.today&&e.date!==dateOffset(ctx.today,-1)&&!text.includes(e.date))return 'RELATIVE_DATE';
  if((e.type==='receita'&&expenseCue(t)&&!incomeCue(t))||(e.type==='despesa'&&incomeCue(t)&&!expenseCue(t)))return 'TYPE_UNCLEAR';
- if(!sharesStem(ctx.message,e.description))return 'DESCRIPTION_NOT_IN_MESSAGE';
+ if(!sharesStem(text,e.description))return 'DESCRIPTION_NOT_IN_MESSAGE';
  if(ctx.writesThisTurn>0)return 'SECOND_WRITE_IN_TURN';
  return undefined;
 }
@@ -92,7 +103,7 @@ export function decideCreate(call:ModelCall,ctx:PolicyContext):CreateDecision{
  if(ctx.risk)return {decision:'block',reason:'RISK_CONTEXT'};
  if(a.natureza!=='fato_ocorrido')return {decision:'block',reason:'NOT_A_FACT'};
  const items=call.name==='registrar_varios'?(a.lancamentos as Record<string,unknown>[]):[a];
- const entries=items.map(i=>entryFrom(i,ctx.message));
+ const entries=items.map(i=>entryFrom(i,backing(ctx).text));
  for(let i=0;i<entries.length;i++){const reason=blockForEntry(entries[i],String(items[i].evidencia),ctx);if(reason)return {decision:'block',reason};}
  if(entries.length>1)return {decision:'confirm',reason:'MULTIPLE_ENTRIES',entries};
  const reason=confirmForEntry(entries[0],ctx);
@@ -163,6 +174,7 @@ export function confirmLead(reason:string|undefined):string{
  switch(reason){
   case 'REPEATED_MESSAGE':return 'Esta mensagem já foi registrada nesta sessão. Quer registrar uma segunda despesa/receita igual?';
   case 'MULTIPLE_ENTRIES':return 'Vou registrar estes lançamentos juntos:';
+  case 'CONFIRM_FROM_PREVIOUS_MESSAGE':return 'Confirma o registro do que você me contou?';
   case 'TENTATIVE_LANGUAGE':return 'Só para confirmar: isso já aconteceu e devo registrar?';
   case 'MULTIPLE_AMOUNTS':return 'Sua mensagem tem mais de um valor. Confirma este registro?';
   case 'HIGH_VALUE':return 'É um valor alto, então confirmo antes de registrar:';

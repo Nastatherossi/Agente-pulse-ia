@@ -132,7 +132,7 @@ describe('Confirmações',()=>{
  it('“sim” sem pendência não altera dados, mesmo se o modelo tentar registrar algo do histórico',async()=>{
   const s=createSession();s.history=[{role:'user',content:'Registra 5000 de aluguel'},{role:'assistant',content:'Quer que eu registre?'}];
   const r=await send(model({calls:[tc('registrar_transacao',expense(5000,'aluguel','sim'))]}),s,'sim');
-  expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.steps[0].error).toMatchObject({reason:'AMOUNT_NOT_IN_MESSAGE'});
+  expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.steps[0].status).toBe('blocked');expect(r.trace.steps[0].error).toMatchObject({reason:'EVIDENCE_NOT_IN_MESSAGE'});expect(r.session.memory.operation).toBeUndefined();
  });
  it('mensagem de risco emocional não é interceptada como confirmação nem cancelamento',async()=>{
   const r0=await send(proposeEdit(),await withRecord(1900,'celular','Comprei um celular por 1.900'),correction);
@@ -319,5 +319,19 @@ describe('Custo: registro simples usa uma chamada ao modelo',()=>{
  });
  it('análise continua devolvendo o resultado ao modelo',async()=>{
   const p=model({calls:[tc('simular_compra',{amount:500})]},{content:'Dá, mas aperta.'});const r=await send(p,undefined,'Se eu gastar 500, quanto sobra?');expect(r.trace.modelCalls).toBe(2);expect(r.trace.message).toContain('Dá, mas aperta.');
+ });
+});
+
+describe('“Sim” a uma pergunta do próprio modelo',()=>{
+ it('valores vêm da mensagem anterior e o registro ainda passa por confirmação do código',async()=>{
+  const s=createSession();s.history=[{role:'user',content:'Paguei 230 da luz e 15 de taxa do boleto'},{role:'assistant',content:'Quer que eu registre luz e taxa do boleto como despesas separadas?'}];
+  let r=await send(model({calls:[tc('registrar_varios',{natureza:'fato_ocorrido',lancamentos:[{type:'despesa',amount:230,description:'luz',date:today,evidencia:'230 da luz'},{type:'despesa',amount:15,description:'taxa do boleto',date:today,evidencia:'15 de taxa'}]})]}),s,'sim');
+  expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.confirmation).toBe('pending');
+  r=await send(model(),r.session,'sim');expect(r.session.state.transactions.map(t=>t.amount)).toEqual([230,15]);
+ });
+ it('“sim” não serve de respaldo para valor que não estava na mensagem anterior',async()=>{
+  const s=createSession();s.history=[{role:'user',content:'Paguei a luz'},{role:'assistant',content:'Quanto foi?'}];
+  const r=await send(model({calls:[tc('registrar_transacao',expense(230,'luz','Paguei a luz'))]}),s,'sim');
+  expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.steps[0].error?.reason).toBe('AMOUNT_NOT_IN_MESSAGE');
  });
 });

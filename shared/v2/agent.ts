@@ -88,7 +88,8 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  const hints=new Map<string,string>(); // validation messages for the model only; never logged or returned
  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),limits.timeoutMs);const seen=new Set<string>();
  const msgs:ModelMessage[]=[...session.history.slice(-10),{role:'user',content:message}];
- const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn});
+ const previousUserMessage=[...session.history].reverse().find(h=>h.role==='user')?.content;
+ const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn,previousUserMessage,affirmation:isConfirmation(message)});
  const hold=(op:PendingOperation,text:string,label:Intent)=>{session.memory.operation=op;pendingAnswer=text;confirmation='pending';status='clarification';kind=label;};
  const refuse=(step:Step,reason:string|undefined)=>{step.status='blocked';step.error={code:'WRITE_NOT_AUTHORIZED',reason,message:blockedMessage(reason)};if(reason!=='RISK_CONTEXT'){blockedAnswer=blockedMessage(reason);status='clarification';}};
  const run=(name:string,args:Record<string,unknown>,step:Step,signature:string)=>{step.result=core.execute({id:step.id,name,arguments:args},`${requestId}:${signature}`);step.status='success';remember({name,arguments:args},session);};
