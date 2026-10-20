@@ -272,3 +272,25 @@ describe('Transparência: quem respondeu',()=>{
   const r=await send(model(),r0.session,'sim');expect(r.trace.respondedBy).toBe('code');expect(r.trace.modelCalls).toBe(0);
  });
 });
+
+describe('Falhas reais do modelo (bateria com OpenAI real)',()=>{
+ it.each(['fato','fato ocorrido','Fato_Ocorrido','fato-ocorrido'])('variação de escrita da natureza (%s) é normalizada',async v=>{
+  const r=await send(model({calls:[tc('registrar_transacao',expense(35,'almoço','deu 35',{natureza:v}))]}),undefined,'Almocei hoje, deu 35');
+  expect(r.session.state.transactions[0]?.amount).toBe(35);
+ });
+ it('natureza desconhecida continua recusada',async()=>{
+  const r=await send(model({calls:[tc('registrar_transacao',expense(35,'almoço','deu 35',{natureza:'certeza'}))]},{content:'Pode confirmar o valor?'}),undefined,'Almocei hoje, deu 35');
+  expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.steps[0].error?.code).toBe('VALIDATION_FAILED');
+ });
+ it('argumento inválido volta para o modelo, que corrige na mesma mensagem',async()=>{
+  const p=model({calls:[tc('registrar_transacao',expense(1900,'celular','celular por 1.900',{natureza:'certeza'}))]},{calls:[tc('registrar_transacao',expense(1900,'celular','celular por 1.900'))]},{content:'ok'});
+  const r=await send(p,undefined,'Comprei um celular por 1.900');
+  expect(r.session.state.transactions[0]?.amount).toBe(1900);expect(r.trace.status).toBe('success');expect(r.trace.errorCode).toBeUndefined();
+  const second=(p.next as any).mock.calls[1][0];const toolMsg=second.find((m:any)=>m.role==='tool');expect(JSON.parse(toolMsg.content).error.hint).toContain('natureza');
+ });
+ it('modelo que insiste no erro para depois de 3 tentativas, sem escrever',async()=>{
+  const bad=()=>({calls:[tc('registrar_transacao',{...expense(10,'x','Gastei 10'),amount:'10'})]});
+  const r=await send(model(bad(),bad(),bad(),bad()),undefined,'Gastei 10 no mercado');
+  expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.status).toBe('error');
+ });
+});

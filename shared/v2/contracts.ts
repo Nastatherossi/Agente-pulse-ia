@@ -25,7 +25,9 @@ export type ToolName=keyof typeof schemas;
 /** Closed category taxonomy the model may choose from. Anything else is dropped, never invented. */
 export const CATEGORIES=['Alimentação','Transporte','Lazer','Moradia','Saúde','Educação','Compras','Contas e serviços','Assinaturas','Renda'] as const;
 /** How the model read the user's statement. Only 'fato_ocorrido' can lead to a new record. */
-export const nature=z.enum(['fato_ocorrido','hipotese','plano','desejo','duvida']);
+const NATURE_ALIASES:Record<string,string>={fato:'fato_ocorrido',ocorrido:'fato_ocorrido',fato_ocorrida:'fato_ocorrido',fato_realizado:'fato_ocorrido',realizado:'fato_ocorrido',hipotetico:'hipotese',hipotetica:'hipotese',planejamento:'plano',intencao:'desejo',vontade:'desejo',pergunta:'duvida'};
+/** The model's reading of the statement. Spelling variants are normalized mechanically (accents, spaces, a few synonyms); anything else is rejected. */
+export const nature=z.preprocess(v=>{if(typeof v!=='string')return v;const k=v.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim().replace(/[\s-]+/g,'_');return NATURE_ALIASES[k]??k;},z.enum(['fato_ocorrido','hipotese','plano','desejo','duvida']));
 /** Exact excerpt of the CURRENT user message that supports a proposal. Checked by code, never trusted. */
 export const evidence=z.string().trim().min(1).max(300);
 const modelCategory=z.string().trim().max(50).nullable().optional();

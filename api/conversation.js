@@ -41,7 +41,12 @@ var schemas = {
   definir_objetivo: goal
 };
 var CATEGORIES = ["Alimenta\xE7\xE3o", "Transporte", "Lazer", "Moradia", "Sa\xFAde", "Educa\xE7\xE3o", "Compras", "Contas e servi\xE7os", "Assinaturas", "Renda"];
-var nature = z2.enum(["fato_ocorrido", "hipotese", "plano", "desejo", "duvida"]);
+var NATURE_ALIASES = { fato: "fato_ocorrido", ocorrido: "fato_ocorrido", fato_ocorrida: "fato_ocorrido", fato_realizado: "fato_ocorrido", realizado: "fato_ocorrido", hipotetico: "hipotese", hipotetica: "hipotese", planejamento: "plano", intencao: "desejo", vontade: "desejo", pergunta: "duvida" };
+var nature = z2.preprocess((v) => {
+  if (typeof v !== "string") return v;
+  const k = v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim().replace(/[\s-]+/g, "_");
+  return NATURE_ALIASES[k] ?? k;
+}, z2.enum(["fato_ocorrido", "hipotese", "plano", "desejo", "duvida"]));
 var evidence = z2.string().trim().min(1).max(300);
 var modelCategory = z2.string().trim().max(50).nullable().optional();
 var entryFields = { type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: modelCategory };
@@ -598,6 +603,7 @@ function groundedText(draft, ctx) {
 }
 
 // shared/v2/agent.ts
+var RETRYABLE = /* @__PURE__ */ new Set(["VALIDATION_FAILED", "UNKNOWN_TOOL"]);
 var LIMITS = { steps: 4, tools: 8, timeoutMs: 35e3, tokens: 14e3 };
 var messageHash = async (text) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))).map((n) => n.toString(16).padStart(2, "0")).join("");
 var errorMessage = (code) => ({ OPENAI_AUTH_FAILED: "A chave OpenAI n\xE3o foi aceita. Verifique a configura\xE7\xE3o do laborat\xF3rio.", OPENAI_QUOTA_EXCEEDED: "A OpenAI informou falta de cr\xE9ditos ou limite de uso.", OPENAI_RATE_LIMITED: "A OpenAI est\xE1 limitando requisi\xE7\xF5es. Aguarde antes de tentar de novo.", MODEL_INCOMPATIBLE: "O modelo n\xE3o aceitou o contrato de ferramentas.", OPENAI_TIMEOUT: "A OpenAI n\xE3o respondeu no prazo.", REAL_AI_LOCKED: "IA real bloqueada na configura\xE7\xE3o do laborat\xF3rio.", INVALID_SESSION: "Esta sess\xE3o perdeu a validade. Inicie uma nova sess\xE3o.", STEP_LIMIT: "Parei no limite de etapas. Tente uma pergunta mais espec\xEDfica.", TOKEN_LIMIT: "Parei no limite de consumo desta intera\xE7\xE3o.", LOOP_DETECTED: "A consulta se repetiu. Parei para evitar um loop." })[code] || "N\xE3o consegui concluir esta intera\xE7\xE3o. Nenhum sucesso de ferramenta foi inventado.";
@@ -686,7 +692,8 @@ async function runConversation(provider, sessionInput, message, requestId, today
   if (command === void 0 && !risk) observeMemory(session, message);
   const retrieved = retrieveMemories(session, message, "conversa"), tone = conversationTone(session, message);
   const core = new FinancialCoreV2(session.state), usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-  let model, status = "success", draft = "", errorCode, writesThisTurn = 0, modelCalls = 0;
+  let model, status = "success", draft = "", errorCode, writesThisTurn = 0, modelCalls = 0, retries = 0;
+  const hints = /* @__PURE__ */ new Map();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), limits.timeoutMs);
   const seen = /* @__PURE__ */ new Set();
   const msgs = [...session.history.slice(-10), { role: "user", content: message }];
@@ -781,6 +788,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       const code = error instanceof Error ? error.message : "EXECUTION_FAILED";
       const safeCodes = ["UNKNOWN_TOOL", "TOOL_LIMIT", "LOOP_DETECTED", "EXECUTION_FAILED", "IDEMPOTENCY_CONFLICT", "SESSION_FULL", "INVALID_PROJECTION_DATE", "CONFIRMATION_REQUIRED", "PENDING_OPERATION_EXISTS"];
       step.error = { code: safeCodes.includes(code) ? code : "VALIDATION_FAILED", message: code === "LOOP_DETECTED" ? "Chamada repetida bloqueada." : code === "EXECUTION_FAILED" ? "Falha simulada; esta ferramenta n\xE3o foi executada." : "Ferramenta ou argumentos inv\xE1lidos; esta chamada n\xE3o alterou dados." };
+      if (error instanceof z3.ZodError) hints.set(step.id, error.issues.slice(0, 4).map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 400));
       if (error instanceof z3.ZodError) step.error.issues = error.issues.slice(0, 8).map((issue) => ({ field: ["type", "amount", "description", "date", "category", "evidencia", "natureza"].includes(String(issue.path[0])) ? String(issue.path[0]) : "arguments", code: issue.code }));
     }
     step.durationMs = Math.round(performance.now() - start);
@@ -835,10 +843,18 @@ async function runConversation(provider, sessionInput, message, requestId, today
         for (const call of mergeCreates(next.calls)) {
           if (pendingAnswer || blockedAnswer) break;
           const result = await execute(call);
-          msgs.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result.status === "success" ? { ok: true, result: result.result } : { ok: false, error: result.error }) });
+          msgs.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result.status === "success" ? { ok: true, result: result.result } : { ok: false, error: { ...result.error, ...hints.get(result.id) ? { hint: hints.get(result.id) } : {} } }) });
           if (result.status === "error") {
-            errorCode = result.error?.code;
-            status = "error";
+            if (RETRYABLE.has(result.error?.code || "")) {
+              retries++;
+              if (retries > 2) {
+                errorCode = result.error?.code;
+                status = "error";
+              }
+            } else {
+              errorCode = result.error?.code;
+              status = "error";
+            }
           }
         }
         if (status !== "success" || pendingAnswer || blockedAnswer) break;
@@ -1106,7 +1122,7 @@ async function handler(req, res) {
     const current = session || createSession();
     const output = await processMessage(new OpenAIConversationProvider(key, model), current, body.data.message, body.data.requestId, todayBR(), demoContext(current, "web", "signed_lab_session"), { failTools: body.data.failTools });
     const sessionToken = encodeSession(output.session, key);
-    if (output.trace.errorCode) console.warn(JSON.stringify({ event: "pulse_v2_error", requestId: output.trace.requestId, code: output.trace.errorCode, diagnostics: output.trace.steps.flatMap((step) => step.error ? [{ code: step.error.code, reason: step.error.reason, issues: step.error.issues }] : []) }));
+    if (output.trace.errorCode || output.trace.steps.some((step) => step.status === "error")) console.warn(JSON.stringify({ event: "pulse_v2_error", requestId: output.trace.requestId, code: output.trace.errorCode, diagnostics: output.trace.steps.flatMap((step) => step.error ? [{ code: step.error.code, reason: step.error.reason, issues: step.error.issues }] : []) }));
     const code = output.trace.errorCode;
     const status = output.trace.status === "error" ? code === "OPENAI_TIMEOUT" ? 504 : code === "OPENAI_RATE_LIMITED" ? 429 : code === "OPENAI_AUTH_FAILED" || code === "OPENAI_QUOTA_EXCEEDED" || code === "MODEL_INCOMPATIBLE" ? 503 : 502 : 200;
     return res.status(status).json({ trace: output.trace, state: output.session.state, narrative: output.session.narrative, sessionExpiresAt: output.session.expiresAt, sessionToken, preferences: output.session.state.preferences });

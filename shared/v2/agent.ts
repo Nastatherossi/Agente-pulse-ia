@@ -5,6 +5,8 @@ import {FinancialCoreV2} from './finance.js';
 import {isConfirmation,isCancellation,isClear,clearContext,describeOperation,type Intent} from './personality.js';
 import {riskSignal,decideCreate,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
 import {groundedText} from './grounding.js';
+/** Tool errors the model can fix by itself: the error (with the schema message) goes back to it for another try. */
+const RETRYABLE=new Set(['VALIDATION_FAILED','UNKNOWN_TOOL']);
 export const LIMITS={steps:4,tools:8,timeoutMs:35000,tokens:14000};
 export const messageHash=async(text:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))).map(n=>n.toString(16).padStart(2,'0')).join('');
 export const errorMessage=(code:string)=>({OPENAI_AUTH_FAILED:'A chave OpenAI não foi aceita. Verifique a configuração do laboratório.',OPENAI_QUOTA_EXCEEDED:'A OpenAI informou falta de créditos ou limite de uso.',OPENAI_RATE_LIMITED:'A OpenAI está limitando requisições. Aguarde antes de tentar de novo.',MODEL_INCOMPATIBLE:'O modelo não aceitou o contrato de ferramentas.',OPENAI_TIMEOUT:'A OpenAI não respondeu no prazo.',REAL_AI_LOCKED:'IA real bloqueada na configuração do laboratório.',INVALID_SESSION:'Esta sessão perdeu a validade. Inicie uma nova sessão.',STEP_LIMIT:'Parei no limite de etapas. Tente uma pergunta mais específica.',TOKEN_LIMIT:'Parei no limite de consumo desta interação.',LOOP_DETECTED:'A consulta se repetiu. Parei para evitar um loop.'} as Record<string,string>)[code]||'Não consegui concluir esta interação. Nenhum sucesso de ferramenta foi inventado.';
@@ -82,7 +84,8 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  if(command===undefined&&!risk)observeMemory(session,message);
  const retrieved=retrieveMemories(session,message,'conversa'),tone=conversationTone(session,message);
  const core=new FinancialCoreV2(session.state),usage={inputTokens:0,outputTokens:0,totalTokens:0};
- let model:string|undefined,status:Trace['status']='success',draft='',errorCode:string|undefined,writesThisTurn=0,modelCalls=0;
+ let model:string|undefined,status:Trace['status']='success',draft='',errorCode:string|undefined,writesThisTurn=0,modelCalls=0,retries=0;
+ const hints=new Map<string,string>(); // validation messages for the model only; never logged or returned
  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),limits.timeoutMs);const seen=new Set<string>();
  const msgs:ModelMessage[]=[...session.history.slice(-10),{role:'user',content:message}];
  const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn});
@@ -128,7 +131,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
    if(options.failTools)throw new Error('EXECUTION_FAILED');
    if(WRITE_TOOLS.has(call.name))handleWrite(call,step,signature);
    else run(call.name,call.arguments,step,signature);
-  }catch(error){const code=error instanceof Error?error.message:'EXECUTION_FAILED';const safeCodes=['UNKNOWN_TOOL','TOOL_LIMIT','LOOP_DETECTED','EXECUTION_FAILED','IDEMPOTENCY_CONFLICT','SESSION_FULL','INVALID_PROJECTION_DATE','CONFIRMATION_REQUIRED','PENDING_OPERATION_EXISTS'];step.error={code:safeCodes.includes(code)?code:'VALIDATION_FAILED',message:code==='LOOP_DETECTED'?'Chamada repetida bloqueada.':code==='EXECUTION_FAILED'?'Falha simulada; esta ferramenta não foi executada.':'Ferramenta ou argumentos inválidos; esta chamada não alterou dados.'};if(error instanceof z.ZodError)step.error.issues=error.issues.slice(0,8).map(issue=>({field:['type','amount','description','date','category','evidencia','natureza'].includes(String(issue.path[0]))?String(issue.path[0]):'arguments',code:issue.code}));}
+  }catch(error){const code=error instanceof Error?error.message:'EXECUTION_FAILED';const safeCodes=['UNKNOWN_TOOL','TOOL_LIMIT','LOOP_DETECTED','EXECUTION_FAILED','IDEMPOTENCY_CONFLICT','SESSION_FULL','INVALID_PROJECTION_DATE','CONFIRMATION_REQUIRED','PENDING_OPERATION_EXISTS'];step.error={code:safeCodes.includes(code)?code:'VALIDATION_FAILED',message:code==='LOOP_DETECTED'?'Chamada repetida bloqueada.':code==='EXECUTION_FAILED'?'Falha simulada; esta ferramenta não foi executada.':'Ferramenta ou argumentos inválidos; esta chamada não alterou dados.'};if(error instanceof z.ZodError)hints.set(step.id,error.issues.slice(0,4).map(i=>`${i.path.join('.')}: ${i.message}`).join('; ').slice(0,400));if(error instanceof z.ZodError)step.error.issues=error.issues.slice(0,8).map(issue=>({field:['type','amount','description','date','category','evidencia','natureza'].includes(String(issue.path[0]))?String(issue.path[0]):'arguments',code:issue.code}));}
   step.durationMs=Math.round(performance.now()-start);steps.push(step);return step;
  }
  try{
@@ -158,7 +161,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
     if(!next.calls?.length){draft=next.content||'';break;}
     if(next.calls.length>limits.tools-steps.length)throw new Error('TOOL_LIMIT');
     msgs.push({role:'assistant',content:null,tool_calls:next.calls.map(c=>({id:c.id,type:'function',function:{name:c.name,arguments:JSON.stringify(c.arguments)}}))});
-    for(const call of mergeCreates(next.calls)){if(pendingAnswer||blockedAnswer)break;const result=await execute(call);msgs.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result.status==='success'?{ok:true,result:result.result}:{ok:false,error:result.error})});if(result.status==='error'){errorCode=result.error?.code;status='error';}}
+    for(const call of mergeCreates(next.calls)){if(pendingAnswer||blockedAnswer)break;const result=await execute(call);msgs.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result.status==='success'?{ok:true,result:result.result}:{ok:false,error:{...result.error,...(hints.get(result.id)?{hint:hints.get(result.id)}:{})}})});if(result.status==='error'){if(RETRYABLE.has(result.error?.code||'')){retries++;if(retries>2){errorCode=result.error?.code;status='error';}}else{errorCode=result.error?.code;status='error';}}}
     if(status!=='success'||pendingAnswer||blockedAnswer)break;
     if(i===limits.steps-1)throw new Error('STEP_LIMIT');
    }
