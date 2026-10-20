@@ -95,7 +95,10 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  const previousUserMessage=previousTurnWrote?undefined:[...session.history].reverse().find(h=>h.role==='user')?.content;
  const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn,previousUserMessage,affirmation:isConfirmation(message)});
  const hold=(op:PendingOperation,text:string,label:Intent)=>{session.memory.operation=op;pendingAnswer=text;confirmation='pending';status='clarification';kind=label;};
- const refuse=(step:Step,reason:string|undefined)=>{step.status='blocked';step.error={code:'WRITE_NOT_AUTHORIZED',reason,message:blockedMessage(reason)};if(reason!=='RISK_CONTEXT'){blockedAnswer=blockedMessage(reason);status='clarification';}};
+ const refuse=(step:Step,reason:string|undefined)=>{step.status='blocked';step.error={code:'WRITE_NOT_AUTHORIZED',reason,message:blockedMessage(reason)};if(reason==='RISK_CONTEXT')return;
+  // "sim" right after a receipt: the model tried to record it again. Nothing to do; say it is already there.
+  if(previousTurnWrote&&isConfirmation(message)){blockedAnswer='Já está registrado. Quer anotar mais alguma coisa?';return;}
+  blockedAnswer=blockedMessage(reason);status='clarification';};
  const run=(name:string,args:Record<string,unknown>,step:Step,signature:string)=>{step.result=core.execute({id:step.id,name,arguments:args},`${requestId}:${signature}`);step.status='success';remember({name,arguments:args},session);};
  /** Model proposals are validated, then routed by the deterministic policy. Nothing is written because the model asked. */
  function handleWrite(call:ModelCall,step:Step,signature:string){

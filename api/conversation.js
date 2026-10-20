@@ -739,10 +739,13 @@ async function runConversation(provider, sessionInput, message, requestId, today
   const refuse = (step, reason) => {
     step.status = "blocked";
     step.error = { code: "WRITE_NOT_AUTHORIZED", reason, message: blockedMessage(reason) };
-    if (reason !== "RISK_CONTEXT") {
-      blockedAnswer = blockedMessage(reason);
-      status = "clarification";
+    if (reason === "RISK_CONTEXT") return;
+    if (previousTurnWrote && isConfirmation(message)) {
+      blockedAnswer = "J\xE1 est\xE1 registrado. Quer anotar mais alguma coisa?";
+      return;
     }
+    blockedAnswer = blockedMessage(reason);
+    status = "clarification";
   };
   const run = (name, args, step, signature) => {
     step.result = core.execute({ id: step.id, name, arguments: args }, `${requestId}:${signature}`);

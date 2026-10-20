@@ -380,7 +380,7 @@ describe('Bateria real (20/10, 19h): regressões',()=>{
  it('“sim” depois de um registro concluído não propõe registrar de novo a mensagem anterior',async()=>{
   let r=await send(model({calls:[tc('registrar_transacao',expense(999,'cassino','registre 999 de cassino'))]}),undefined,'registre 999 de cassino');expect(r.session.state.transactions).toHaveLength(1);
   r=await send(model({calls:[tc('registrar_transacao',expense(999,'cassino','registre 999 de cassino'))]},{content:'Ok!'}),r.session,'sim');
-  expect(r.session.state.transactions).toHaveLength(1);expect(r.session.memory.operation).toBeUndefined();
+  expect(r.session.state.transactions).toHaveLength(1);expect(r.session.memory.operation).toBeUndefined();expect(r.trace.message).toBe('Já está registrado. Quer anotar mais alguma coisa?');
  });
  it('“sim” a uma pergunta do modelo (nada registrado antes) ainda funciona via confirmação',async()=>{
   let r=await send(model({content:'Quer que eu registre a luz e a taxa?'},{content:'Quer que eu registre a luz e a taxa?'}),undefined,'Paguei 230 da luz e 15 de taxa do boleto');
