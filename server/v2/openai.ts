@@ -18,7 +18,31 @@ const descriptions:Record<keyof typeof toolSchemas,string>={
  atualizar_preferencias:'Altera apenas preferências de comunicação pedidas explicitamente; envie só os campos alterados (ou redefinir=true) e a evidencia literal. Não inferir personalidade.',
  definir_objetivo:'Cria uma meta financeira pedida explicitamente, com valor dito pelo usuário. Substituir meta existente gera pedido de confirmação.'
 };
-export const toolDefinitions=Object.entries(toolSchemas).map(([name,schema])=>{const {$schema,...parameters}=z.toJSONSchema(schema,{unrepresentable:'any'});void $schema;return {type:'function',function:{name,description:descriptions[name as keyof typeof toolSchemas],parameters,strict:false}};});
+type JsonSchema={[key:string]:unknown};
+/**
+ * OpenAI strict mode (structured outputs) makes the model emit exactly the declared enums and shapes.
+ * Strict mode requires every property in `required` and `additionalProperties:false`, so optional
+ * fields become nullable (null = "not provided"; validateModelCall turns null back into absent).
+ * Keywords strict mode does not accept are dropped here; zod still enforces them on the server.
+ */
+export function strictSchema(schema:JsonSchema):JsonSchema{
+ const out:JsonSchema={};
+ for(const [k,v] of Object.entries(schema)){if(['default','minLength','maxLength','format','$schema'].includes(k))continue;out[k]=v;}
+ if(Array.isArray(out.anyOf))out.anyOf=(out.anyOf as JsonSchema[]).map(strictSchema);
+ if(out.items&&typeof out.items==='object')out.items=strictSchema(out.items as JsonSchema);
+ if(out.type==='object'&&out.properties){
+  const required=new Set((out.required as string[]|undefined)||[]),props:JsonSchema={};
+  for(const [k,v] of Object.entries(out.properties as Record<string,JsonSchema>)){
+   const child=strictSchema(v);
+   if(required.has(k))props[k]=child;
+   else if(Array.isArray(child.anyOf))props[k]=(child.anyOf as JsonSchema[]).some(o=>o.type==='null')?child:{...child,anyOf:[...(child.anyOf as JsonSchema[]),{type:'null'}]};
+   else props[k]={anyOf:[child,{type:'null'}]};
+  }
+  out.properties=props;out.required=Object.keys(props);out.additionalProperties=false;
+ }
+ return out;
+}
+export const toolDefinitions=Object.entries(toolSchemas).map(([name,schema])=>({type:'function',function:{name,description:descriptions[name as keyof typeof toolSchemas],parameters:strictSchema(z.toJSONSchema(schema,{unrepresentable:'any'}) as JsonSchema),strict:true}}));
 const resultSchema=z.object({model:z.string().optional(),usage:z.object({prompt_tokens:z.number().int().nonnegative(),completion_tokens:z.number().int().nonnegative(),total_tokens:z.number().int().nonnegative()}).optional(),choices:z.array(z.object({finish_reason:z.string().nullish(),message:z.object({content:z.string().nullish(),refusal:z.string().nullish(),tool_calls:z.array(z.object({id:z.string().min(1).max(100),type:z.literal('function'),function:z.object({name:z.string().min(1).max(80),arguments:z.string().max(10000)})})).max(8).optional()})})).min(1)});
 export class OpenAIConversationProvider implements Provider {
  readonly mode='real' as const;

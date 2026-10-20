@@ -78,4 +78,6 @@ export const todayBR=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_
 export const normalize=(s:string)=>s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 export function validateCall(call:Call):ValidCall {if(!Object.hasOwn(schemas,call.name))throw new Error('UNKNOWN_TOOL');const name=call.name as ToolName;return {id:call.id,name,arguments:schemas[name].parse(call.arguments) as Record<string,unknown>};}
 /** Validates a call proposed by the model against the model-facing contract (unknown tools and extra fields are rejected). */
-export function validateModelCall(call:Call):ModelCall {if(!Object.hasOwn(toolSchemas,call.name))throw new Error('UNKNOWN_TOOL');const name=call.name as ModelToolName;return {id:call.id,name,arguments:toolSchemas[name].parse(call.arguments) as Record<string,unknown>};}
+/** Strict mode sends null for optional fields the model leaves empty; null means "not provided". */
+export const dropNulls=(v:unknown):unknown=>Array.isArray(v)?v.map(dropNulls):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).filter(([,x])=>x!==null).map(([k,x])=>[k,dropNulls(x)])):v;
+export function validateModelCall(call:Call):ModelCall {if(!Object.hasOwn(toolSchemas,call.name))throw new Error('UNKNOWN_TOOL');const name=call.name as ModelToolName;return {id:call.id,name,arguments:toolSchemas[name].parse(dropNulls(call.arguments)) as Record<string,unknown>};}

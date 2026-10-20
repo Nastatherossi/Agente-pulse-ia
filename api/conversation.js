@@ -81,10 +81,11 @@ function validateCall(call) {
   const name = call.name;
   return { id: call.id, name, arguments: schemas[name].parse(call.arguments) };
 }
+var dropNulls = (v) => Array.isArray(v) ? v.map(dropNulls) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([, x]) => x !== null).map(([k, x]) => [k, dropNulls(x)])) : v;
 function validateModelCall(call) {
   if (!Object.hasOwn(toolSchemas, call.name)) throw new Error("UNKNOWN_TOOL");
   const name = call.name;
-  return { id: call.id, name, arguments: toolSchemas[name].parse(call.arguments) };
+  return { id: call.id, name, arguments: toolSchemas[name].parse(dropNulls(call.arguments)) };
 }
 
 // shared/v2/personality.ts
@@ -961,7 +962,7 @@ Bom: Obrigado por me dizer. Liga agora pro CVV no 188 ou pro 192, ou chama algu\
 Usu\xE1rio: gastei 50 no mercado
 (Registro: chame a ferramenta. O recibo \xE9 escrito pelo sistema; n\xE3o acrescente nada.)`;
 var RULES = `REGRAS DE OPERA\xC7\xC3O
-Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real.
+Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real. Nunca mencione ao usu\xE1rio nomes de campos ou de ferramentas (natureza, evidencia, registrar_transacao\u2026); se uma ferramenta der erro, corrija a chamada ou pergunte em linguagem comum.
 Nem toda mensagem \xE9 uma opera\xE7\xE3o. "Sim", "n\xE3o", "pode", "claro" respondem \xE0 sua \xFAltima pergunta da conversa; confirma\xE7\xF5es de opera\xE7\xF5es pendentes j\xE1 foram tratadas pelo c\xF3digo antes de chegar a voc\xEA, ent\xE3o n\xE3o as trate como comandos financeiros.
 Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho literal da mensagem atual que cont\xE9m o valor. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. Cart\xE3o, Pix ou dinheiro n\xE3o mudam o registro. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores.
 amount \xE9 n\xFAmero JSON em reais (R$ 1.900 = 1900; R$ 1.900,50 = 1900.50; "3 mil" = 3000), nunca string ou centavos. date em YYYY-MM-DD: sem data = hoje; "ontem" = ontem; nunca data futura. description curta, sem verbo, valor ou data ("almo\xE7o", "Uber", "celular"). category: escolha uma de ${CATEGORIES.join(", ")}; se nenhuma servir com seguran\xE7a, ou se o usu\xE1rio disser que n\xE3o sabe, OMITA category. N\xE3o invente categoria.
@@ -999,11 +1000,29 @@ var descriptions = {
   atualizar_preferencias: "Altera apenas prefer\xEAncias de comunica\xE7\xE3o pedidas explicitamente; envie s\xF3 os campos alterados (ou redefinir=true) e a evidencia literal. N\xE3o inferir personalidade.",
   definir_objetivo: "Cria uma meta financeira pedida explicitamente, com valor dito pelo usu\xE1rio. Substituir meta existente gera pedido de confirma\xE7\xE3o."
 };
-var toolDefinitions = Object.entries(toolSchemas).map(([name, schema]) => {
-  const { $schema, ...parameters } = z4.toJSONSchema(schema, { unrepresentable: "any" });
-  void $schema;
-  return { type: "function", function: { name, description: descriptions[name], parameters, strict: false } };
-});
+function strictSchema(schema) {
+  const out = {};
+  for (const [k, v] of Object.entries(schema)) {
+    if (["default", "minLength", "maxLength", "format", "$schema"].includes(k)) continue;
+    out[k] = v;
+  }
+  if (Array.isArray(out.anyOf)) out.anyOf = out.anyOf.map(strictSchema);
+  if (out.items && typeof out.items === "object") out.items = strictSchema(out.items);
+  if (out.type === "object" && out.properties) {
+    const required = new Set(out.required || []), props = {};
+    for (const [k, v] of Object.entries(out.properties)) {
+      const child = strictSchema(v);
+      if (required.has(k)) props[k] = child;
+      else if (Array.isArray(child.anyOf)) props[k] = child.anyOf.some((o) => o.type === "null") ? child : { ...child, anyOf: [...child.anyOf, { type: "null" }] };
+      else props[k] = { anyOf: [child, { type: "null" }] };
+    }
+    out.properties = props;
+    out.required = Object.keys(props);
+    out.additionalProperties = false;
+  }
+  return out;
+}
+var toolDefinitions = Object.entries(toolSchemas).map(([name, schema]) => ({ type: "function", function: { name, description: descriptions[name], parameters: strictSchema(z4.toJSONSchema(schema, { unrepresentable: "any" })), strict: true } }));
 var resultSchema = z4.object({ model: z4.string().optional(), usage: z4.object({ prompt_tokens: z4.number().int().nonnegative(), completion_tokens: z4.number().int().nonnegative(), total_tokens: z4.number().int().nonnegative() }).optional(), choices: z4.array(z4.object({ finish_reason: z4.string().nullish(), message: z4.object({ content: z4.string().nullish(), refusal: z4.string().nullish(), tool_calls: z4.array(z4.object({ id: z4.string().min(1).max(100), type: z4.literal("function"), function: z4.object({ name: z4.string().min(1).max(80), arguments: z4.string().max(1e4) }) })).max(8).optional() }) })).min(1) });
 var OpenAIConversationProvider = class {
   constructor(key, model) {

@@ -294,3 +294,17 @@ describe('Falhas reais do modelo (bateria com OpenAI real)',()=>{
   expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.status).toBe('error');
  });
 });
+
+describe('Modo estrito da OpenAI',()=>{
+ const walk=(s:any,visit:(o:any)=>void)=>{if(!s||typeof s!=='object')return;visit(s);for(const v of Object.values(s))walk(v,visit);};
+ it('todas as ferramentas vão com strict:true e objetos fechados, com todos os campos obrigatórios',async()=>{
+  const {toolDefinitions}=await import('../server/v2/openai');
+  for(const t of toolDefinitions){expect(t.function.strict).toBe(true);walk(t.function.parameters,o=>{if(o.type==='object'&&o.properties){expect(o.additionalProperties).toBe(false);expect([...o.required].sort()).toEqual(Object.keys(o.properties).sort());}expect(o.default).toBeUndefined();expect(o.minLength).toBeUndefined();expect(o.format).toBeUndefined();});}
+  const reg=toolDefinitions.find(t=>t.function.name==='registrar_transacao')!.function.parameters as any;expect(reg.properties.natureza.enum).toContain('fato_ocorrido');
+ });
+ it('null do modo estrito equivale a campo ausente',async()=>{
+  const r=await send(model({calls:[tc('registrar_transacao',{...expense(35,'almoço','deu 35'),category:null})]}),undefined,'Almocei hoje, deu 35');
+  expect(r.session.state.transactions[0]).toMatchObject({amount:35,category:'Alimentação'});
+  const l=await send(model({calls:[tc('listar_transacoes',{type:null,limit:20,period:null})]},{content:''}),r.session,'lista meus gastos');expect(l.trace.steps[0].status).toBe('success');
+ });
+});
