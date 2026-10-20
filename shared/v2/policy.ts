@@ -49,7 +49,21 @@ export function amountsIn(text:string):number[]{
  return out;
 }
 const hasAmount=(text:string,amount:number)=>amountsIn(text).some(v=>cents(v)===cents(amount));
-const contains=(message:string,excerpt:string)=>{const e=squash(excerpt);return e.length>0&&squash(message).includes(e);};
+/**
+ * Does the user's message support the excerpt the model quoted? Models paraphrase a little ("R$ 280" for
+ * "280", "foi 280" for "foi 280, não 300"), so this is token coverage, not an exact substring: every number
+ * in the excerpt must be in the message (same amount), and most of its words too. Amounts are still checked
+ * separately and strictly (hasAmount).
+ */
+const STOP=new Set(['r','rs','reais','real','de','do','da','no','na','em','o','a','e','um','uma','por','com','pra','para']);
+const contains=(message:string,excerpt:string)=>{
+ const words=squash(excerpt).split(' ').filter(w=>w&&!STOP.has(w)),msg=squash(message),msgWords=new Set(msg.split(' '));
+ if(!words.length)return false;
+ const nums=amountsIn(excerpt);if(nums.some(n=>!hasAmount(message,n)))return false;
+ const textWords=words.filter(w=>!/^\d/.test(w));if(!textWords.length)return nums.length>0;
+ const hits=textWords.filter(w=>msgWords.has(w)||[...msgWords].some(m=>m.length>=4&&w.length>=4&&m.slice(0,4)===w.slice(0,4))).length;
+ return hits/textWords.length>=0.6;
+};
 /** True when at least one meaningful word of `phrase` (by 4-letter stem) appears in the message. */
 export function sharesStem(message:string,phrase:string){
  const m=squash(message);const words=squash(phrase).split(' ').filter(w=>w.length>=3);
@@ -140,12 +154,12 @@ export function resolveTarget(alvo:Record<string,unknown>,state:State):{target?:
 export function prepareChange(call:ModelCall,ctx:PolicyContext,now=Date.now()):{operation?:PendingOperation;reason?:string}{
  const a=call.arguments;
  if(ctx.risk)return {reason:'RISK_CONTEXT'};
- if(!contains(ctx.message,String(a.evidencia)))return {reason:'EVIDENCE_NOT_IN_MESSAGE'};
+ if(!contains(ctx.message,String(a.evidencia)))return {reason:'CHANGE_NOT_IN_MESSAGE'};
  const {target,reason}=resolveTarget(a.alvo as Record<string,unknown>,ctx.session.state);if(!target)return {reason};
  const base={id:crypto.randomUUID(),createdAt:now,expiresAt:now+5*60000,targetId:target.id,before:target};
  if(call.name==='propor_exclusao_transacao')return {operation:{...base,kind:'delete'}};
  const novo=a.novo as Record<string,unknown>;
- if(novo.amount!==undefined&&!hasAmount(ctx.message,novo.amount as number))return {reason:'AMOUNT_NOT_IN_MESSAGE'};
+ if(novo.amount!==undefined&&!hasAmount(ctx.message,novo.amount as number))return {reason:'CHANGE_NOT_IN_MESSAGE'};
  if(novo.date!==undefined&&(novo.date as string)>ctx.today)return {reason:'FUTURE_DATE'};
  const after=storedTransaction.safeParse({...target,...novo});if(!after.success)return {reason:'INVALID_CHANGE'};
  return {operation:{...base,kind:'edit',after:after.data}};
@@ -163,6 +177,7 @@ export function blockedMessage(reason:string|undefined):string{
   case 'NOT_A_FACT':return 'Entendi isso como hipótese ou plano, então não registrei nada. Se já aconteceu, é só me dizer.';
   case 'FUTURE_DATE':return 'Não registro lançamentos com data futura. Se já aconteceu, me diga quando foi.';
   case 'DATE_TOO_OLD':return 'Essa data está muito no passado para registrar por aqui. Pode conferir a data?';
+  case 'CHANGE_NOT_IN_MESSAGE':return 'Não entendi a correção com segurança, então não alterei nada. Me diz qual lançamento e o valor ou dado certo?';
   case 'TARGET_AMBIGUOUS':return 'Há mais de um lançamento possível. Informe a descrição e a data ou o valor original para identificar um único registro.';
   case 'TARGET_NOT_FOUND':return 'Não encontrei esse lançamento. Pode me dizer a descrição e a data ou o valor original?';
   case 'INVALID_CHANGE':return 'O novo dado é inválido. Informe um valor positivo com até duas casas decimais ou uma data ISO válida.';

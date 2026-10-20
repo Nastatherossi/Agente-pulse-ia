@@ -425,9 +425,16 @@ function amountsIn(text) {
   return out;
 }
 var hasAmount = (text, amount) => amountsIn(text).some((v) => cents2(v) === cents2(amount));
+var STOP = /* @__PURE__ */ new Set(["r", "rs", "reais", "real", "de", "do", "da", "no", "na", "em", "o", "a", "e", "um", "uma", "por", "com", "pra", "para"]);
 var contains = (message, excerpt) => {
-  const e = squash(excerpt);
-  return e.length > 0 && squash(message).includes(e);
+  const words = squash(excerpt).split(" ").filter((w) => w && !STOP.has(w)), msg = squash(message), msgWords = new Set(msg.split(" "));
+  if (!words.length) return false;
+  const nums = amountsIn(excerpt);
+  if (nums.some((n) => !hasAmount(message, n))) return false;
+  const textWords = words.filter((w) => !/^\d/.test(w));
+  if (!textWords.length) return nums.length > 0;
+  const hits = textWords.filter((w) => msgWords.has(w) || [...msgWords].some((m) => m.length >= 4 && w.length >= 4 && m.slice(0, 4) === w.slice(0, 4))).length;
+  return hits / textWords.length >= 0.6;
 };
 function sharesStem(message, phrase) {
   const m = squash(message);
@@ -515,13 +522,13 @@ function resolveTarget(alvo, state) {
 function prepareChange(call, ctx, now = Date.now()) {
   const a = call.arguments;
   if (ctx.risk) return { reason: "RISK_CONTEXT" };
-  if (!contains(ctx.message, String(a.evidencia))) return { reason: "EVIDENCE_NOT_IN_MESSAGE" };
+  if (!contains(ctx.message, String(a.evidencia))) return { reason: "CHANGE_NOT_IN_MESSAGE" };
   const { target: target2, reason } = resolveTarget(a.alvo, ctx.session.state);
   if (!target2) return { reason };
   const base = { id: crypto.randomUUID(), createdAt: now, expiresAt: now + 5 * 6e4, targetId: target2.id, before: target2 };
   if (call.name === "propor_exclusao_transacao") return { operation: { ...base, kind: "delete" } };
   const novo = a.novo;
-  if (novo.amount !== void 0 && !hasAmount(ctx.message, novo.amount)) return { reason: "AMOUNT_NOT_IN_MESSAGE" };
+  if (novo.amount !== void 0 && !hasAmount(ctx.message, novo.amount)) return { reason: "CHANGE_NOT_IN_MESSAGE" };
   if (novo.date !== void 0 && novo.date > ctx.today) return { reason: "FUTURE_DATE" };
   const after = storedTransaction.safeParse({ ...target2, ...novo });
   if (!after.success) return { reason: "INVALID_CHANGE" };
@@ -541,6 +548,8 @@ function blockedMessage(reason) {
       return "N\xE3o registro lan\xE7amentos com data futura. Se j\xE1 aconteceu, me diga quando foi.";
     case "DATE_TOO_OLD":
       return "Essa data est\xE1 muito no passado para registrar por aqui. Pode conferir a data?";
+    case "CHANGE_NOT_IN_MESSAGE":
+      return "N\xE3o entendi a corre\xE7\xE3o com seguran\xE7a, ent\xE3o n\xE3o alterei nada. Me diz qual lan\xE7amento e o valor ou dado certo?";
     case "TARGET_AMBIGUOUS":
       return "H\xE1 mais de um lan\xE7amento poss\xEDvel. Informe a descri\xE7\xE3o e a data ou o valor original para identificar um \xFAnico registro.";
     case "TARGET_NOT_FOUND":
@@ -975,8 +984,9 @@ Usu\xE1rio: gastei 50 no mercado
 var RULES = `REGRAS DE OPERA\xC7\xC3O
 Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real. Nunca mencione ao usu\xE1rio nomes de campos ou de ferramentas (natureza, evidencia, registrar_transacao\u2026); se uma ferramenta der erro, corrija a chamada ou pergunte em linguagem comum.
 Nem toda mensagem \xE9 uma opera\xE7\xE3o. "Sim", "n\xE3o", "pode", "claro" respondem \xE0 sua \xFAltima pergunta da conversa; confirma\xE7\xF5es de opera\xE7\xF5es pendentes j\xE1 foram tratadas pelo c\xF3digo antes de chegar a voc\xEA, ent\xE3o n\xE3o as trate como comandos financeiros.
-Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho literal da mensagem atual que cont\xE9m o valor. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Cart\xE3o, Pix ou dinheiro n\xE3o mudam o registro. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
+Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho copiado da mensagem atual que cont\xE9m o valor, sem acrescentar "R$" ou palavras. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Cart\xE3o, Pix ou dinheiro n\xE3o mudam o registro. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
 amount \xE9 n\xFAmero JSON em reais (R$ 1.900 = 1900; R$ 1.900,50 = 1900.50; "3 mil" = 3000), nunca string ou centavos. date em YYYY-MM-DD: sem data = hoje; "ontem" = ontem; nunca data futura. description curta, sem verbo, valor ou data ("almo\xE7o", "Uber", "celular"). category: escolha uma de ${CATEGORIES.join(", ")}; se nenhuma servir com seguran\xE7a, ou se o usu\xE1rio disser que n\xE3o sabe, OMITA category. N\xE3o invente categoria.
+Consultas sem per\xEDodo dito pelo usu\xE1rio: use o m\xEAs atual.
 Corre\xE7\xF5es e exclus\xF5es de lan\xE7amentos existentes: propor_edicao_transacao ou propor_exclusao_transacao; o c\xF3digo mostra antes/depois e pede confirma\xE7\xE3o. Se o alvo for amb\xEDguo, consulte listar_transacoes ou pergunte.
 Metas: definir_objetivo s\xF3 quando o usu\xE1rio pedir uma meta com valor. "Quero guardar para o casamento" \xE9 inten\xE7\xE3o, n\xE3o meta. Substituir meta existente gera confirma\xE7\xE3o.
 Prefer\xEAncias: atualizar_preferencias s\xF3 quando o usu\xE1rio pedir explicitamente uma forma de comunica\xE7\xE3o; nunca infira personalidade. Pedidos de agilidade n\xE3o dispensam confirma\xE7\xF5es. Quando houver estilo expl\xEDcito nas prefer\xEAncias, ele vale mais que o espelhamento.

@@ -335,3 +335,20 @@ describe('“Sim” a uma pergunta do próprio modelo',()=>{
   expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.steps[0].error?.reason).toBe('AMOUNT_NOT_IN_MESSAGE');
  });
 });
+
+describe('Evidência parafraseada pelo modelo (bateria real)',()=>{
+ it('“Aquele tênis foi 280, não 300” prepara a correção mesmo com evidência “R$ 280”',async()=>{
+  const s=await withRecord(300,'tênis','Comprei um tênis por 300');
+  const r=await send(model({calls:[tc('propor_edicao_transacao',{alvo:{descricao:'tênis',valor:300},novo:{amount:280},evidencia:'tênis foi R$ 280'})]}),s,'Aquele tênis foi 280, não 300');
+  expect(r.trace.confirmation).toBe('pending');expect(r.session.memory.operation?.after).toMatchObject({amount:280});
+ });
+ it('evidência com número que não está na mensagem continua recusada',async()=>{
+  const s=await withRecord(300,'tênis','Comprei um tênis por 300');
+  const r=await send(model({calls:[tc('propor_edicao_transacao',{alvo:{descricao:'tênis'},novo:{amount:250},evidencia:'tênis foi 250'})]}),s,'Aquele tênis foi 280, não 300');
+  expect(r.session.memory.operation).toBeUndefined();expect(r.trace.message).toContain('não alterei nada');
+ });
+ it('evidência sem relação com a mensagem é recusada',async()=>{
+  const r=await send(model({calls:[tc('registrar_transacao',expense(50,'mercado','paguei 50 no shopping center'))]}),undefined,'Gastei 50 no mercado');
+  expect(r.session.state.transactions).toHaveLength(0);
+ });
+});
