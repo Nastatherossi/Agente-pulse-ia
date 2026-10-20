@@ -49,7 +49,12 @@ export function groundedText(draft:string,ctx:GroundingContext):string{
 const FAKE_CONFIRMATION=/responda .?sim.? ou .?cancelar|expira em 5 minutos/;
 export const imitatesConfirmation=(text:string)=>FAKE_CONFIRMATION.test(normalize(text));
 /** The model asks, in plain text, to confirm a write instead of proposing it through a tool. */
-export const asksToConfirmInText=(text:string)=>{const t=normalize(text);return /\?/.test(t)&&/\b(confirma|confirmar|posso|quer que eu|deseja que eu|devo)\b.{0,40}\b(exclu|apag|remov|alter|corrig|registr|lanc|anot)/.test(t)||imitatesConfirmation(text);};
+export const asksToConfirmInText=(text:string)=>{
+ if(imitatesConfirmation(text))return true;
+ // Only a question that offers to perform the write ("posso registrar…?", "quer que eu exclua…?"),
+ // not one that rules it out ("posso conversar sem registrar").
+ return normalize(text).split(/(?<=[.!?…])\s+|\n+/).some(q=>/\?/.test(q)&&!/\bsem (registr|anot|lanc)/.test(q)&&/\b(confirma|confirmar|posso|quer que eu|deseja que eu|devo)\s+(o |a |os |as |esse |essa |isso )?(exclu|apag|remov|alter|corrig|registr|lanc|anot)/.test(q));
+};
 /**
  * When the code already rendered the numbers (receipt, balance, summary, simulation), the model's comment
  * must be qualitative: any sentence with a number or a money word is dropped. A model paraphrasing a

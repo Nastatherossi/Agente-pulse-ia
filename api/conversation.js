@@ -623,8 +623,8 @@ function groundedText(draft, ctx) {
 var FAKE_CONFIRMATION = /responda .?sim.? ou .?cancelar|expira em 5 minutos/;
 var imitatesConfirmation = (text) => FAKE_CONFIRMATION.test(normalize(text));
 var asksToConfirmInText = (text) => {
-  const t = normalize(text);
-  return /\?/.test(t) && /\b(confirma|confirmar|posso|quer que eu|deseja que eu|devo)\b.{0,40}\b(exclu|apag|remov|alter|corrig|registr|lanc|anot)/.test(t) || imitatesConfirmation(text);
+  if (imitatesConfirmation(text)) return true;
+  return normalize(text).split(/(?<=[.!?…])\s+|\n+/).some((q) => /\?/.test(q) && !/\bsem (registr|anot|lanc)/.test(q) && /\b(confirma|confirmar|posso|quer que eu|deseja que eu|devo)\s+(o |a |os |as |esse |essa |isso )?(exclu|apag|remov|alter|corrig|registr|lanc|anot)/.test(q));
 };
 function withoutNumbers(text) {
   return text.split(/(?<=[.!?…])\s+|\n+/).filter((x) => x.trim() && !/\d|\b(mil|conto|contos|pila|pilas|reais|real|centavos|por cento)\b/.test(normalize(x)) && !imitatesConfirmation(x)).join(" ").trim();

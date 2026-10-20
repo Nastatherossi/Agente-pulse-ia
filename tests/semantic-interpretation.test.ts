@@ -388,3 +388,7 @@ describe('Bateria real (20/10, 19h): regressões',()=>{
   expect(r.trace.confirmation).toBe('pending');expect(r.session.state.transactions).toHaveLength(0);
  });
 });
+
+describe('Detector de confirmação em texto',()=>{
+ it.each([['Quer que eu registre a luz e a taxa?',true],['Posso excluir o tênis?',true],['Confirma excluir o tênis?',true],['Confirma? Responda “sim” ou “cancelar”.',true],['Qual o valor, a descrição e a data? Se for uma hipótese, posso conversar sem registrar.',false],['Quer contar o que rolou?',false],['Posso te ajudar a montar um plano?',false]])('%s → %s',async(text,expected)=>{const {asksToConfirmInText}=await import('../shared/v2/grounding');expect(asksToConfirmInText(text)).toBe(expected);});
+});

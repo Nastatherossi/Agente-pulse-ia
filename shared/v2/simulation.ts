@@ -13,7 +13,7 @@ export class SimulationProviderV2 implements Provider {
  readonly mode='simulation' as const;
  constructor(private today=todayBR()){}
  async next(messages:ModelMessage[],session:Session):Promise<ModelResult>{
-  const last=messages.at(-1);
+  const last=[...messages].reverse().find(m=>m.role!=='system'); // internal nudges are not user messages
   if(last?.role==='tool')return {content:this.commentary(messages,session)};
   const message=last?.content||'',text=normalize(message);
   // Communication preferences and questions about them.
