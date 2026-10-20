@@ -15,10 +15,33 @@ export function topicOf(message:string):MemoryRecord['topic']|undefined {
  if(/estud.*programac|aprend.*programac/.test(t))return 'programming';
  if(/mudar de cidade/.test(t))return 'city';return undefined;
 }
+/**
+ * Stricter topic detection used ONLY to CREATE memories (retrieval keeps topicOf). The topic phrase
+ * must be what the intention is about ("quero sair do emprego"), not any keyword in the sentence:
+ * "vou almoçar com meu chefe" or "quero comprar pipoca no cinema" no longer become life plans.
+ * Conservative by design: it misses some real intentions (documented limitation) rather than invent one.
+ */
+const captureRules:[MemoryRecord['topic'],RegExp][]=[
+ ['popcorn',/\bvender pipoca/],
+ ['career',/\b(sair|largar|deixar|mudar|trocar) (d[oe] |o |meu |de )?(meu )?(emprego|trabalho)\b|\bpedir (demissao|as contas|conta)\b/],
+ ['housing',/\bmorar sozinh/],
+ ['marriage',/\b(me )?casar\b|\bcasamento\b/],
+ ['business',/\b(abrir|montar|comecar|ter) (um |uma |meu |minha |o |a |o meu |a minha )?(proprio |propria )?(negocio|empresa)\b|plano de negocios/],
+ ['programming',/\b(estud|aprend)\w* (a )?programac/],
+ ['city',/\bmudar de cidade/]
+];
+export function captureTopic(message:string):MemoryRecord['topic']|undefined{
+ const t=normalize(message);
+ if(/\b(brincadeira|zoeira|zuera|kkk+|so que nao)\b/.test(t))return undefined; // irony or joke: never a plan
+ // The topic phrase must sit in the same clause as an intention (or abandonment) verb.
+ const verb=/\b(pensando em|quero|vou|pretendo|planejo|decidi|estudando|aprendendo|lembre|desisti|abandonei|nao (quero|vou|pretendo) mais)\b/;
+ for(const clause of t.split(/[,.;!?]| mas | porem /)){if(!verb.test(clause))continue;const hit=captureRules.find(([,r])=>r.test(clause));if(hit)return hit[0];}
+ return undefined;
+}
 const canonical=(topic:MemoryRecord['topic'],status:MemoryRecord['status'])=>`${status==='abandoned'?'Abandonou a ideia de':status==='declared_decision'?'Declarou decisão de':status==='planned'?'Planeja':status==='outdated'?'Informação desatualizada sobre':'Está explorando a ideia de'} ${labels[topic]}.`;
 export function candidateMemory(message:string,session:Session):Omit<MemoryRecord,'id'|'ownerId'|'createdAt'|'updatedAt'>|undefined {
  const t=normalize(message);if(unsafe(message)||/[?]/.test(t)||/^(lembra|o que|esque|pode esquecer)/.test(t)||/^(gastei|paguei|comprei|recebi|registre|registra)\b/.test(t))return undefined;
- let topic=topicOf(message);
+ let topic=captureTopic(message);
  if(!topic&&/^(decidi que vou sair|desisti de sair)/.test(t)&&session.narrative.records.some(r=>r.topic==='career'))topic='career';
  if(!topic)return undefined;
  const abandoned=/desisti|nao (quero|vou|pretendo) mais|abandonei/.test(t);

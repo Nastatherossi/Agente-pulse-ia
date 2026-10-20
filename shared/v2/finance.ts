@@ -1,4 +1,4 @@
-import {financialState,goal,transaction,validateCall,normalize,defaultPreferences,pendingOperation,type State,type Call,type Period,type PendingOperation} from './contracts.js';
+import {financialState,goal,storedTransaction,validateCall,normalize,defaultPreferences,pendingOperation,type State,type Call,type Period,type PendingOperation} from './contracts.js';
 const cents=(n:number)=>Math.round(n*100);
 export const initialState=():State=>({initialBalanceCents:250000,transactions:[],preferences:defaultPreferences()});
 export const balanceCents=(state:State)=>state.initialBalanceCents+state.transactions.reduce((n,t)=>n+cents(t.amount)*(t.type==='receita'?1:-1),0);
@@ -26,8 +26,15 @@ export class FinancialCoreV2 {
  confirm(raw:PendingOperation,now=Date.now()):unknown {
   const op=pendingOperation.parse(raw);if(now<op.createdAt||now>=op.expiresAt)throw new Error('CONFIRMATION_EXPIRED');
   if(this.completed.has(op.id))throw new Error('CONFIRMATION_USED');
+  if(op.kind==='create'){
+   // All-or-nothing: every item is validated and capacity checked before anything is written.
+   const items=op.items!.map(item=>storedTransaction.parse({...item,id:crypto.randomUUID()}));
+   if(this.state.transactions.length+items.length>300)throw new Error('SESSION_FULL');
+   this.state.transactions.push(...items);
+   const result={operationId:op.id,created:items,balanceCents:balanceCents(this.state)};this.completed.set(op.id,{payload:JSON.stringify(op),result});return structuredClone(result);
+  }
   if(op.kind==='goal'){if(JSON.stringify(this.state.goal)!==JSON.stringify(op.before)||!op.after)throw new Error('STALE_CONFIRMATION');this.state.goal=goal.parse(op.after);}
-  else {const index=this.state.transactions.findIndex(t=>t.id===op.targetId);if(index<0||JSON.stringify(this.state.transactions[index])!==JSON.stringify(op.before))throw new Error('STALE_CONFIRMATION');if(op.kind==='delete')this.state.transactions.splice(index,1);else {if(!op.after||!('id' in op.after)||op.after.id!==op.targetId)throw new Error('STALE_CONFIRMATION');this.state.transactions[index]=transaction.extend({id:pendingOperation.shape.targetId.unwrap()}).parse(op.after);}}
+  else {const index=this.state.transactions.findIndex(t=>t.id===op.targetId);if(index<0||JSON.stringify(this.state.transactions[index])!==JSON.stringify(op.before))throw new Error('STALE_CONFIRMATION');if(op.kind==='delete')this.state.transactions.splice(index,1);else {if(!op.after||!('id' in op.after)||op.after.id!==op.targetId)throw new Error('STALE_CONFIRMATION');this.state.transactions[index]=storedTransaction.parse(op.after);}}
   const result={operationId:op.id,before:op.before,after:op.after,balanceCents:balanceCents(this.state)};this.completed.set(op.id,{payload:JSON.stringify(op),result});return structuredClone(result);
  }
  snapshot(){return structuredClone(this.state);}

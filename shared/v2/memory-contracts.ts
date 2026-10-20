@@ -13,5 +13,6 @@ export const memoryActionSchema=z.discriminatedUnion('kind',[
 export type Narrative=z.infer<typeof narrativeSchema>;
 export type MemoryRecord=z.infer<typeof memoryRecord>;
 export type MemoryAction=z.infer<typeof memoryActionSchema>;
-export const createNarrative=():Narrative=>narrativeSchema.parse({});
+// Cloned so no two sessions ever share a default object (some zod versions reuse default references).
+export const createNarrative=():Narrative=>structuredClone(narrativeSchema.parse({}));
 export const MEMORY_LIMITS={records:30,retrieved:3,contextCharacters:800,retentionMs:30*86400000,extractionCalls:0};

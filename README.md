@@ -33,7 +33,9 @@ As sessões dos modos são separadas para impedir que um saldo local alterado pe
 | Ferramenta | Função |
 |---|---|
 | consultar_saldo | Saldo consolidado fictício |
-| registrar_transacao | Receita/despesa explícita validada |
+| registrar_transacao | Proposta de UM lançamento ocorrido (com `natureza` e `evidencia`); a política decide executar, confirmar ou recusar |
+| registrar_varios | Proposta de 2 a 5 lançamentos da mesma mensagem; sempre confirmados e aplicados juntos |
+| propor_edicao_transacao / propor_exclusao_transacao | Proposta de correção/exclusão; nunca executa direto, gera confirmação com antes/depois |
 | listar_transacoes | Lista com período e filtro opcional |
 | resumir_financas | Receitas, despesas, resultado, categorias e percentuais |
 | comparar_periodos | A, B, diferença e variação percentual (null se B é zero) |
@@ -43,7 +45,7 @@ As sessões dos modos são separadas para impedir que um saldo local alterado pe
 | definir_objetivo | Nova meta fictícia explícita; substituir existente exige confirmação |
 | simular_compra | Impacto hipotético em centavos, sem registrar despesa |
 
-Centavos inteiros nos cálculos; entradas em reais com até duas casas. Novos lançamentos reconhecidos: supermercado/mercado/restaurante/almoço/jantar → Alimentação; transporte/gasolina/combustível/uber/ônibus → Transporte; bar/cinema/lazer → Lazer. Demais registros ficam sem categoria. Alterar categoria de registro existente exige confirmação, assim como valor, descrição, data, exclusão e substituição de meta.
+Centavos inteiros nos cálculos; entradas em reais com até duas casas. O modelo escolhe a categoria numa lista fechada (`CATEGORIES` em `shared/v2/contracts.ts`); fora dela, ou quando o usuário diz que não sabe, o registro fica sem categoria. Se o modelo omitir, o código aplica o mapeamento fixo (mercado/restaurante → Alimentação, gasolina/uber → Transporte, bar/cinema → Lazer). Alterar categoria de registro existente exige confirmação, assim como valor, descrição, data, exclusão e substituição de meta.
 
 O Inspector exibe chamadas em ordem, argumentos validados, resultados, duração, falhas, resposta final e tokens/modelo quando disponíveis. Não exibe credenciais, prompts privados ou raciocínio interno.
 
@@ -61,13 +63,13 @@ O Inspector exibe chamadas em ordem, argumentos validados, resultados, duração
 
 No modo real, contexto e estado fictício são criptografados/autenticados com AES-GCM em token de sessão com validade de seis horas, usando chave derivada no servidor com separação de domínio. O segredo do provedor não sai do servidor. Alterar a chave invalida sessões anteriores. Identidade de sessão é gerada pelo servidor, não pelo modelo.
 
-O servidor não aceita histórico, estado, resultados de ferramentas ou IDs de usuário/workspace enviados sem assinatura. O histórico assinado fornece referências; **somente a mensagem atual** pode autorizar escrita. Perguntas hipotéticas, instruções no histórico e tool calls com valor/data/descrição diferentes do pedido não autorizam registros. Escritas não suportadas exigem esclarecimento.
+O servidor não aceita histórico, estado, resultados de ferramentas ou IDs de usuário/workspace enviados sem assinatura. O histórico assinado fornece referências; **somente a mensagem atual** pode respaldar uma escrita. O modelo interpreta e propõe; a política em `shared/v2/policy.ts` decide se a proposta é executada, vira pedido de confirmação ou é recusada (valor que não está na mensagem, data futura, hipótese). Veja `docs/PULSE_SEMANTIC_INTERPRETATION_REPORT.md`.
 
 Limites por interação: quatro chamadas de modelo, oito ferramentas, 35 segundos, contexto textual de até 42 mil caracteres e limite de consumo medido de 14 mil tokens. Saída limitada a 700 tokens por chamada. Sem retries automáticos. Guarda de seis requisições/minuto por instância, que não é uma quota global.
 
 Máximo de 300 transações fictícias; dez mensagens de contexto; quatro requestIds recentes para replay. Não é uma infraestrutura de produção: tokens podem ser copiados/retrocedidos pelo proprietário; chamadas paralelas e snapshots antigos não têm coordenação global. Nenhum dado real ou efeito financeiro externo deve ser conectado a esse mecanismo. Não há memória permanente, bancos novos ou filas.
 
-Os números e a confirmação financeira são renderizados a partir de resultados determinísticos. Texto do modelo com números financeiros é descartado; orientações, somente quando solicitadas, usam totais calculados e avisam sobre amostra limitada. Registros e consultas simples não recebem conselhos. Opiniões qualitativas não são consultoria financeira nem um diagnóstico psicológico.
+Os números e a confirmação financeira são renderizados a partir de resultados determinísticos. O texto do modelo é verificado frase a frase (`shared/v2/grounding.ts`): afirmações de registro sem escrita, fatos financeiros pessoais sem consulta e valores em reais sem fonte são removidos; percentuais gerais, exemplos e números ditos pelo usuário são mantidos. Registros e consultas simples não recebem conselhos. Opiniões qualitativas não são consultoria financeira nem um diagnóstico psicológico.
 
 ## Publicação
 
