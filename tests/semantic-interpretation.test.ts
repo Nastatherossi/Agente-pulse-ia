@@ -308,3 +308,16 @@ describe('Modo estrito da OpenAI',()=>{
   const l=await send(model({calls:[tc('listar_transacoes',{type:null,limit:20,period:null})]},{content:''}),r.session,'lista meus gastos');expect(l.trace.steps[0].status).toBe('success');
  });
 });
+
+describe('Custo: registro simples usa uma chamada ao modelo',()=>{
+ it('registro executado não chama o modelo de novo',async()=>{
+  const p=model({calls:[tc('registrar_transacao',expense(50,'mercado','Gastei 50 no mercado'))]},{content:'nunca deveria ser pedido'});
+  const r=await send(p,undefined,'Gastei 50 no mercado');expect(r.session.state.transactions).toHaveLength(1);expect(r.trace.modelCalls).toBe(1);expect(p.next).toHaveBeenCalledTimes(1);
+ });
+ it('consulta volta ao modelo, que pode encadear outra ferramenta',async()=>{
+  const p=model({calls:[tc('consultar_saldo',{})]},{content:'x'});const r=await send(p,undefined,'Qual meu saldo?');expect(r.trace.modelCalls).toBe(2);
+ });
+ it('análise continua devolvendo o resultado ao modelo',async()=>{
+  const p=model({calls:[tc('simular_compra',{amount:500})]},{content:'Dá, mas aperta.'});const r=await send(p,undefined,'Se eu gastar 500, quanto sobra?');expect(r.trace.modelCalls).toBe(2);expect(r.trace.message).toContain('Dá, mas aperta.');
+ });
+});

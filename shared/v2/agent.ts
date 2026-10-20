@@ -163,6 +163,11 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
     msgs.push({role:'assistant',content:null,tool_calls:next.calls.map(c=>({id:c.id,type:'function',function:{name:c.name,arguments:JSON.stringify(c.arguments)}}))});
     for(const call of mergeCreates(next.calls)){if(pendingAnswer||blockedAnswer)break;const result=await execute(call);msgs.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result.status==='success'?{ok:true,result:result.result}:{ok:false,error:{...result.error,...(hints.get(result.id)?{hint:hints.get(result.id)}:{})}})});if(result.status==='error'){if(RETRYABLE.has(result.error?.code||'')){retries++;if(retries>2){errorCode=result.error?.code;status='error';}}else{errorCode=result.error?.code;status='error';}}}
     if(status!=='success'||pendingAnswer||blockedAnswer)break;
+    // A completed write is answered by the code-written receipt and the model's follow-up text would be
+    // discarded (renderAnswer). Skipping that second call halves the cost of a simple record.
+    // Lookups still go back to the model: it may chain another tool (e.g. balance, then a summary).
+    const round=steps.slice(-next.calls.length);
+    if(round.length&&round.every(s=>s.status==='success'&&DATA_WRITES.has(s.name)))break;
     if(i===limits.steps-1)throw new Error('STEP_LIMIT');
    }
   }
