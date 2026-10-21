@@ -26,7 +26,9 @@ export type PolicyContext={message:string;today:string;session:Session;risk:bool
  /** The user's previous message and whether the current one is a bare yes. Used only when the model asked in plain text
   *  ("quer que eu registre?") and the user said "sim": the values must then come from that previous message, and the
   *  record still goes through a code-written confirmation. */
- previousUserMessage?:string;affirmation?:boolean};
+ previousUserMessage?:string;affirmation?:boolean;
+ /** The message is the transcript of a voice note: numbers may be misheard, so records and goals always ask for confirmation. */
+ viaAudio?:boolean};
 /** Which user message backs a new record: the current one, or the previous one when the current is a bare "sim". */
 function backing(ctx:PolicyContext):{text:string;viaPrevious:boolean}{
  if(ctx.affirmation&&ctx.previousUserMessage&&amountsIn(ctx.message).length===0)return {text:ctx.previousUserMessage,viaPrevious:true};
@@ -121,7 +123,8 @@ export function decideCreate(call:ModelCall,ctx:PolicyContext):CreateDecision{
  for(let i=0;i<entries.length;i++){const reason=blockForEntry(entries[i],String(items[i].evidencia),ctx);if(reason)return {decision:'block',reason};}
  if(entries.length>1)return {decision:'confirm',reason:'MULTIPLE_ENTRIES',entries};
  const reason=confirmForEntry(entries[0],ctx);
- return reason?{decision:'confirm',reason,entries}:{decision:'execute',entries};
+ if(reason)return {decision:'confirm',reason,entries};
+ return ctx.viaAudio?{decision:'confirm',reason:'FROM_AUDIO',entries}:{decision:'execute',entries};
 }
 /** atualizar_preferencias: communication style only, low risk; requires the user's own words as evidence. */
 export function decidePreferences(call:ModelCall,ctx:PolicyContext):WriteDecision&{preferences?:State['preferences']}{
@@ -137,6 +140,7 @@ export function decideGoal(call:ModelCall,ctx:PolicyContext):WriteDecision&{goal
  if(!hasAmount(ctx.message,parsed.amount))return {decision:'block',reason:'AMOUNT_NOT_IN_MESSAGE'};
  if(!contains(ctx.message,String(evidencia)))return {decision:'block',reason:'EVIDENCE_NOT_IN_MESSAGE'};
  if(ctx.session.state.goal)return {decision:'confirm',reason:'REPLACES_GOAL',goal:parsed};
+ if(ctx.viaAudio)return {decision:'confirm',reason:'FROM_AUDIO',goal:parsed};
  if(!/\b(meta|objetivo|defina|definir|crie|criar|registre|registrar)\b/.test(normalize(ctx.message))||tentative(ctx.message))return {decision:'confirm',reason:'GOAL_NOT_EXPLICIT',goal:parsed};
  return {decision:'execute',goal:parsed};
 }
@@ -188,6 +192,7 @@ export function blockedMessage(reason:string|undefined):string{
 export function confirmLead(reason:string|undefined):string{
  switch(reason){
   case 'REPEATED_MESSAGE':return 'Esta mensagem já foi registrada nesta sessão. Quer registrar uma segunda despesa/receita igual?';
+  case 'FROM_AUDIO':return 'Entendi pelo áudio. Confirma antes de registrar?';
   case 'MULTIPLE_ENTRIES':return 'Vou registrar estes lançamentos juntos:';
   case 'CONFIRM_FROM_PREVIOUS_MESSAGE':return 'Confirma o registro do que você me contou?';
   case 'TENTATIVE_LANGUAGE':return 'Só para confirmar: isso já aconteceu e devo registrar?';

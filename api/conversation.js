@@ -492,7 +492,8 @@ function decideCreate(call, ctx) {
   }
   if (entries.length > 1) return { decision: "confirm", reason: "MULTIPLE_ENTRIES", entries };
   const reason = confirmForEntry(entries[0], ctx);
-  return reason ? { decision: "confirm", reason, entries } : { decision: "execute", entries };
+  if (reason) return { decision: "confirm", reason, entries };
+  return ctx.viaAudio ? { decision: "confirm", reason: "FROM_AUDIO", entries } : { decision: "execute", entries };
 }
 function decidePreferences(call, ctx) {
   const { evidencia, redefinir, ...changes } = call.arguments;
@@ -507,6 +508,7 @@ function decideGoal(call, ctx) {
   if (!hasAmount(ctx.message, parsed.amount)) return { decision: "block", reason: "AMOUNT_NOT_IN_MESSAGE" };
   if (!contains(ctx.message, String(evidencia))) return { decision: "block", reason: "EVIDENCE_NOT_IN_MESSAGE" };
   if (ctx.session.state.goal) return { decision: "confirm", reason: "REPLACES_GOAL", goal: parsed };
+  if (ctx.viaAudio) return { decision: "confirm", reason: "FROM_AUDIO", goal: parsed };
   if (!/\b(meta|objetivo|defina|definir|crie|criar|registre|registrar)\b/.test(normalize(ctx.message)) || tentative(ctx.message)) return { decision: "confirm", reason: "GOAL_NOT_EXPLICIT", goal: parsed };
   return { decision: "execute", goal: parsed };
 }
@@ -564,6 +566,8 @@ function confirmLead(reason) {
   switch (reason) {
     case "REPEATED_MESSAGE":
       return "Esta mensagem j\xE1 foi registrada nesta sess\xE3o. Quer registrar uma segunda despesa/receita igual?";
+    case "FROM_AUDIO":
+      return "Entendi pelo \xE1udio. Confirma antes de registrar?";
     case "MULTIPLE_ENTRIES":
       return "Vou registrar estes lan\xE7amentos juntos:";
     case "CONFIRM_FROM_PREVIOUS_MESSAGE":
@@ -728,7 +732,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
   const lastTrace = session.lastRequests.at(-1)?.trace;
   const previousTurnWrote = Boolean(lastTrace?.steps?.some((s) => s.status === "success" && DATA_WRITES.has(s.name)));
   const previousUserMessage = previousTurnWrote ? void 0 : [...session.history].reverse().find((h) => h.role === "user")?.content;
-  const policyContext = () => ({ message, today, session: { ...session, state: core.snapshot() }, risk, repeatedMessage, writesThisTurn, previousUserMessage, affirmation: isConfirmation(message) });
+  const policyContext = () => ({ message, today, session: { ...session, state: core.snapshot() }, risk, repeatedMessage, writesThisTurn, previousUserMessage, affirmation: isConfirmation(message), viaAudio: options.source === "audio" });
   const hold = (op, text, label2) => {
     session.memory.operation = op;
     pendingAnswer = text;

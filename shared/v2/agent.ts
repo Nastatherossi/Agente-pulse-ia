@@ -70,7 +70,7 @@ function mergeCreates(calls:{id:string;name:string;arguments:unknown}[]){
  const merged={id:creates[0].id,name:'registrar_varios',arguments:{natureza,lancamentos:args.slice(0,5).map(({natureza:_,...item})=>item)}};
  return [merged,...calls.filter(c=>!creates.includes(c))];
 }
-export async function runConversation(provider:Provider,sessionInput:Session|undefined,message:string,requestId:string,today:string,options:{failTools?:boolean;limits?:Partial<typeof LIMITS>}={}){
+export async function runConversation(provider:Provider,sessionInput:Session|undefined,message:string,requestId:string,today:string,options:{failTools?:boolean;limits?:Partial<typeof LIMITS>;/** "audio": the message is a voice-note transcript (see audio.ts). */source?:'text'|'audio'}={}){
  const session=structuredClone(sessionSchema.parse(sessionInput||createSession())),limits={...LIMITS,...options.limits},started=performance.now(),steps:Step[]=[];
  const base={requestId,mode:provider.mode,durationMs:0};
  const hash=await messageHash(message),previous=session.lastRequests.find(r=>r.id===requestId);
@@ -93,7 +93,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  const lastTrace=session.lastRequests.at(-1)?.trace as Trace|undefined;
  const previousTurnWrote=Boolean(lastTrace?.steps?.some(s=>s.status==='success'&&DATA_WRITES.has(s.name)));
  const previousUserMessage=previousTurnWrote?undefined:[...session.history].reverse().find(h=>h.role==='user')?.content;
- const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn,previousUserMessage,affirmation:isConfirmation(message)});
+ const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn,previousUserMessage,affirmation:isConfirmation(message),viaAudio:options.source==='audio'});
  const hold=(op:PendingOperation,text:string,label:Intent)=>{session.memory.operation=op;pendingAnswer=text;confirmation='pending';status='clarification';kind=label;};
  const refuse=(step:Step,reason:string|undefined)=>{step.status='blocked';step.error={code:'WRITE_NOT_AUTHORIZED',reason,message:blockedMessage(reason)};if(reason==='RISK_CONTEXT')return;
   // "sim" right after a receipt: the model tried to record it again. Nothing to do; say it is already there.
