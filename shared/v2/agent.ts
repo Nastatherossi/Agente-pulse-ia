@@ -10,11 +10,12 @@ const RETRYABLE=new Set(['VALIDATION_FAILED','UNKNOWN_TOOL']);
 export const LIMITS={steps:4,tools:8,timeoutMs:35000,tokens:14000};
 export const messageHash=async(text:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))).map(n=>n.toString(16).padStart(2,'0')).join('');
 export const errorMessage=(code:string)=>({OPENAI_AUTH_FAILED:'A chave OpenAI não foi aceita. Verifique a configuração do laboratório.',OPENAI_QUOTA_EXCEEDED:'A OpenAI informou falta de créditos ou limite de uso.',OPENAI_RATE_LIMITED:'A OpenAI está limitando requisições. Aguarde antes de tentar de novo.',MODEL_INCOMPATIBLE:'O modelo não aceitou o contrato de ferramentas.',OPENAI_TIMEOUT:'A OpenAI não respondeu no prazo.',REAL_AI_LOCKED:'IA real bloqueada na configuração do laboratório.',INVALID_SESSION:'Esta sessão perdeu a validade. Inicie uma nova sessão.',STEP_LIMIT:'Parei no limite de etapas. Tente uma pergunta mais específica.',TOKEN_LIMIT:'Parei no limite de consumo desta interação.',LOOP_DETECTED:'A consulta se repetiu. Parei para evitar um loop.'} as Record<string,string>)[code]||'Não consegui concluir esta interação. Nenhum sucesso de ferramenta foi inventado.';
-function readable(step:Step,detail:Session['state']['preferences']['detail']):string {
+/** live=true: the data is the user's real ledger (WhatsApp), so lab wording ("fictício", "simulada") is dropped. */
+function readable(step:Step,detail:Session['state']['preferences']['detail'],live=false):string {
  if(step.status!=='success')return step.error?.message||'Ferramenta não executada.';
  const r=step.result as Record<string,any>;
  switch(step.name){
-  case 'consultar_saldo':return `Seu saldo fictício é ${brl(r.balanceCents)}.`;
+  case 'consultar_saldo':return `Seu saldo ${live?'':'fictício '}é ${brl(r.balanceCents)}.`;
   case 'simular_compra':return `Simulação: ${brl(r.availableCents)} disponíveis (${r.basis}) − ${brl(r.purchaseCents)} da compra = ${brl(r.remainingCents)} restantes. Nenhuma despesa registrada.`;
   case 'editar_transacao':return 'Pronto. Lançamento corrigido conforme confirmado.';
   case 'excluir_transacao':return 'Pronto. Lançamento excluído conforme confirmado.';
@@ -27,22 +28,22 @@ function readable(step:Step,detail:Session['state']['preferences']['detail']):st
   case 'consultar_gastos_categoria':return `${r.category}: ${brl(r.totalCents)} em ${r.count} despesas, de ${r.period.start} a ${r.period.end}.`;
   case 'projetar_despesas':return `Estimativa até ${r.period.end}: ${brl(r.projectedExpenseCents)}. Base: ${brl(r.observedExpenseCents)} registrados em ${r.elapsedDays} dias de um período de ${r.totalDays} dias. Premissa: ${r.assumption}${r.limitedData?' Poucos registros: a projeção pode não representar seu ritmo real.':''}`;
   case 'atualizar_preferencias':return `Preferências atualizadas: ${r.preferences.style} · ${r.preferences.detail} · ${r.preferences.proactivity}.`;
-  case 'definir_objetivo':return `Objetivo fictício definido: ${r.goal.description}, ${brl(Math.round(r.goal.amount*100))}${r.goal.targetDate?` até ${r.goal.targetDate}`:''}.`;
-  default:return detail==='curto'?'Consulta concluída.':'Ferramenta simulada concluída com sucesso.';
+  case 'definir_objetivo':return `Objetivo ${live?'':'fictício '}definido: ${r.goal.description}, ${brl(Math.round(r.goal.amount*100))}${r.goal.targetDate?` até ${r.goal.targetDate}`:''}.`;
+  default:return detail==='curto'||live?'Consulta concluída.':'Ferramenta simulada concluída com sucesso.';
  }
 }
 /** Tools whose success means data changed this turn: the answer is the code-written receipt, nothing else. */
 const DATA_WRITES=new Set(['registrar_transacao','registrar_confirmado','editar_transacao','excluir_transacao','alterar_objetivo','definir_objetivo','atualizar_preferencias']);
 /** Plain lookups: the code-written facts answer the question; model commentary is not appended (discreet by default). */
 const LOOKUPS=new Set(['consultar_saldo','listar_transacoes','consultar_gastos_categoria']);
-export type AnswerContext={message?:string;history?:string[]};
+export type AnswerContext={message?:string;history?:string[];live?:boolean};
 /**
  * Financial values and receipts are rendered by code from validated tool results, never copied from the model.
  * The model's own words are kept for conversation and analysis, sentence by sentence, after grounding (grounding.ts).
  */
 export function renderAnswer(steps:Step[],draft:string,session:Session,context:AnswerContext={}):string {
  const success=steps.filter(s=>s.status==='success');
- const facts=success.map(s=>readable(s,session.state.preferences.detail)).join('\n\n');
+ const facts=success.map(s=>readable(s,session.state.preferences.detail,context.live)).join('\n\n');
  const wroteData=success.some(s=>DATA_WRITES.has(s.name));
  const lookupOnly=success.length>0&&success.every(s=>LOOKUPS.has(s.name));
  const grounding={message:context.message||'',history:context.history??session.history.filter(h=>h.role==='user').map(h=>h.content),steps,wroteData};
@@ -70,7 +71,7 @@ function mergeCreates(calls:{id:string;name:string;arguments:unknown}[]){
  const merged={id:creates[0].id,name:'registrar_varios',arguments:{natureza,lancamentos:args.slice(0,5).map(({natureza:_,...item})=>item)}};
  return [merged,...calls.filter(c=>!creates.includes(c))];
 }
-export async function runConversation(provider:Provider,sessionInput:Session|undefined,message:string,requestId:string,today:string,options:{failTools?:boolean;limits?:Partial<typeof LIMITS>;/** "audio": the message is a voice-note transcript (see audio.ts). */source?:'text'|'audio'}={}){
+export async function runConversation(provider:Provider,sessionInput:Session|undefined,message:string,requestId:string,today:string,options:{failTools?:boolean;limits?:Partial<typeof LIMITS>;/** "audio": the message is a voice-note transcript (see audio.ts). */source?:'text'|'audio';/** true: state comes from the user's real ledger, not the lab simulation (drops "fictício" wording). */realData?:boolean}={}){
  const session=structuredClone(sessionSchema.parse(sessionInput||createSession())),limits={...LIMITS,...options.limits},started=performance.now(),steps:Step[]=[];
  const base={requestId,mode:provider.mode,durationMs:0};
  const hash=await messageHash(message),previous=session.lastRequests.find(r=>r.id===requestId);
@@ -150,7 +151,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
   const live=Boolean(op&&Date.now()>=op.createdAt&&Date.now()<op.expiresAt);
   const yes=!risk&&isConfirmation(message),no=!risk&&isCancellation(message);
   if(command!==undefined){directAnswer=command;}
-  else if(isClear(message)){clearContext(session);directAnswer='Conversa limpa. Os dados fictícios foram preservados.';}
+  else if(isClear(message)){clearContext(session);directAnswer=options.realData?'Conversa limpa. Seus lançamentos continuam salvos.':'Conversa limpa. Os dados fictícios foram preservados.';}
   else if(op&&!live&&(yes||no)){confirmation='expired';kind='confirmacao';directAnswer=yes?'A confirmação expirou. Solicite a alteração novamente.':'Tudo bem. Nada foi alterado.';}
   else if(op&&live&&no){confirmation='cancelled';kind='confirmacao';directAnswer='Operação cancelada. Os registros foram preservados.';}
   else if(op&&live&&yes){
@@ -193,11 +194,11 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  status=status as Trace['status']; // assigned inside closures above; widen for flow analysis
  const success=steps.filter(s=>s.status==='success');
  if(command===undefined&&!risk&&!steps.length&&!pendingAnswer&&!directAnswer)observeStyle(session,message);
- let answer=directAnswer||pendingAnswer||blockedAnswer||renderAnswer(steps,draft,session,{message,history:session.history.filter(h=>h.role==='user').map(h=>h.content)});
- if(status==='error'){answer=[success.map(s=>readable(s,session.state.preferences.detail)).join('\n\n'),errorMessage(errorCode||'EXECUTION_FAILED')].filter(Boolean).join('\n\n');if(session.memory.operation&&!pendingAnswer)session.memory.operation=undefined;}
+ let answer=directAnswer||pendingAnswer||blockedAnswer||renderAnswer(steps,draft,session,{message,history:session.history.filter(h=>h.role==='user').map(h=>h.content),live:options.realData});
+ if(status==='error'){answer=[success.map(s=>readable(s,session.state.preferences.detail,options.realData)).join('\n\n'),errorMessage(errorCode||'EXECUTION_FAILED')].filter(Boolean).join('\n\n');if(session.memory.operation&&!pendingAnswer)session.memory.operation=undefined;}
  // Trace label derived from what actually happened in the turn (no keyword classifier decides anything).
  const analytic=success.some(s=>['resumir_financas','comparar_periodos','projetar_despesas','simular_compra'].includes(s.name));
- kind=kind||(success.some(s=>DATA_WRITES.has(s.name)&&s.name!=='atualizar_preferencias')?'execucao':success.some(s=>s.name==='atualizar_preferencias')?'preferencias':analytic&&answer.length>success.map(s=>readable(s,session.state.preferences.detail)).join('\n\n').length?'orientacao':success.length?'consulta':'conversa');
+ kind=kind||(success.some(s=>DATA_WRITES.has(s.name)&&s.name!=='atualizar_preferencias')?'execucao':success.some(s=>s.name==='atualizar_preferencias')?'preferencias':analytic&&answer.length>success.map(s=>readable(s,session.state.preferences.detail,options.realData)).join('\n\n').length?'orientacao':success.length?'consulta':'conversa');
  const label=steps.length>1?'Análise com múltiplas ferramentas':steps[0]?.name==='registrar_transacao'?'Registro financeiro':steps[0]?.name==='atualizar_preferencias'?'Preferência explícita':steps[0]?.name==='comparar_periodos'?'Comparação de períodos':steps.length?'Consulta financeira':status==='clarification'?'Esclarecimento necessário':'Conversa aberta';
  const trace:Trace={...base,respondedBy:modelCalls>0&&provider.mode==='real'?'model':'code',modelCalls,contextInvalidated,retrievedMemoryIds:retrieved.map(r=>r.id),conversationTone:tone,memoryMetrics:{stored:session.narrative.records.length,retrieved:retrieved.length,contextCharacters:retrieved.length?JSON.stringify(memoryContext(retrieved)).length:0,extractionCalls:0},interpretationSource,intent:kind==='conversa'?label:kind,proactivity:session.state.preferences.proactivity,pendingOperation:session.memory.operation,confirmation,status,message:answer,steps,durationMs:Math.round(performance.now()-started),model,usage:provider.mode==='real'?usage:undefined,errorCode};
  session.history=[...session.history,{role:'user' as const,content:message.slice(0,1800)},{role:'assistant' as const,content:answer.slice(0,1800)}].slice(-10);

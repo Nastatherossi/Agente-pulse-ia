@@ -15,10 +15,13 @@ import { OpenAIConversationProvider } from '../v2/openai.js';
 import { OpenAITranscriptionProvider } from '../v2/transcription.js';
 import { parseInbound, ZApiClient, type Inbound, type Messenger } from './zapi.js';
 import { SupabaseStore, type Store } from './store.js';
+import { SupabaseLedger, diffEntries, type Ledger } from './ledger.js';
 
 export type Deps = {
   ownerPhone?: string;
   store: Store;
+  /** Liga a conversa ao Financial Core (dashboard). Sem ele o agente roda só com a memória da sessão. */
+  ledger?: Ledger;
   messenger: Messenger;
   provider: () => Provider;
   transcriber: () => TranscriptionProvider;
@@ -58,12 +61,23 @@ async function loadSession(deps: Deps, phone: string) {
   return { session: parsed.data, version: stored.version };
 }
 
-async function runAgent(deps: Deps, phone: string, message: string, messageId: string, source: 'text' | 'audio') {
+async function runAgent(deps: Deps, phone: string, message: string, messageId: string, source: 'text' | 'audio', name?: string) {
   const now = deps.now?.() ?? Date.now();
+  const ws = deps.ledger ? await deps.ledger.resolve(phone, name) : undefined;
   for (let attempt = 0; attempt < 3; attempt++) {
     const { session, version } = await loadSession(deps, phone);
-    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source });
+    // O banco manda: lançamentos e saldo vêm do Financial Core, não do que a sessão guardou.
+    const before = ws && deps.ledger ? await deps.ledger.load(ws) : undefined;
+    if (before) {
+      session.state.initialBalanceCents = before.initialBalanceCents;
+      session.state.transactions = structuredClone(before.transactions);
+    }
+    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws) });
     out.session.expiresAt = now + DAY; // a sessão de WhatsApp não expira como a do laboratório
+    // Grava no banco ANTES de responder e de salvar a sessão: se falhar, o usuário não recebe um "registrado" que não aconteceu.
+    if (ws && deps.ledger && before && !out.trace.errorCode) {
+      await deps.ledger.apply(ws, diffEntries(before.transactions, out.session.state.transactions), `wa:${messageId}`);
+    }
     if (await deps.store.saveSession(phone, out.session, version)) return out;
     // Outra mensagem do mesmo número gravou primeiro: relê e refaz.
   }
@@ -167,7 +181,7 @@ export async function handleInbound(deps: Deps, input: Inbound): Promise<void> {
       heard = t.text;
     } else text = input.text.slice(0, 2000);
 
-    const out = await runAgent(deps, phone, text, messageId, input.kind === 'audio' ? 'audio' : 'text');
+    const out = await runAgent(deps, phone, text, messageId, input.kind === 'audio' ? 'audio' : 'text', input.name);
     if (out.trace.errorCode) {
       deps.log?.({ event: 'whatsapp_agent_error', code: out.trace.errorCode });
       await deps.messenger.sendText(phone, messages.technicalProblem);
@@ -239,6 +253,7 @@ export default async function handler(req: Req, res: Res) {
   const deps: Deps = {
     ownerPhone,
     store: new SupabaseStore(e.SUPABASE_URL as string, e.SUPABASE_SERVICE_ROLE_KEY as string),
+    ledger: new SupabaseLedger(e.SUPABASE_URL as string, e.SUPABASE_SERVICE_ROLE_KEY as string),
     messenger: new ZApiClient(e.ZAPI_INSTANCE_ID as string, e.ZAPI_TOKEN as string, e.ZAPI_CLIENT_TOKEN as string),
     provider: () => new OpenAIConversationProvider(key, e.OPENAI_MODEL as string),
     transcriber: () => new OpenAITranscriptionProvider(key, e.OPENAI_TRANSCRIBE_MODEL?.trim() || undefined),
