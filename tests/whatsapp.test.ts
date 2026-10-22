@@ -221,13 +221,23 @@ describe('conversa com o agente',()=>{
 describe('áudio no WhatsApp',()=>{
  const msg='gastei 50 no mercado';
  const authorized=async(transcript=msg)=>{const s=setup(()=>model({calls:[tc('registrar_transacao',expense(50,'mercado',msg))]}),transcript);await handleInbound(s.deps,text(OWNER,'O0',`autorizar ${GUEST}`));s.messenger.sent.length=0;return s;};
- it('transcreve, mostra o que ouviu e pede confirmação antes de gravar',async()=>{
+ it('valor falado por extenso ("três e cinquenta") chega como R$ 3,50 e pede confirmação curta',async()=>{
+  const s=setup(()=>model({calls:[tc('registrar_transacao',expense(3.5,'água','comprei uma água, gastei R$ 3,50 no débito'))]}),'Pô, comprei uma água no posto, gastei três e cinquenta no débito.');
+  await handleInbound(s.deps,text(OWNER,'O0',`autorizar ${GUEST}`));s.messenger.sent.length=0;
+  await handleInbound(s.deps,audio(GUEST,'V9'));
+  const reply=s.messenger.to(GUEST)[0];
+  expect(reply).toContain('3,50');
+  expect(reply).toContain('Entendi pelo áudio');
+  expect(reply).not.toContain('Pô');
+  expect(reply).not.toContain('não registrei nada');
+ });
+ it('transcreve e pede confirmação antes de gravar, sem repetir o áudio todo',async()=>{
   const {deps,messenger,store}=await authorized();
   await handleInbound(deps,audio(GUEST,'V1'));
   const reply=messenger.to(GUEST)[0];
-  expect(reply).toContain('🎤');
-  expect(reply).toContain('gastei 50 no mercado');
+  expect(reply).not.toContain('🎤'); // não repete o áudio inteiro quando o agente entendeu
   expect(reply).toContain('Entendi pelo áudio');
+  expect(reply).toContain('50,00');
   expect(((await store.getSession(GUEST))?.session as any).state.transactions).toHaveLength(0);
  });
  it('áudio longo demais é recusado sem nem baixar',async()=>{
