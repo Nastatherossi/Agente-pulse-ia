@@ -76,7 +76,7 @@ var memory = z2.object({ topic: z2.enum(["saldo", "despesas", "receitas", "anali
 var historyEntry = z2.object({ role: z2.enum(["user", "assistant"]), content: z2.string().max(1800) }).strict();
 var sessionSchema = z2.object({ version: z2.literal(2), narrative: narrativeSchema.default(() => createNarrative()), id: z2.string().uuid(), state: financialState, memory, history: z2.array(historyEntry).max(10), lastRequests: z2.array(z2.object({ id: z2.string().uuid(), messageHash: z2.string().max(64), trace: z2.unknown() })).max(8), expiresAt: z2.number().int() }).strict().refine((s) => s.narrative.records.every((r) => r.ownerId === s.id), "MEMORY_OWNER_MISMATCH");
 var createSession = () => ({ version: 2, narrative: createNarrative(), id: crypto.randomUUID(), state: { initialBalanceCents: 25e4, transactions: [], preferences: defaultPreferences() }, memory: { periods: [] }, history: [], lastRequests: [], expiresAt: Date.now() + 6 * 60 * 60 * 1e3 });
-var brl = (cents4) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents4 / 100);
+var brl = (cents5) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents5 / 100);
 var todayBR = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
 var normalize = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 function validateCall(call) {
@@ -642,12 +642,12 @@ var RETRYABLE = /* @__PURE__ */ new Set(["VALIDATION_FAILED", "UNKNOWN_TOOL"]);
 var LIMITS = { steps: 4, tools: 8, timeoutMs: 35e3, tokens: 14e3 };
 var messageHash = async (text) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))).map((n) => n.toString(16).padStart(2, "0")).join("");
 var errorMessage = (code) => ({ OPENAI_AUTH_FAILED: "A chave OpenAI n\xE3o foi aceita. Verifique a configura\xE7\xE3o do laborat\xF3rio.", OPENAI_QUOTA_EXCEEDED: "A OpenAI informou falta de cr\xE9ditos ou limite de uso.", OPENAI_RATE_LIMITED: "A OpenAI est\xE1 limitando requisi\xE7\xF5es. Aguarde antes de tentar de novo.", MODEL_INCOMPATIBLE: "O modelo n\xE3o aceitou o contrato de ferramentas.", OPENAI_TIMEOUT: "A OpenAI n\xE3o respondeu no prazo.", REAL_AI_LOCKED: "IA real bloqueada na configura\xE7\xE3o do laborat\xF3rio.", INVALID_SESSION: "Esta sess\xE3o perdeu a validade. Inicie uma nova sess\xE3o.", STEP_LIMIT: "Parei no limite de etapas. Tente uma pergunta mais espec\xEDfica.", TOKEN_LIMIT: "Parei no limite de consumo desta intera\xE7\xE3o.", LOOP_DETECTED: "A consulta se repetiu. Parei para evitar um loop." })[code] || "N\xE3o consegui concluir esta intera\xE7\xE3o. Nenhum sucesso de ferramenta foi inventado.";
-function readable(step, detail) {
+function readable(step, detail, live = false) {
   if (step.status !== "success") return step.error?.message || "Ferramenta n\xE3o executada.";
   const r = step.result;
   switch (step.name) {
     case "consultar_saldo":
-      return `Seu saldo fict\xEDcio \xE9 ${brl(r.balanceCents)}.`;
+      return `Seu saldo ${live ? "" : "fict\xEDcio "}\xE9 ${brl(r.balanceCents)}.`;
     case "simular_compra":
       return `Simula\xE7\xE3o: ${brl(r.availableCents)} dispon\xEDveis (${r.basis}) \u2212 ${brl(r.purchaseCents)} da compra = ${brl(r.remainingCents)} restantes. Nenhuma despesa registrada.`;
     case "editar_transacao":
@@ -674,16 +674,16 @@ function readable(step, detail) {
     case "atualizar_preferencias":
       return `Prefer\xEAncias atualizadas: ${r.preferences.style} \xB7 ${r.preferences.detail} \xB7 ${r.preferences.proactivity}.`;
     case "definir_objetivo":
-      return `Objetivo fict\xEDcio definido: ${r.goal.description}, ${brl(Math.round(r.goal.amount * 100))}${r.goal.targetDate ? ` at\xE9 ${r.goal.targetDate}` : ""}.`;
+      return `Objetivo ${live ? "" : "fict\xEDcio "}definido: ${r.goal.description}, ${brl(Math.round(r.goal.amount * 100))}${r.goal.targetDate ? ` at\xE9 ${r.goal.targetDate}` : ""}.`;
     default:
-      return detail === "curto" ? "Consulta conclu\xEDda." : "Ferramenta simulada conclu\xEDda com sucesso.";
+      return detail === "curto" || live ? "Consulta conclu\xEDda." : "Ferramenta simulada conclu\xEDda com sucesso.";
   }
 }
 var DATA_WRITES = /* @__PURE__ */ new Set(["registrar_transacao", "registrar_confirmado", "editar_transacao", "excluir_transacao", "alterar_objetivo", "definir_objetivo", "atualizar_preferencias"]);
 var LOOKUPS = /* @__PURE__ */ new Set(["consultar_saldo", "listar_transacoes", "consultar_gastos_categoria"]);
 function renderAnswer(steps, draft, session, context = {}) {
   const success = steps.filter((s) => s.status === "success");
-  const facts = success.map((s) => readable(s, session.state.preferences.detail)).join("\n\n");
+  const facts = success.map((s) => readable(s, session.state.preferences.detail, context.live)).join("\n\n");
   const wroteData = success.some((s) => DATA_WRITES.has(s.name));
   const lookupOnly = success.length > 0 && success.every((s) => LOOKUPS.has(s.name));
   const grounding = { message: context.message || "", history: context.history ?? session.history.filter((h) => h.role === "user").map((h) => h.content), steps, wroteData };
@@ -847,7 +847,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       directAnswer = command;
     } else if (isClear(message)) {
       clearContext(session);
-      directAnswer = "Conversa limpa. Os dados fict\xEDcios foram preservados.";
+      directAnswer = options.realData ? "Conversa limpa. Seus lan\xE7amentos continuam salvos." : "Conversa limpa. Os dados fict\xEDcios foram preservados.";
     } else if (op && !live && (yes || no)) {
       confirmation = "expired";
       kind = "confirmacao";
@@ -921,13 +921,13 @@ async function runConversation(provider, sessionInput, message, requestId, today
   status = status;
   const success = steps.filter((s) => s.status === "success");
   if (command === void 0 && !risk && !steps.length && !pendingAnswer && !directAnswer) observeStyle(session, message);
-  let answer = directAnswer || pendingAnswer || blockedAnswer || renderAnswer(steps, draft, session, { message, history: session.history.filter((h) => h.role === "user").map((h) => h.content) });
+  let answer = directAnswer || pendingAnswer || blockedAnswer || renderAnswer(steps, draft, session, { message, history: session.history.filter((h) => h.role === "user").map((h) => h.content), live: options.realData });
   if (status === "error") {
-    answer = [success.map((s) => readable(s, session.state.preferences.detail)).join("\n\n"), errorMessage(errorCode || "EXECUTION_FAILED")].filter(Boolean).join("\n\n");
+    answer = [success.map((s) => readable(s, session.state.preferences.detail, options.realData)).join("\n\n"), errorMessage(errorCode || "EXECUTION_FAILED")].filter(Boolean).join("\n\n");
     if (session.memory.operation && !pendingAnswer) session.memory.operation = void 0;
   }
   const analytic = success.some((s) => ["resumir_financas", "comparar_periodos", "projetar_despesas", "simular_compra"].includes(s.name));
-  kind = kind || (success.some((s) => DATA_WRITES.has(s.name) && s.name !== "atualizar_preferencias") ? "execucao" : success.some((s) => s.name === "atualizar_preferencias") ? "preferencias" : analytic && answer.length > success.map((s) => readable(s, session.state.preferences.detail)).join("\n\n").length ? "orientacao" : success.length ? "consulta" : "conversa");
+  kind = kind || (success.some((s) => DATA_WRITES.has(s.name) && s.name !== "atualizar_preferencias") ? "execucao" : success.some((s) => s.name === "atualizar_preferencias") ? "preferencias" : analytic && answer.length > success.map((s) => readable(s, session.state.preferences.detail, options.realData)).join("\n\n").length ? "orientacao" : success.length ? "consulta" : "conversa");
   const label = steps.length > 1 ? "An\xE1lise com m\xFAltiplas ferramentas" : steps[0]?.name === "registrar_transacao" ? "Registro financeiro" : steps[0]?.name === "atualizar_preferencias" ? "Prefer\xEAncia expl\xEDcita" : steps[0]?.name === "comparar_periodos" ? "Compara\xE7\xE3o de per\xEDodos" : steps.length ? "Consulta financeira" : status === "clarification" ? "Esclarecimento necess\xE1rio" : "Conversa aberta";
   const trace = { ...base, respondedBy: modelCalls > 0 && provider.mode === "real" ? "model" : "code", modelCalls, contextInvalidated, retrievedMemoryIds: retrieved.map((r) => r.id), conversationTone: tone, memoryMetrics: { stored: session.narrative.records.length, retrieved: retrieved.length, contextCharacters: retrieved.length ? JSON.stringify(memoryContext(retrieved)).length : 0, extractionCalls: 0 }, interpretationSource, intent: kind === "conversa" ? label : kind, proactivity: session.state.preferences.proactivity, pendingOperation: session.memory.operation, confirmation, status, message: answer, steps, durationMs: Math.round(performance.now() - started), model, usage: provider.mode === "real" ? usage : void 0, errorCode };
   session.history = [...session.history, { role: "user", content: message.slice(0, 1800) }, { role: "assistant", content: answer.slice(0, 1800) }].slice(-10);
@@ -1166,12 +1166,12 @@ Hoje em America/Sao_Paulo: ${today}. Mem\xF3ria autom\xE1tica: ${session.narrati
 import { z as z4 } from "zod";
 var descriptions = {
   simular_compra: "Calcula impacto hipot\xE9tico de uma compra ou gasto; nunca registra despesa.",
-  consultar_saldo: "Saldo consolidado fict\xEDcio em centavos.",
+  consultar_saldo: "Saldo consolidado em centavos.",
   registrar_transacao: 'Prop\xF5e registrar UM gasto ou receita que o usu\xE1rio afirma j\xE1 ter acontecido. natureza="fato_ocorrido" s\xF3 para fatos realizados; evidencia = trecho literal da mensagem atual que cont\xE9m o valor. O c\xF3digo decide se registra, pede confirma\xE7\xE3o ou recusa.',
   registrar_varios: 'Prop\xF5e registrar de 2 a 5 lan\xE7amentos citados na mesma mensagem (ex.: "40 de Uber e 20 de caf\xE9"), cada um com evidencia literal. Sempre gera um pedido de confirma\xE7\xE3o ao usu\xE1rio.',
   propor_edicao_transacao: "Prop\xF5e corrigir valor, descri\xE7\xE3o, categoria ou data de um lan\xE7amento existente. Identifique o alvo por transacao_id (de listar_transacoes) ou por descricao/valor/data originais. Nunca altera direto: gera pedido de confirma\xE7\xE3o.",
   propor_exclusao_transacao: "Prop\xF5e excluir um lan\xE7amento existente, identificado como em propor_edicao_transacao. Nunca exclui direto: gera pedido de confirma\xE7\xE3o.",
-  listar_transacoes: "Lista transa\xE7\xF5es fict\xEDcias (com id) com filtro opcional.",
+  listar_transacoes: "Lista transa\xE7\xF5es (com id) com filtro opcional.",
   resumir_financas: "Calcula receitas, despesas, resultado, categorias e percentuais num per\xEDodo inclusivo.",
   comparar_periodos: "Calcula valor A, valor B, diferen\xE7a A menos B e percentual quando definido.",
   consultar_gastos_categoria: "Total e registros de despesas de uma categoria no per\xEDodo.",
@@ -1376,7 +1376,8 @@ var SupabaseStore = class {
       ...rest,
       headers: {
         apikey: this.serviceKey,
-        Authorization: `Bearer ${this.serviceKey}`,
+        // Chave nova (sb_secret_…) vai só em apikey; a chave antiga (JWT service_role) também em Authorization.
+        ...this.serviceKey.startsWith("eyJ") ? { Authorization: `Bearer ${this.serviceKey}` } : {},
         "Content-Type": "application/json",
         ...prefer ? { Prefer: prefer } : {}
       },
@@ -1452,6 +1453,158 @@ var SupabaseStore = class {
   }
 };
 
+// server/whatsapp/ledger.ts
+var MAX_STATE_TRANSACTIONS = 300;
+var MAX_INITIAL_CENTS = 1e8;
+function agentCanSee(e) {
+  if (!e.date || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) return false;
+  if (!Number.isFinite(e.amount) || e.amount <= 0 || e.amount > 1e6) return false;
+  if (Math.abs(e.amount * 100 - Math.round(e.amount * 100)) > 1e-5) return false;
+  return e.description.trim().length > 0;
+}
+var cents4 = (n) => Math.round(n * 100);
+var signed = (e) => (e.type === "receita" ? 1 : -1) * cents4(e.amount);
+function initialBalanceFor(openingCents, netAllCents, visible) {
+  const raw = openingCents + netAllCents - visible.reduce((s, e) => s + signed(e), 0);
+  return Math.min(MAX_INITIAL_CENTS, Math.max(0, raw));
+}
+var same = (a, b) => a.type === b.type && a.amount === b.amount && a.description === b.description && a.date === b.date && (a.category ?? "") === (b.category ?? "");
+function diffEntries(before, after) {
+  const old = new Map(before.map((e) => [e.id, e]));
+  const seen = /* @__PURE__ */ new Set();
+  const changes = { create: [], update: [], remove: [] };
+  for (const e of after) {
+    seen.add(e.id);
+    const prev = old.get(e.id);
+    if (!prev) changes.create.push(e);
+    else if (!same(prev, e)) changes.update.push(e);
+  }
+  for (const e of before) if (!seen.has(e.id)) changes.remove.push(e.id);
+  return changes;
+}
+var SupabaseLedger = class {
+  constructor(url, serviceKey, fetchImpl = fetch) {
+    this.serviceKey = serviceKey;
+    this.fetchImpl = fetchImpl;
+    if (!url || !serviceKey) throw new Error("SUPABASE_NOT_CONFIGURED");
+    this.base = url.replace(/\/$/, "");
+  }
+  serviceKey;
+  fetchImpl;
+  base;
+  async call(path, init = {}) {
+    const { prefer, ...rest } = init;
+    const res = await this.fetchImpl(`${this.base}${path}`, {
+      ...rest,
+      headers: { apikey: this.serviceKey, ...this.serviceKey.startsWith("eyJ") ? { Authorization: `Bearer ${this.serviceKey}` } : {}, "Content-Type": "application/json", ...prefer ? { Prefer: prefer } : {} },
+      signal: AbortSignal.timeout(1e4)
+    });
+    if (!res.ok) throw Object.assign(new Error(`SUPABASE_${res.status}`), { status: res.status });
+    const text = await res.text();
+    return text ? JSON.parse(text) : [];
+  }
+  rest(path, init) {
+    return this.call(`/rest/v1/${path}`, init);
+  }
+  rpc(name, args) {
+    return this.rest(`rpc/${name}`, { method: "POST", body: JSON.stringify(args) });
+  }
+  async find(phone) {
+    const rows = await this.rpc("whatsapp_workspace_for_phone", { p_phone: phone });
+    const r = rows[0];
+    return r ? { userId: r.user_id, workspaceId: r.workspace_id, accountId: r.account_id } : null;
+  }
+  async resolve(phone, name) {
+    let ws = await this.find(phone);
+    if (!ws) {
+      try {
+        await this.call("/auth/v1/admin/users", { method: "POST", body: JSON.stringify({ phone, phone_confirm: true, user_metadata: name ? { name } : {} }) });
+      } catch (e) {
+        if (e.status !== 422) throw e;
+      }
+      ws = await this.find(phone);
+    }
+    if (!ws) throw new Error("LEDGER_PROVISION_FAILED");
+    await this.ensureCategories(ws.workspaceId);
+    return ws;
+  }
+  async categoryMap(workspaceId) {
+    const rows = await this.rest(`finance_categories?workspace_id=eq.${workspaceId}&select=id,name&limit=200`);
+    return new Map(rows.map((r) => [r.name, r.id]));
+  }
+  async ensureCategories(workspaceId) {
+    const have = await this.categoryMap(workspaceId);
+    const missing = CATEGORIES.filter((c) => !have.has(c));
+    if (!missing.length) return;
+    await this.rest(`finance_categories?on_conflict=workspace_id,name`, {
+      method: "POST",
+      body: JSON.stringify(missing.map((name) => ({ workspace_id: workspaceId, name, kind: name === "Renda" ? "income" : "expense" }))),
+      prefer: "resolution=ignore-duplicates,return=minimal"
+    });
+  }
+  async load(ws) {
+    const [summary2, rows] = await Promise.all([
+      this.rpc("whatsapp_ledger_summary", { p_workspace: ws.workspaceId }),
+      this.rest(
+        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category:finance_categories(name)&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
+      )
+    ]);
+    const opening = Number(summary2[0]?.opening_cents ?? 0);
+    const net = Number(summary2[0]?.net_cents ?? 0);
+    const visible = [];
+    for (const r of rows) {
+      if (visible.length >= MAX_STATE_TRANSACTIONS) break;
+      const amount = Number(r.amount);
+      const description = String(r.description ?? "").trim().slice(0, 120);
+      if (!agentCanSee({ amount, date: r.effective_date, description })) continue;
+      visible.push({ id: r.id, type: r.type === "income" ? "receita" : "despesa", amount, description, date: r.effective_date, ...r.category?.name ? { category: r.category.name.slice(0, 50) } : {} });
+    }
+    visible.reverse();
+    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible };
+  }
+  async apply(ws, changes, key) {
+    if (!changes.create.length && !changes.update.length && !changes.remove.length) return;
+    const cats = await this.categoryMap(ws.workspaceId);
+    const catId = (name) => name ? cats.get(name) ?? null : null;
+    let i = 0;
+    for (const e of changes.create) {
+      await this.rpc("finance_create_transaction", {
+        target_workspace_id: ws.workspaceId,
+        target_account_id: ws.accountId,
+        target_category_id: catId(e.category),
+        target_description: e.description,
+        target_amount: e.amount,
+        target_type: e.type === "receita" ? "income" : "expense",
+        target_status: "confirmed",
+        target_competence_date: e.date,
+        target_expected_date: e.date,
+        target_effective_date: e.date,
+        target_origin: "ai",
+        target_payment_method: null,
+        target_note: "Registrado pelo Pulse no WhatsApp",
+        // Mesma mensagem reprocessada = mesma chave = nenhum lançamento duplicado.
+        target_idempotency_key: `${key}:${i++}`
+      });
+    }
+    for (const e of changes.update) {
+      await this.rest(`finance_transactions?id=eq.${e.id}&workspace_id=eq.${ws.workspaceId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          description: e.description,
+          amount: e.amount,
+          type: e.type === "receita" ? "income" : "expense",
+          competence_date: e.date,
+          effective_date: e.date,
+          category_id: catId(e.category)
+        })
+      });
+    }
+    for (const id of changes.remove) {
+      await this.rest(`finance_transactions?id=eq.${id}&workspace_id=eq.${ws.workspaceId}`, { method: "DELETE" });
+    }
+  }
+};
+
 // server/whatsapp/handler.ts
 var DAY = 365 * 24 * 60 * 60 * 1e3;
 var RATE_PER_MINUTE = 15;
@@ -1478,12 +1631,21 @@ async function loadSession(deps, phone) {
   }
   return { session: parsed.data, version: stored.version };
 }
-async function runAgent(deps, phone, message, messageId, source) {
+async function runAgent(deps, phone, message, messageId, source, name) {
   const now = deps.now?.() ?? Date.now();
+  const ws = deps.ledger ? await deps.ledger.resolve(phone, name) : void 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     const { session, version } = await loadSession(deps, phone);
-    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source });
+    const before = ws && deps.ledger ? await deps.ledger.load(ws) : void 0;
+    if (before) {
+      session.state.initialBalanceCents = before.initialBalanceCents;
+      session.state.transactions = structuredClone(before.transactions);
+    }
+    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws) });
     out.session.expiresAt = now + DAY;
+    if (ws && deps.ledger && before && !out.trace.errorCode) {
+      await deps.ledger.apply(ws, diffEntries(before.transactions, out.session.state.transactions), `wa:${messageId}`);
+    }
     if (await deps.store.saveSession(phone, out.session, version)) return out;
   }
   throw new Error("SESSION_CONFLICT");
@@ -1569,7 +1731,7 @@ async function handleInbound(deps, input) {
       text = t.text;
       heard = t.text;
     } else text = input.text.slice(0, 2e3);
-    const out = await runAgent(deps, phone, text, messageId, input.kind === "audio" ? "audio" : "text");
+    const out = await runAgent(deps, phone, text, messageId, input.kind === "audio" ? "audio" : "text", input.name);
     if (out.trace.errorCode) {
       deps.log?.({ event: "whatsapp_agent_error", code: out.trace.errorCode });
       await deps.messenger.sendText(phone, messages.technicalProblem);
@@ -1587,7 +1749,7 @@ async function handleInbound(deps, input) {
     }
   }
 }
-var same = (a, b) => {
+var same2 = (a, b) => {
   const x = createHash("sha256").update(a).digest();
   const y = createHash("sha256").update(b).digest();
   return timingSafeEqual(x, y);
@@ -1604,7 +1766,7 @@ function createHandler(config, deps) {
       key = new URL(req.url ?? "", "https://x.invalid").searchParams.get("k") ?? "";
     } catch {
     }
-    if (!config.secret || !same(key, config.secret)) return res.status(401).json({ error: "UNAUTHORIZED" });
+    if (!config.secret || !same2(key, config.secret)) return res.status(401).json({ error: "UNAUTHORIZED" });
     const input = parseInbound(req.body, config.instanceId);
     try {
       await handleInbound(deps, input);
@@ -1632,6 +1794,7 @@ async function handler(req, res) {
   const deps = {
     ownerPhone,
     store: new SupabaseStore(e.SUPABASE_URL, e.SUPABASE_SERVICE_ROLE_KEY),
+    ledger: new SupabaseLedger(e.SUPABASE_URL, e.SUPABASE_SERVICE_ROLE_KEY),
     messenger: new ZApiClient(e.ZAPI_INSTANCE_ID, e.ZAPI_TOKEN, e.ZAPI_CLIENT_TOKEN),
     provider: () => new OpenAIConversationProvider(key, e.OPENAI_MODEL),
     transcriber: () => new OpenAITranscriptionProvider(key, e.OPENAI_TRANSCRIBE_MODEL?.trim() || void 0),

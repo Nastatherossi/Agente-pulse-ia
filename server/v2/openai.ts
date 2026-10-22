@@ -5,12 +5,12 @@ import {z} from 'zod';
 import {toolSchemas,type Provider,type ModelMessage,type Session,type ModelResult} from '../../shared/v2/contracts.js';
 const descriptions:Record<keyof typeof toolSchemas,string>={
  simular_compra:'Calcula impacto hipotético de uma compra ou gasto; nunca registra despesa.',
- consultar_saldo:'Saldo consolidado fictício em centavos.',
+ consultar_saldo:'Saldo consolidado em centavos.',
  registrar_transacao:'Propõe registrar UM gasto ou receita que o usuário afirma já ter acontecido. natureza="fato_ocorrido" só para fatos realizados; evidencia = trecho literal da mensagem atual que contém o valor. O código decide se registra, pede confirmação ou recusa.',
  registrar_varios:'Propõe registrar de 2 a 5 lançamentos citados na mesma mensagem (ex.: "40 de Uber e 20 de café"), cada um com evidencia literal. Sempre gera um pedido de confirmação ao usuário.',
  propor_edicao_transacao:'Propõe corrigir valor, descrição, categoria ou data de um lançamento existente. Identifique o alvo por transacao_id (de listar_transacoes) ou por descricao/valor/data originais. Nunca altera direto: gera pedido de confirmação.',
  propor_exclusao_transacao:'Propõe excluir um lançamento existente, identificado como em propor_edicao_transacao. Nunca exclui direto: gera pedido de confirmação.',
- listar_transacoes:'Lista transações fictícias (com id) com filtro opcional.',
+ listar_transacoes:'Lista transações (com id) com filtro opcional.',
  resumir_financas:'Calcula receitas, despesas, resultado, categorias e percentuais num período inclusivo.',
  comparar_periodos:'Calcula valor A, valor B, diferença A menos B e percentual quando definido.',
  consultar_gastos_categoria:'Total e registros de despesas de uma categoria no período.',
