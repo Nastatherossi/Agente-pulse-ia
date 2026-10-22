@@ -112,6 +112,8 @@ export const messages = {
     '*Comandos do dono*\n• *autorizar* — libera o último número que pediu acesso\n• *autorizar 5511999999999 Nome* — libera um número\n• *bloquear* ou *bloquear 5511…* — nega\n• *remover 5511…* — apaga o contato e a conversa\n• *listar* — mostra todos os contatos',
   welcome: (name?: string | null) =>
     `Oi${name ? `, ${name.split(/\s+/)[0]}` : ''}! Você foi liberado para testar o *Pulse*, um assistente de finanças pelo WhatsApp.\n\nConte um gasto (ex.: "gastei 32 no almoço"), pergunte seu saldo ou mande um áudio. Antes de gravar algo, eu confirmo com você.\n\nÉ uma versão de teste, então me avise se algo não funcionar bem. 🙂`,
+  loginCode: (code: string) => `Seu código de acesso ao Pulse é *${code}*.\n\nDigite na tela de login. Ele vale por poucos minutos e não deve ser compartilhado. Se não foi você, é só ignorar esta mensagem.`,
+  loginNotAuthorized: 'Esse número ainda não foi liberado. Mande um oi para o Pulse no WhatsApp e aguarde a liberação.',
   technicalProblem: 'Tive um problema técnico agora e não consegui responder. Pode mandar de novo em instantes?',
   unsupported: 'Por enquanto eu entendo texto e áudio. Pode me contar por um deles?',
 };

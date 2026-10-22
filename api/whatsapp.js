@@ -1139,6 +1139,10 @@ Responda *autorizar* para liberar (ou *autorizar ${phone}*) ou *bloquear* para n
 Conte um gasto (ex.: "gastei 32 no almo\xE7o"), pergunte seu saldo ou mande um \xE1udio. Antes de gravar algo, eu confirmo com voc\xEA.
 
 \xC9 uma vers\xE3o de teste, ent\xE3o me avise se algo n\xE3o funcionar bem. \u{1F642}`,
+  loginCode: (code) => `Seu c\xF3digo de acesso ao Pulse \xE9 *${code}*.
+
+Digite na tela de login. Ele vale por poucos minutos e n\xE3o deve ser compartilhado. Se n\xE3o foi voc\xEA, \xE9 s\xF3 ignorar esta mensagem.`,
+  loginNotAuthorized: "Esse n\xFAmero ainda n\xE3o foi liberado. Mande um oi para o Pulse no WhatsApp e aguarde a libera\xE7\xE3o.",
   technicalProblem: "Tive um problema t\xE9cnico agora e n\xE3o consegui responder. Pode mandar de novo em instantes?",
   unsupported: "Por enquanto eu entendo texto e \xE1udio. Pode me contar por um deles?"
 };
@@ -1746,6 +1750,11 @@ async function execOwnerCommand(deps, cmd) {
     return messages.ownerBlocked(phone);
   }
   const contact = await deps.store.upsertContact({ phone, name: cmd.name, status: "authorized" });
+  try {
+    await deps.ledger?.resolve(phone, contact.name ?? void 0);
+  } catch (e) {
+    deps.log?.({ event: "whatsapp_provision_failed", message: e instanceof Error ? e.message : "unknown" });
+  }
   await deps.messenger.sendText(phone, messages.welcome(contact.name));
   return messages.ownerAuthorized(phone, contact.name);
 }
