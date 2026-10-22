@@ -187,7 +187,9 @@ export async function handleInbound(deps: Deps, input: Inbound): Promise<void> {
       await deps.messenger.sendText(phone, messages.technicalProblem);
       return;
     }
-    const heardLine = heard ? `🎤 "${heard.length > 300 ? `${heard.slice(0, 300)}…` : heard}"\n\n` : '';
+    // Não repete o áudio inteiro ao usuário. A transcrição só aparece quando o agente não conseguiu agir sobre ela.
+    const understood = out.trace.status === 'success' || out.trace.confirmation === 'pending';
+    const heardLine = heard && !understood ? `🎤 "${heard.length > 200 ? `${heard.slice(0, 200)}…` : heard}"\n\n` : '';
     await deps.messenger.sendText(phone, `${heardLine}${out.trace.message}`);
   } catch (e) {
     deps.log?.({ event: 'whatsapp_error', message: e instanceof Error ? e.message : 'unknown' });

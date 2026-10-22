@@ -79,7 +79,7 @@ export function transcriptToMessage(text: string): string | undefined {
   // Respostas que transcritores inventam em áudio sem fala.
   if (/^(legendas pela comunidade amara org|obrigad[oa] por assistir|inscreva-se no canal)\b/.test(lettersOnly))
     return undefined;
-  return clean.slice(0, 1000);
+  return spokenNumbersToDigits(clean.slice(0, 1000));
 }
 
 /**
@@ -96,4 +96,71 @@ export function estimateTranscriptionCostUSD(durationSeconds: number, model: str
   const perMinute = TRANSCRIPTION_PRICE_PER_MINUTE_USD[model];
   if (perMinute === undefined || !Number.isFinite(durationSeconds) || durationSeconds < 0) return undefined;
   return (durationSeconds / 60) * perMinute;
+}
+
+/*
+ * Valores falados viram dígitos antes de o agente ler a mensagem: o transcritor escreve "três e cinquenta",
+ * e a política só confere valores em dígitos. Áudio sempre pede confirmação, então um erro aqui aparece
+ * para o usuário ("R$ 3,50?") antes de qualquer registro.
+ */
+const fold = (w: string) => w.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z]/g, '');
+const UNITS: Record<string, number> = { zero: 0, um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10, onze: 11, doze: 12, treze: 13, catorze: 14, quatorze: 14, quinze: 15, dezesseis: 16, dezessete: 17, dezoito: 18, dezenove: 19 };
+const TENS: Record<string, number> = { vinte: 20, trinta: 30, quarenta: 40, cinquenta: 50, sessenta: 60, setenta: 70, oitenta: 80, noventa: 90 };
+const HUNDREDS: Record<string, number> = { cem: 100, cento: 100, duzentos: 200, duzentas: 200, trezentos: 300, trezentas: 300, quatrocentos: 400, quatrocentas: 400, quinhentos: 500, quinhentas: 500, seiscentos: 600, seiscentas: 600, setecentos: 700, setecentas: 700, oitocentos: 800, oitocentas: 800, novecentos: 900, novecentas: 900 };
+const CURRENCY = new Set(['real', 'reais', 'conto', 'contos', 'pila', 'pilas', 'pau', 'paus']);
+
+type Parsed = { value: number; next: number; big: boolean };
+
+/** Número por extenso (< 1 milhão) começando em w[i]. */
+function parseGroup(w: string[], i: number): { value: number; next: number } | undefined {
+  let v = 0, j = i, found = false;
+  if (w[j] in HUNDREDS) {
+    v += HUNDREDS[w[j]]; j++; found = true;
+    if (w[j] === 'e' && (w[j + 1] in TENS || w[j + 1] in UNITS)) j++;
+  }
+  if (w[j] in TENS) {
+    v += TENS[w[j]]; j++; found = true;
+    if (w[j] === 'e' && w[j + 1] in UNITS && UNITS[w[j + 1]] >= 1 && UNITS[w[j + 1]] <= 9) { v += UNITS[w[j + 1]]; j += 2; }
+  } else if (w[j] in UNITS && !(found && UNITS[w[j]] === 0)) {
+    v += UNITS[w[j]]; j++; found = true;
+  }
+  return found ? { value: v, next: j } : undefined;
+}
+function parseCardinal(w: string[], i: number): Parsed | undefined {
+  const g = parseGroup(w, i);
+  if (w[g?.next ?? i] === 'mil') {
+    const base = g ? g.value : 1, j = (g?.next ?? i) + 1;
+    let total = base * 1000, next = j;
+    const rest = w[j] === 'e' ? parseGroup(w, j + 1) : parseGroup(w, j);
+    if (rest) { total += rest.value; next = rest.next; }
+    return { value: total, next, big: true };
+  }
+  return g ? { value: g.value, next: g.next, big: false } : undefined;
+}
+const brl2 = (reais: number, centavos?: number) => (centavos === undefined ? String(reais) : `${reais},${String(centavos).padStart(2, '0')}`);
+
+export function spokenNumbersToDigits(text: string): string {
+  const tokens = text.split(' ');
+  const w = tokens.map(fold);
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; ) {
+    const n = parseCardinal(w, i);
+    if (!n) { out.push(tokens[i]); i++; continue; }
+    let next = n.next, cents: number | undefined, currency = false;
+    if (CURRENCY.has(w[next])) { currency = true; next++; }
+    // "três e cinquenta", "três reais e cinquenta (centavos)": a segunda parte são os centavos.
+    if (w[next] === 'e') {
+      const c = parseCardinal(w, next + 1);
+      if (c && c.value >= 1 && c.value <= 99 && !c.big) {
+        cents = c.value; next = c.next;
+        if (w[next] === 'centavos' || w[next] === 'centavo') next++;
+      }
+    }
+    // Só vira dígito o que parece valor: moeda, centavos, número grande. "uma água" e "duas vezes" ficam como estão.
+    if (!(currency || cents !== undefined || n.value >= 10 || n.big)) { out.push(tokens[i]); i++; continue; }
+    const tail = tokens[next - 1].match(/[.,;:!?]+$/)?.[0] ?? '';
+    out.push(`${currency || cents !== undefined ? 'R$ ' : ''}${brl2(n.value, cents)}${tail}`);
+    i = next;
+  }
+  return out.join(' ');
 }

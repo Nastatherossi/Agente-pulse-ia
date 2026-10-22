@@ -983,7 +983,85 @@ function transcriptToMessage(text) {
   if (!lettersOnly) return void 0;
   if (/^(legendas pela comunidade amara org|obrigad[oa] por assistir|inscreva-se no canal)\b/.test(lettersOnly))
     return void 0;
-  return clean.slice(0, 1e3);
+  return spokenNumbersToDigits(clean.slice(0, 1e3));
+}
+var fold = (w) => w.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z]/g, "");
+var UNITS = { zero: 0, um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10, onze: 11, doze: 12, treze: 13, catorze: 14, quatorze: 14, quinze: 15, dezesseis: 16, dezessete: 17, dezoito: 18, dezenove: 19 };
+var TENS = { vinte: 20, trinta: 30, quarenta: 40, cinquenta: 50, sessenta: 60, setenta: 70, oitenta: 80, noventa: 90 };
+var HUNDREDS = { cem: 100, cento: 100, duzentos: 200, duzentas: 200, trezentos: 300, trezentas: 300, quatrocentos: 400, quatrocentas: 400, quinhentos: 500, quinhentas: 500, seiscentos: 600, seiscentas: 600, setecentos: 700, setecentas: 700, oitocentos: 800, oitocentas: 800, novecentos: 900, novecentas: 900 };
+var CURRENCY = /* @__PURE__ */ new Set(["real", "reais", "conto", "contos", "pila", "pilas", "pau", "paus"]);
+function parseGroup(w, i) {
+  let v = 0, j = i, found = false;
+  if (w[j] in HUNDREDS) {
+    v += HUNDREDS[w[j]];
+    j++;
+    found = true;
+    if (w[j] === "e" && (w[j + 1] in TENS || w[j + 1] in UNITS)) j++;
+  }
+  if (w[j] in TENS) {
+    v += TENS[w[j]];
+    j++;
+    found = true;
+    if (w[j] === "e" && w[j + 1] in UNITS && UNITS[w[j + 1]] >= 1 && UNITS[w[j + 1]] <= 9) {
+      v += UNITS[w[j + 1]];
+      j += 2;
+    }
+  } else if (w[j] in UNITS && !(found && UNITS[w[j]] === 0)) {
+    v += UNITS[w[j]];
+    j++;
+    found = true;
+  }
+  return found ? { value: v, next: j } : void 0;
+}
+function parseCardinal(w, i) {
+  const g = parseGroup(w, i);
+  if (w[g?.next ?? i] === "mil") {
+    const base = g ? g.value : 1, j = (g?.next ?? i) + 1;
+    let total = base * 1e3, next = j;
+    const rest = w[j] === "e" ? parseGroup(w, j + 1) : parseGroup(w, j);
+    if (rest) {
+      total += rest.value;
+      next = rest.next;
+    }
+    return { value: total, next, big: true };
+  }
+  return g ? { value: g.value, next: g.next, big: false } : void 0;
+}
+var brl2 = (reais, centavos) => centavos === void 0 ? String(reais) : `${reais},${String(centavos).padStart(2, "0")}`;
+function spokenNumbersToDigits(text) {
+  const tokens = text.split(" ");
+  const w = tokens.map(fold);
+  const out = [];
+  for (let i = 0; i < tokens.length; ) {
+    const n = parseCardinal(w, i);
+    if (!n) {
+      out.push(tokens[i]);
+      i++;
+      continue;
+    }
+    let next = n.next, cents5, currency = false;
+    if (CURRENCY.has(w[next])) {
+      currency = true;
+      next++;
+    }
+    if (w[next] === "e") {
+      const c = parseCardinal(w, next + 1);
+      if (c && c.value >= 1 && c.value <= 99 && !c.big) {
+        cents5 = c.value;
+        next = c.next;
+        if (w[next] === "centavos" || w[next] === "centavo") next++;
+      }
+    }
+    if (!(currency || cents5 !== void 0 || n.value >= 10 || n.big)) {
+      out.push(tokens[i]);
+      i++;
+      continue;
+    }
+    const tail = tokens[next - 1].match(/[.,;:!?]+$/)?.[0] ?? "";
+    out.push(`${currency || cents5 !== void 0 ? "R$ " : ""}${brl2(n.value, cents5)}${tail}`);
+    i = next;
+  }
+  return out.join(" ");
 }
 
 // shared/whatsapp/access.ts
@@ -1739,7 +1817,8 @@ async function handleInbound(deps, input) {
       await deps.messenger.sendText(phone, messages.technicalProblem);
       return;
     }
-    const heardLine = heard ? `\u{1F3A4} "${heard.length > 300 ? `${heard.slice(0, 300)}\u2026` : heard}"
+    const understood = out.trace.status === "success" || out.trace.confirmation === "pending";
+    const heardLine = heard && !understood ? `\u{1F3A4} "${heard.length > 200 ? `${heard.slice(0, 200)}\u2026` : heard}"
 
 ` : "";
     await deps.messenger.sendText(phone, `${heardLine}${out.trace.message}`);
