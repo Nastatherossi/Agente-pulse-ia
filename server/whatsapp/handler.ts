@@ -71,6 +71,7 @@ async function runAgent(deps: Deps, phone: string, message: string, messageId: s
     if (before) {
       session.state.initialBalanceCents = before.initialBalanceCents;
       session.state.transactions = structuredClone(before.transactions);
+      session.state.categories = before.customCategories;
     }
     const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws) });
     out.session.expiresAt = now + DAY; // a sessão de WhatsApp não expira como a do laboratório

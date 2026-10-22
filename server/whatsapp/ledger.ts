@@ -12,7 +12,7 @@ import { CATEGORIES } from '../../shared/v2/contracts.js';
 
 export type Workspace = { userId: string; workspaceId: string; accountId: string };
 export type Entry = { id: string; type: 'receita' | 'despesa'; amount: number; description: string; date: string; category?: string };
-export type Snapshot = { initialBalanceCents: number; transactions: Entry[] };
+export type Snapshot = { initialBalanceCents: number; transactions: Entry[]; /** Categorias do usuário além das padrão do agente. */ customCategories: string[] };
 export type Changes = { create: Entry[]; update: Entry[]; remove: string[] };
 
 export interface Ledger {
@@ -149,12 +149,24 @@ export class SupabaseLedger implements Ledger {
       visible.push({ id: r.id, type: r.type === 'income' ? 'receita' : 'despesa', amount, description, date: r.effective_date as string, ...(r.category_id && nameOf.get(r.category_id) ? { category: nameOf.get(r.category_id)!.slice(0, 50) } : {}) });
     }
     visible.reverse(); // do mais antigo para o mais novo
-    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible };
+    const builtIn = new Set<string>(CATEGORIES);
+    const customCategories = [...cats.keys()].filter(name => !builtIn.has(name) && name.length <= 30).slice(0, 40);
+    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories };
   }
 
   async apply(ws: Workspace, changes: Changes, key: string) {
     if (!changes.create.length && !changes.update.length && !changes.remove.length) return;
-    const cats = await this.categoryMap(ws.workspaceId);
+    let cats = await this.categoryMap(ws.workspaceId);
+    // Categoria nova pedida pelo usuário: cria no workspace (aparece também no dashboard).
+    const wanted = [...new Set([...changes.create, ...changes.update].map(e => e.category).filter((c): c is string => Boolean(c) && !cats.has(c as string)))];
+    if (wanted.length) {
+      await this.rest(`finance_categories?on_conflict=workspace_id,name`, {
+        method: 'POST',
+        body: JSON.stringify(wanted.map(name => ({ workspace_id: ws.workspaceId, name, kind: 'both' }))),
+        prefer: 'resolution=ignore-duplicates,return=minimal',
+      });
+      cats = await this.categoryMap(ws.workspaceId);
+    }
     const catId = (name?: string) => (name ? (cats.get(name) ?? null) : null);
     let i = 0;
     for (const e of changes.create) {
@@ -197,7 +209,7 @@ export class SupabaseLedger implements Ledger {
 
 /** Implementação em memória, só para testes. Um "workspace" por telefone. */
 export class MemoryLedger implements Ledger {
-  workspaces = new Map<string, { ws: Workspace; opening: number; entries: Entry[] }>();
+  workspaces = new Map<string, { ws: Workspace; opening: number; entries: Entry[]; categories?: Set<string> }>();
   applied: { key: string; changes: Changes }[] = [];
   failNextApply = false;
   private seq = 0;
@@ -221,7 +233,7 @@ export class MemoryLedger implements Ledger {
     const w = this.of(ws);
     const visible = w.entries.filter(e => agentCanSee(e)).slice(-MAX_STATE_TRANSACTIONS);
     const net = w.entries.reduce((s, e) => s + signed(e), 0);
-    return { initialBalanceCents: initialBalanceFor(w.opening, net, visible), transactions: structuredClone(visible) };
+    return { initialBalanceCents: initialBalanceFor(w.opening, net, visible), transactions: visible.map(({ idem: _idem, ...e }: Entry & { idem?: string }) => structuredClone(e)), customCategories: [...(w.categories ?? [])] };
   }
   async apply(ws: Workspace, changes: Changes, key: string) {
     if (this.failNextApply) {
@@ -230,6 +242,7 @@ export class MemoryLedger implements Ledger {
     }
     const w = this.of(ws);
     this.applied.push({ key, changes: structuredClone(changes) });
+    for (const e of [...changes.create, ...changes.update]) if (e.category && !(CATEGORIES as readonly string[]).includes(e.category)) (w.categories ??= new Set()).add(e.category);
     let i = 0;
     for (const e of changes.create) {
       const idem = `${key}:${i++}`;
