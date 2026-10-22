@@ -184,13 +184,24 @@ export function decideGoal(call:ModelCall,ctx:PolicyContext):WriteDecision&{goal
  return {decision:'execute',goal:parsed};
 }
 /** Resolves the record an edit/deletion refers to. Exactly one match, or nothing is prepared. */
-export function resolveTarget(alvo:Record<string,unknown>,state:State):{target?:State['transactions'][number];reason?:string}{
+/** The record the user most likely means by "isso", "esse valor", "o último": the one registered most recently. */
+export function lastRecord(state:State):State['transactions'][number]|undefined{
+ return state.transactions.find(t=>t.id===state.lastRecordId)??state.transactions[state.transactions.length-1];
+}
+/** Words that point at the previous record instead of describing one. */
+const DEICTIC=/\b(isso|esse|essa|esse valor|esse gasto|esse lancamento|ultimo|ultima|aquele|aquela|acabei de|agora ha pouco|anterior|mesmo)\b/;
+export function resolveTarget(alvo:Record<string,unknown>,state:State,message=''):{target?:State['transactions'][number];reason?:string}{
  let c=state.transactions;
  if(alvo.transacao_id)c=c.filter(t=>t.id===alvo.transacao_id);
  if(alvo.descricao)c=c.filter(t=>sharesStem(`${t.description} ${t.category||''}`,String(alvo.descricao)));
  if(alvo.valor!==undefined)c=c.filter(t=>cents(t.amount)===cents(alvo.valor as number));
  if(alvo.data)c=c.filter(t=>t.date===alvo.data);
  if(c.length===1)return {target:c[0]};
+ // "coloca em lazer", "muda isso para 30": no record was described, so the user means the last one.
+ const last=lastRecord(state);
+ const deictic=DEICTIC.test(normalize(message))||/^(ultimo|ultima|esse|essa|isso)\b/.test(normalize(String(alvo.descricao??'')));
+ const described=Boolean(alvo.transacao_id)||alvo.valor!==undefined&&state.transactions.some(t=>cents(t.amount)===cents(alvo.valor as number))||(Boolean(alvo.descricao)&&!deictic&&c.length>0);
+ if(last&&deictic&&!described)return {target:last};
  return {reason:c.length?'TARGET_AMBIGUOUS':'TARGET_NOT_FOUND'};
 }
 /** propor_edicao_transacao / propor_exclusao_transacao: never executed, at most turned into a pending operation. */
@@ -198,10 +209,11 @@ export function prepareChange(call:ModelCall,ctx:PolicyContext,now=Date.now()):{
  const a=call.arguments;
  if(ctx.risk)return {reason:'RISK_CONTEXT'};
  if(!contains(ctx.message,String(a.evidencia)))return {reason:'CHANGE_NOT_IN_MESSAGE'};
- const {target,reason}=resolveTarget(a.alvo as Record<string,unknown>,ctx.session.state);if(!target)return {reason};
+ const {target,reason}=resolveTarget(a.alvo as Record<string,unknown>,ctx.session.state,ctx.message);if(!target)return {reason};
  const base={id:crypto.randomUUID(),createdAt:now,expiresAt:now+5*60000,targetId:target.id,before:target};
  if(call.name==='propor_exclusao_transacao')return {operation:{...base,kind:'delete'}};
  const novo=a.novo as Record<string,unknown>;
+ if(novo.category!==undefined){const cat=normalizeCategory(novo.category,ctx.message,'',undefined,ctx.session.state.categories??[]);if(!cat)return {reason:'INVALID_CHANGE'};novo.category=cat;}
  if(novo.amount!==undefined&&!hasAmount(ctx.message,novo.amount as number))return {reason:'CHANGE_NOT_IN_MESSAGE'};
  if(novo.date!==undefined&&(novo.date as string)>ctx.today)return {reason:'FUTURE_DATE'};
  const after=storedTransaction.safeParse({...target,...novo});if(!after.success)return {reason:'INVALID_CHANGE'};
