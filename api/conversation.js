@@ -937,7 +937,7 @@ function demoContext(session, channel, authentication) {
   return { identity: { subject: session.id, workspaceId: `demo:${session.id}`, authentication }, sessionId: session.id, channel };
 }
 function processMessage(provider, session, message, requestId, today, context, options = {}) {
-  if (provider.mode === "real" && context.identity.authentication !== "signed_lab_session") throw new Error("IDENTITY_MISMATCH");
+  if (provider.mode === "real" && context.identity.authentication !== "signed_lab_session" && context.identity.authentication !== "whatsapp_allowlist") throw new Error("IDENTITY_MISMATCH");
   if (context.sessionId !== session.id || context.identity.subject !== session.id || context.identity.workspaceId !== `demo:${session.id}`) throw new Error("IDENTITY_MISMATCH");
   return runConversation(provider, session, message, requestId, today, options).then((output) => {
     output.trace.channel = context.channel;

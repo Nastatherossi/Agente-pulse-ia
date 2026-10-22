@@ -28,6 +28,9 @@
   "functions": {
     "api/conversation.js": {
       "maxDuration": 45
+    },
+    "api/whatsapp.js": {
+      "maxDuration": 60
     }
   }
 }
