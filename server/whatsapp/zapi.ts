@@ -20,11 +20,15 @@ export function parseInbound(body: unknown, expectedInstanceId?: string): Inboun
   if (b.isGroup === true || b.participantPhone || b.participantLid) return { kind: 'ignore', reason: 'group' };
   if (b.isNewsletter === true || b.broadcast === true || b.isStatusReply === true) return { kind: 'ignore', reason: 'not_direct' };
   if (b.isEdit === true || b.waitingMessage === true) return { kind: 'ignore', reason: 'edit_or_waiting' };
+  // Reação com emoji a uma mensagem (função do WhatsApp): não é conversa, o Pulse não responde nada.
+  if (b.reaction && typeof b.reaction === 'object') return { kind: 'ignore', reason: 'reaction' };
   const messageId = typeof b.messageId === 'string' ? b.messageId.slice(0, 120) : '';
   const phone = normalizePhone(typeof b.phone === 'string' ? b.phone : undefined);
   if (!messageId || !phone) return { kind: 'ignore', reason: 'missing_id_or_phone' };
   const name = typeof b.senderName === 'string' && b.senderName.trim() ? b.senderName.trim().slice(0, 80) : undefined;
   const text = typeof b.text?.message === 'string' ? b.text.message.trim() : '';
+  // Mensagem só com emoji(s) também não recebe resposta.
+  if (text && isEmojiOnly(text)) return { kind: 'ignore', reason: 'emoji_only' };
   if (text) return { kind: 'text', messageId, phone, name, text };
   const audio = b.audio;
   if (audio && typeof audio.audioUrl === 'string') {
@@ -32,6 +36,13 @@ export function parseInbound(body: unknown, expectedInstanceId?: string): Inboun
     return { kind: 'audio', messageId, phone, name, audioUrl: audio.audioUrl, mimeType: String(audio.mimeType || 'audio/ogg; codecs=opus'), seconds: Number.isFinite(seconds) ? seconds : undefined };
   }
   return { kind: 'unsupported', messageId, phone, name };
+}
+
+/** True when the text has emoji (and joiners/skin tones/spaces) but no letter or digit: "👍", "❤️❤️", "🙏 😂". */
+export function isEmojiOnly(text: string): boolean {
+  const t = text.trim();
+  if (!t || /[\p{L}\p{N}]/u.test(t.replace(/[\u20e3]/g, ''))) return false;
+  return /^[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\ufe0f\u20e3\s]+$/u.test(t) && /[\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(t);
 }
 
 /** Só baixa mídia por HTTPS e de um host público (evita que um payload forjado aponte para a rede interna). */
