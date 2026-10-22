@@ -1543,12 +1543,14 @@ var SupabaseLedger = class {
     });
   }
   async load(ws) {
-    const [summary2, rows] = await Promise.all([
+    const [summary2, rows, cats] = await Promise.all([
       this.rpc("whatsapp_ledger_summary", { p_workspace: ws.workspaceId }),
       this.rest(
-        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category:finance_categories(name)&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
-      )
+        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
+      ),
+      this.categoryMap(ws.workspaceId)
     ]);
+    const nameOf = new Map([...cats].map(([name, id]) => [id, name]));
     const opening = Number(summary2[0]?.opening_cents ?? 0);
     const net = Number(summary2[0]?.net_cents ?? 0);
     const visible = [];
@@ -1557,7 +1559,7 @@ var SupabaseLedger = class {
       const amount = Number(r.amount);
       const description = String(r.description ?? "").trim().slice(0, 120);
       if (!agentCanSee({ amount, date: r.effective_date, description })) continue;
-      visible.push({ id: r.id, type: r.type === "income" ? "receita" : "despesa", amount, description, date: r.effective_date, ...r.category?.name ? { category: r.category.name.slice(0, 50) } : {} });
+      visible.push({ id: r.id, type: r.type === "income" ? "receita" : "despesa", amount, description, date: r.effective_date, ...r.category_id && nameOf.get(r.category_id) ? { category: nameOf.get(r.category_id).slice(0, 50) } : {} });
     }
     visible.reverse();
     return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible };

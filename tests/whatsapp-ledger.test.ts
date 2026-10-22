@@ -170,10 +170,11 @@ describe('SupabaseLedger (requisições)',()=>{
  it('carrega confirmados, mapeia tipos e calcula o saldo inicial',async()=>{
   const {calls,ledger}=fake(c=>{
    if(c.url.includes('whatsapp_ledger_summary'))return {body:[{opening_cents:10000,net_cents:45000}]};
+   if(c.url.includes('finance_categories'))return {body:[{id:'cat-food',name:'Alimentação'}]};
    return {body:[
-    {id:'t2',type:'expense',amount:'50.00',description:'mercado',effective_date:today,category:{name:'Alimentação'}},
-    {id:'t1',type:'income',amount:'500',description:'freela',effective_date:'2026-10-01',category:null},
-    {id:'big',type:'income',amount:'9999999',description:'estranho',effective_date:'2026-09-01',category:null},
+    {id:'t2',type:'expense',amount:'50.00',description:'mercado',effective_date:today,category_id:'cat-food'},
+    {id:'t1',type:'income',amount:'500',description:'freela',effective_date:'2026-10-01',category_id:null},
+    {id:'big',type:'income',amount:'9999999',description:'estranho',effective_date:'2026-09-01',category_id:null},
    ]};
   });
   const s=await ledger.load(WS);
@@ -181,6 +182,7 @@ describe('SupabaseLedger (requisições)',()=>{
   expect(s.transactions[1]).toEqual({id:'t2',type:'despesa',amount:50,description:'mercado',date:today,category:'Alimentação'});
   expect(s.initialBalanceCents).toBe(10000+45000-(50000-5000));
   const q=calls.find(c=>c.url.includes('finance_transactions'))!.url;
+  expect(q).not.toContain('finance_categories(');
   expect(q).toContain(`workspace_id=eq.${WS.workspaceId}`);
   expect(q).toContain('status=eq.confirmed');
  });
