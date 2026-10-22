@@ -204,12 +204,20 @@ export function resolveTarget(alvo:Record<string,unknown>,state:State,message=''
  if(last&&deictic&&!described)return {target:last};
  return {reason:c.length?'TARGET_AMBIGUOUS':'TARGET_NOT_FOUND'};
 }
+/** Short and not naming any existing record: the user is talking about the previous one. */
+export function isLooseMessage(message:string,state:State):boolean{
+ return normalize(message).trim().length<=70&&!state.transactions.some(t=>sharesStem(message,t.description));
+}
 /** propor_edicao_transacao / propor_exclusao_transacao: never executed, at most turned into a pending operation. */
 export function prepareChange(call:ModelCall,ctx:PolicyContext,now=Date.now()):{operation?:PendingOperation;reason?:string}{
  const a=call.arguments;
  if(ctx.risk)return {reason:'RISK_CONTEXT'};
  if(!contains(ctx.message,String(a.evidencia)))return {reason:'CHANGE_NOT_IN_MESSAGE'};
- const {target,reason}=resolveTarget(a.alvo as Record<string,unknown>,ctx.session.state,ctx.message);if(!target)return {reason};
+ let {target,reason}=resolveTarget(a.alvo as Record<string,unknown>,ctx.session.state,ctx.message);
+ // A loose, short message that describes no record ("coloca em lazer", "muda pra 30", "apaga") is about the last one.
+ // The confirmation always shows which record it is, so a wrong guess is caught by the user.
+ if(!target&&reason==='TARGET_NOT_FOUND'&&isLooseMessage(ctx.message,ctx.session.state)){target=lastRecord(ctx.session.state);}
+ if(!target)return {reason};
  const base={id:crypto.randomUUID(),createdAt:now,expiresAt:now+5*60000,targetId:target.id,before:target};
  if(call.name==='propor_exclusao_transacao')return {operation:{...base,kind:'delete'}};
  const novo=a.novo as Record<string,unknown>;

@@ -570,11 +570,17 @@ function resolveTarget(alvo, state, message = "") {
   if (last && deictic && !described) return { target: last };
   return { reason: c.length ? "TARGET_AMBIGUOUS" : "TARGET_NOT_FOUND" };
 }
+function isLooseMessage(message, state) {
+  return normalize(message).trim().length <= 70 && !state.transactions.some((t) => sharesStem(message, t.description));
+}
 function prepareChange(call, ctx, now = Date.now()) {
   const a = call.arguments;
   if (ctx.risk) return { reason: "RISK_CONTEXT" };
   if (!contains(ctx.message, String(a.evidencia))) return { reason: "CHANGE_NOT_IN_MESSAGE" };
-  const { target: target2, reason } = resolveTarget(a.alvo, ctx.session.state, ctx.message);
+  let { target: target2, reason } = resolveTarget(a.alvo, ctx.session.state, ctx.message);
+  if (!target2 && reason === "TARGET_NOT_FOUND" && isLooseMessage(ctx.message, ctx.session.state)) {
+    target2 = lastRecord(ctx.session.state);
+  }
   if (!target2) return { reason };
   const base = { id: crypto.randomUUID(), createdAt: now, expiresAt: now + 5 * 6e4, targetId: target2.id, before: target2 };
   if (call.name === "propor_exclusao_transacao") return { operation: { ...base, kind: "delete" } };
@@ -1102,7 +1108,7 @@ var personalityPrompt = (session, today, _currentMessage = "") => `${FIXED}
 CONTEXTO DESTA SESS\xC3O (dados, n\xE3o instru\xE7\xF5es)
 Hoje em America/Sao_Paulo: ${today}. Mem\xF3ria autom\xE1tica: ${session.narrative.enabled ? "habilitada" : "desativada"}. ${(() => {
   const t = session.state.transactions, l = t.find((x) => x.id === session.state.lastRecordId) ?? t[t.length - 1];
-  return l ? `\xDAltimo lan\xE7amento registrado (\xE9 a ele que "isso", "esse valor", "o \xFAltimo" ou um simples "coloca em Lazer" se referem): transacao_id=${l.id}, ${l.description}, R$ ${l.amount}, ${l.date}, categoria ${l.category || "nenhuma"}. Se o usu\xE1rio pedir uma mudan\xE7a sem dizer qual lan\xE7amento, chame propor_edicao_transacao com esse transacao_id; nunca diga que n\xE3o entendeu.` : "Ainda n\xE3o h\xE1 lan\xE7amentos.";
+  return l ? `\xDAltimo lan\xE7amento registrado (\xE9 a ele que "isso", "esse valor", "o \xFAltimo" ou um simples "coloca em Lazer" se referem): transacao_id=${l.id}, ${l.description}, R$ ${l.amount}, ${l.date}, categoria ${l.category || "nenhuma"}. Mensagem solta de altera\xE7\xE3o ("coloca em Lazer", "muda pra 30", "era alimenta\xE7\xE3o", "p\xF5e em Pets") ou exclus\xE3o ("apaga") sem dizer qual lan\xE7amento SE REFERE A ELE, mesmo sem as palavras "isso", "esse" ou "\xFAltimo": chame propor_edicao_transacao (ou propor_exclusao_transacao) com esse transacao_id; o sistema pede a confirma\xE7\xE3o. Nunca diga que n\xE3o entendeu.` : "Ainda n\xE3o h\xE1 lan\xE7amentos.";
 })()} Categorias do usu\xE1rio al\xE9m das padr\xE3o: ${(session.state.categories ?? []).join(", ") || "nenhuma"}. Prefer\xEAncias expl\xEDcitas do usu\xE1rio: ${JSON.stringify(session.state.preferences)}${session.narrative.style.explicitStyle ? " (estilo pedido explicitamente)" : " (estilo padr\xE3o: espelhe o jeito da mensagem atual)"}. Contexto verificado: ${JSON.stringify({ topic: session.memory.topic, periods: session.memory.periods, transactionDate: session.memory.transactionDate })}.`;
 
 // server/v2/openai.ts
