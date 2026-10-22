@@ -100,6 +100,12 @@ async function execOwnerCommand(deps: Deps, cmd: OwnerCommand): Promise<string> 
     return messages.ownerBlocked(phone);
   }
   const contact = await deps.store.upsertContact({ phone, name: cmd.name, status: 'authorized' });
+  // Já cria a conta (usuário + workspace) do número: é ela que o login do dashboard por código do WhatsApp usa.
+  try {
+    await deps.ledger?.resolve(phone, contact.name ?? undefined);
+  } catch (e) {
+    deps.log?.({ event: 'whatsapp_provision_failed', message: e instanceof Error ? e.message : 'unknown' });
+  }
   await deps.messenger.sendText(phone, messages.welcome(contact.name));
   return messages.ownerAuthorized(phone, contact.name);
 }

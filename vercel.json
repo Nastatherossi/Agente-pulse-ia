@@ -31,6 +31,9 @@
     },
     "api/whatsapp.js": {
       "maxDuration": 60
+    },
+    "api/auth-sms-hook.js": {
+      "maxDuration": 20
     }
   }
 }
