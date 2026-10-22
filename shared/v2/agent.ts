@@ -151,7 +151,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
   const live=Boolean(op&&Date.now()>=op.createdAt&&Date.now()<op.expiresAt);
   const no=!risk&&isCancellation(message);
   // A reply to a pending new-record confirmation may carry the category: "sim, em alimentação" / "confirmo, mas lança como lazer".
-  const pickedCategory=op&&live&&op.kind==='create'&&!risk&&!no?categoryInReply(message):undefined;
+  const pickedCategory=op&&live&&op.kind==='create'&&!risk&&!no?categoryInReply(message,session.state.categories??[]):undefined;
   const confirmsWithCategory=Boolean(pickedCategory)&&/^\s*(sim|confirmo|confirma|confirmado|pode|ok|isso|claro|beleza|fechado|certo|manda ver)\b/.test(normalize(message));
   if(pickedCategory)for(const item of op!.items!)item.category=pickedCategory;
   const yes=!risk&&(isConfirmation(message)||confirmsWithCategory);

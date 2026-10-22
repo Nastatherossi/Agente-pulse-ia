@@ -18,10 +18,10 @@ export function knownCategory(description:string):string|undefined{
  return undefined;
 }
 /** A category named in a reply to a pending confirmation ("sim, em alimentação", "lança como lazer"). Exactly one category, or nothing. */
-export function categoryInReply(message:string):string|undefined{
+export function categoryInReply(message:string,custom:readonly string[]=[]):string|undefined{
  const t=normalize(message);
  const hits=new Set<string>();
- for(const c of CATEGORIES)if(new RegExp(`\\b${normalize(c).replace(/ /g,'\\s+')}\\b`).test(t))hits.add(c);
+ for(const c of [...CATEGORIES,...custom])if(new RegExp(`\\b${normalize(c).replace(/ /g,'\\s+')}\\b`).test(t))hits.add(c);
  if(/\b(comida|alimento|alimentos)\b/.test(t))hits.add('Alimentação');
  return hits.size===1?[...hits][0]:undefined;
 }
@@ -96,19 +96,38 @@ const expenseCue=(t:string)=>/\b(gastei|paguei|comprei|torrei|custou|deu)\b/.tes
 const incomeCue=(t:string)=>/\b(recebi|ganhei|caiu|entrou|vendi|me pagaram|salario)\b/.test(t);
 
 /** Maps whatever the model sent to the closed taxonomy. Unknown or neutral labels are dropped, never invented. */
-export function normalizeCategory(raw:unknown,message:string,description:string,type?:'receita'|'despesa'):string|undefined{
- if(/nao sei (a |qual )?(e a )?categoria|sem categoria/.test(normalize(message)))return undefined; // explicit user statement wins
- if(typeof raw==='string'&&raw.trim()){const hit=CATEGORIES.find(c=>normalize(c)===normalize(raw.trim()));if(hit)return hit;}
- const guess=knownCategory(description);
+const NEUTRAL_LABELS=new Set(['outros','outras','outro','outra','sem categoria','geral','diversos','nenhuma','null','undefined','n/a']);
+/** Clean display name for a category the user asked for: letters, digits, spaces and a few symbols; first letter upper-case. */
+export function cleanCategoryName(raw:string):string|undefined{
+ const t=raw.replace(/[^\p{L}\p{N} &'\-]/gu,' ').replace(/\s+/g,' ').trim().slice(0,30).trim();
+ if(t.length<2||NEUTRAL_LABELS.has(normalize(t)))return undefined;
+ return t.charAt(0).toUpperCase()+t.slice(1);
+}
+/**
+ * Maps whatever the model sent to a category. Built-in categories and the user's own are accepted by name.
+ * A NEW category is accepted only when the user asked for it in this very message ("cria uma categoria namorado"):
+ * its name must appear in the message together with the word "categoria". Anything else the model invents is dropped.
+ */
+export function normalizeCategory(raw:unknown,message:string,description:string,type?:'receita'|'despesa',custom:readonly string[]=[]):string|undefined{
+ const msg=normalize(message);
+ if(/nao sei (a |qual )?(e a )?categoria|sem categoria/.test(msg))return undefined; // explicit user statement wins
+ if(typeof raw==='string'&&raw.trim()){
+  const want=normalize(raw.trim());
+  const hit=CATEGORIES.find(c=>normalize(c)===want)??custom.find(c=>normalize(c)===want);
+  if(hit)return hit;
+  const name=cleanCategoryName(raw);
+  if(name&&custom.length<40&&/\bcategoria\b/.test(msg)&&msg.includes(normalize(name)))return name;
+ }
  // Keyword guesses are only for the right kind of record: "Renda" is for income, never for an expense.
+ const guess=knownCategory(description);
  if(guess==='Renda'&&type==='despesa')return undefined;
  if(type==='receita'&&guess!=='Renda')return undefined;
  return guess;
 }
 export type NewEntry={type:'receita'|'despesa';amount:number;description:string;date:string;category?:string};
-function entryFrom(a:Record<string,unknown>,message:string):NewEntry{
+function entryFrom(a:Record<string,unknown>,message:string,custom:readonly string[]=[]):NewEntry{
  const e:NewEntry={type:a.type as NewEntry['type'],amount:a.amount as number,description:String(a.description),date:String(a.date)};
- const category=normalizeCategory(a.category,message,e.description,e.type);if(category)e.category=category;
+ const category=normalizeCategory(a.category,message,e.description,e.type,custom);if(category)e.category=category;
  return e;
 }
 function blockForEntry(e:NewEntry,evidence:string,ctx:PolicyContext):string|undefined{
@@ -139,7 +158,7 @@ export function decideCreate(call:ModelCall,ctx:PolicyContext):CreateDecision{
  if(ctx.risk)return {decision:'block',reason:'RISK_CONTEXT'};
  if(a.natureza!=='fato_ocorrido')return {decision:'block',reason:'NOT_A_FACT'};
  const items=call.name==='registrar_varios'?(a.lancamentos as Record<string,unknown>[]):[a];
- const entries=items.map(i=>entryFrom(i,backing(ctx).text));
+ const entries=items.map(i=>entryFrom(i,backing(ctx).text,ctx.session.state.categories??[]));
  for(let i=0;i<entries.length;i++){const reason=blockForEntry(entries[i],String(items[i].evidencia),ctx);if(reason)return {decision:'block',reason};}
  if(entries.length>1)return {decision:'confirm',reason:'MULTIPLE_ENTRIES',entries};
  const reason=confirmForEntry(entries[0],ctx);
