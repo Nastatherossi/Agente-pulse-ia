@@ -100,8 +100,9 @@ var closing = "Confirma? Responda \u201Csim\u201D ou \u201Ccancelar\u201D. Expir
 function describeOperation(op, lead) {
   if (op.kind === "create") {
     const items = op.items.map((i) => `\u2022 ${i.type === "receita" ? "Receita" : "Despesa"} \xB7 ${display(i)}`).join("\n");
+    const hint = op.items.some((i) => i.type === "despesa" && !i.category) ? '\nQual categoria? Pode dizer junto com o sim (ex.: "sim, em Lazer").' : "";
     return `${lead || "Confirma antes de registrar?"}
-${items}
+${items}${hint}
 ${closing}`;
   }
   if (op.kind === "goal" && !op.before) return `Criar meta?
@@ -403,10 +404,24 @@ var FinancialCoreV2 = class {
 var dateOffset = (date, days) => new Date(Date.parse(date + "T12:00:00Z") + days * 864e5).toISOString().slice(0, 10);
 function knownCategory(description) {
   const text = normalize(description);
-  if (/\b(supermercado|mercado|restaurante|almoco|jantar)\b/.test(text)) return "Alimenta\xE7\xE3o";
-  if (/\b(transporte|gasolina|combustivel|uber|onibus)\b/.test(text)) return "Transporte";
-  if (/\b(bar|cinema|lazer)\b/.test(text)) return "Lazer";
+  if (/\b(conta de (agua|luz|gas|internet|telefone|celular)|luz|energia|internet|telefone|condominio|iptu|ipva|boleto)\b/.test(text)) return /\b(condominio|iptu)\b/.test(text) ? "Moradia" : "Contas e servi\xE7os";
+  if (/\b(netflix|spotify|disney|hbo|prime video|youtube premium|chatgpt|assinatura|mensalidade do app|icloud|google one)\b/.test(text)) return "Assinaturas";
+  if (/\b(aluguel|financiamento|reforma|moveis|diarista|faxina)\b/.test(text)) return "Moradia";
+  if (/\b(farmacia|remedio|medico|consulta|dentista|exame|plano de saude|hospital|psicologo|terapia|academia)\b/.test(text)) return "Sa\xFAde";
+  if (/\b(curso|faculdade|escola|livro|matricula|apostila|mensalidade escolar)\b/.test(text)) return "Educa\xE7\xE3o";
+  if (/\b(transporte|gasolina|combustivel|uber|99|taxi|onibus|metro|passagem|estacionamento|pedagio|oficina|etanol|diesel)\b/.test(text)) return "Transporte";
+  if (/\b(supermercado|mercado|restaurante|almoco|jantar|cafe|padaria|lanche|pizza|hamburguer|ifood|acougue|feira|hortifruti|sorvete|marmita|churrasco|refrigerante|suco|agua|cerveja|comida|sobremesa|bolo|pao|doce|salgado)\b/.test(text)) return "Alimenta\xE7\xE3o";
+  if (/\b(bar|cinema|lazer|show|ingresso|balada|viagem|festa|jogo|parque|teatro)\b/.test(text)) return "Lazer";
+  if (/\b(roupa|camisa|calca|tenis|sapato|notebook|fone|eletronico|shopping)\b/.test(text)) return "Compras";
+  if (/\b(salario|freela|freelance|pix recebido|dividendo|rendimento|comissao)\b/.test(text)) return "Renda";
   return void 0;
+}
+function categoryInReply(message) {
+  const t = normalize(message);
+  const hits = /* @__PURE__ */ new Set();
+  for (const c of CATEGORIES) if (new RegExp(`\\b${normalize(c).replace(/ /g, "\\s+")}\\b`).test(t)) hits.add(c);
+  if (/\b(comida|alimento|alimentos)\b/.test(t)) hits.add("Alimenta\xE7\xE3o");
+  return hits.size === 1 ? [...hits][0] : void 0;
 }
 function backing(ctx) {
   if (ctx.affirmation && ctx.previousUserMessage && amountsIn(ctx.message).length === 0) return { text: ctx.previousUserMessage, viaPrevious: true };
@@ -448,17 +463,20 @@ var riskSignal = (message) => /(quero (me )?matar|me matar|suicid|tirar (a )?min
 var tentative = (message) => /\?/.test(message) || /\b(se eu|e se|caso eu|talvez|gastaria|compraria|pagaria|quero comprar|quero gastar|vou comprar|vou gastar|vou pagar|pretendo|pensando em|planejo|preciso pagar|tenho que pagar|amanha|semana que vem|mes que vem|proxima semana|proximo mes|ia gastar|quase gastei|nao gastei|nao paguei|nao comprei|nem gastei|brincadeira|zoeira|nao (registra|registre|registrar|anota|anote|lanca|lance|precisa registrar))\b/.test(normalize(message));
 var expenseCue = (t) => /\b(gastei|paguei|comprei|torrei|custou|deu)\b/.test(t);
 var incomeCue = (t) => /\b(recebi|ganhei|caiu|entrou|vendi|me pagaram|salario)\b/.test(t);
-function normalizeCategory(raw, message, description) {
+function normalizeCategory(raw, message, description, type) {
   if (/nao sei (a |qual )?(e a )?categoria|sem categoria/.test(normalize(message))) return void 0;
   if (typeof raw === "string" && raw.trim()) {
     const hit = CATEGORIES.find((c) => normalize(c) === normalize(raw.trim()));
     if (hit) return hit;
   }
-  return knownCategory(description);
+  const guess = knownCategory(description);
+  if (guess === "Renda" && type === "despesa") return void 0;
+  if (type === "receita" && guess !== "Renda") return void 0;
+  return guess;
 }
 function entryFrom(a, message) {
   const e = { type: a.type, amount: a.amount, description: String(a.description), date: String(a.date) };
-  const category2 = normalizeCategory(a.category, message, e.description);
+  const category2 = normalizeCategory(a.category, message, e.description, e.type);
   if (category2) e.category = category2;
   return e;
 }
@@ -842,7 +860,12 @@ async function runConversation(provider, sessionInput, message, requestId, today
     session.memory.operation = void 0;
     session.memory.pending = void 0;
     const live = Boolean(op && Date.now() >= op.createdAt && Date.now() < op.expiresAt);
-    const yes = !risk && isConfirmation(message), no = !risk && isCancellation(message);
+    const no = !risk && isCancellation(message);
+    const pickedCategory = op && live && op.kind === "create" && !risk && !no ? categoryInReply(message) : void 0;
+    const confirmsWithCategory = Boolean(pickedCategory) && /^\s*(sim|confirmo|confirma|confirmado|pode|ok|isso|claro|beleza|fechado|certo|manda ver)\b/.test(normalize(message));
+    if (pickedCategory) for (const item of op.items) item.category = pickedCategory;
+    const yes = !risk && (isConfirmation(message) || confirmsWithCategory);
+    const onlyCategory = Boolean(pickedCategory) && !yes && message.length <= 80;
     if (command !== void 0) {
       directAnswer = command;
     } else if (isClear(message)) {
@@ -852,6 +875,9 @@ async function runConversation(provider, sessionInput, message, requestId, today
       confirmation = "expired";
       kind = "confirmacao";
       directAnswer = yes ? "A confirma\xE7\xE3o expirou. Solicite a altera\xE7\xE3o novamente." : "Tudo bem. Nada foi alterado.";
+    } else if (op && live && onlyCategory) {
+      op.expiresAt = Date.now() + 5 * 6e4;
+      hold(op, describeOperation(op, `Certo, categoria ${pickedCategory}. Confirma o registro?`), "execucao");
     } else if (op && live && no) {
       confirmation = "cancelled";
       kind = "confirmacao";
@@ -1225,7 +1251,7 @@ var RULES = `REGRAS DE OPERA\xC7\xC3O
 Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real. Nunca mencione ao usu\xE1rio nomes de campos ou de ferramentas (natureza, evidencia, registrar_transacao\u2026); se uma ferramenta der erro, corrija a chamada ou pergunte em linguagem comum.
 Nem toda mensagem \xE9 uma opera\xE7\xE3o. "Sim", "n\xE3o", "pode", "claro" respondem \xE0 sua \xFAltima pergunta da conversa; confirma\xE7\xF5es de opera\xE7\xF5es pendentes j\xE1 foram tratadas pelo c\xF3digo antes de chegar a voc\xEA, ent\xE3o n\xE3o as trate como comandos financeiros.
 Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho copiado da mensagem atual que cont\xE9m o valor, sem acrescentar "R$" ou palavras. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Cart\xE3o, Pix ou dinheiro n\xE3o mudam o registro. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
-amount \xE9 n\xFAmero JSON em reais (R$ 1.900 = 1900; R$ 1.900,50 = 1900.50; "3 mil" = 3000), nunca string ou centavos. date em YYYY-MM-DD: sem data = hoje; "ontem" = ontem; nunca data futura. description curta, sem verbo, valor ou data ("almo\xE7o", "Uber", "celular"). category: escolha uma de ${CATEGORIES.join(", ")}; se nenhuma servir com seguran\xE7a, ou se o usu\xE1rio disser que n\xE3o sabe, OMITA category. N\xE3o invente categoria.
+amount \xE9 n\xFAmero JSON em reais (R$ 1.900 = 1900; R$ 1.900,50 = 1900.50; "3 mil" = 3000), nunca string ou centavos. date em YYYY-MM-DD: sem data = hoje; "ontem" = ontem; nunca data futura. description curta, sem verbo, valor ou data ("almo\xE7o", "Uber", "celular"). category: escolha uma de ${CATEGORIES.join(", ")}; escolha sempre que for razoavelmente \xF3bvia (\xE1gua, caf\xE9, mercado, padaria \u2192 Alimenta\xE7\xE3o; Uber, gasolina \u2192 Transporte; farm\xE1cia, consulta \u2192 Sa\xFAde; Netflix \u2192 Assinaturas). S\xF3 OMITA category quando for realmente amb\xEDguo ou se o usu\xE1rio disser que n\xE3o sabe; nesse caso o sistema pergunta a categoria. N\xE3o invente categoria fora da lista.
 Consultas sem per\xEDodo dito pelo usu\xE1rio: use o m\xEAs atual.
 Corre\xE7\xF5es e exclus\xF5es de lan\xE7amentos existentes: propor_edicao_transacao ou propor_exclusao_transacao; o c\xF3digo mostra antes/depois e pede confirma\xE7\xE3o. Se o alvo for amb\xEDguo, consulte listar_transacoes ou pergunte.
 Metas: definir_objetivo s\xF3 quando o usu\xE1rio pedir uma meta com valor. "Quero guardar para o casamento" \xE9 inten\xE7\xE3o, n\xE3o meta. Substituir meta existente gera confirma\xE7\xE3o.

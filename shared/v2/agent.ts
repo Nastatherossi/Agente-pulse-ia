@@ -1,9 +1,9 @@
 import {observeMemory,observeStyle,conversationTone,retrieveMemories,memoryContext,memoryCommand} from './memory-engine.js';
 import {z} from 'zod';
-import {createSession,sessionSchema,validateModelCall,brl,WRITE_TOOLS,type Session,type Trace,type Step,type Provider,type ModelMessage,type ModelCall,type PendingOperation} from './contracts.js';
+import {createSession,sessionSchema,validateModelCall,brl,normalize,WRITE_TOOLS,type Session,type Trace,type Step,type Provider,type ModelMessage,type ModelCall,type PendingOperation} from './contracts.js';
 import {FinancialCoreV2} from './finance.js';
 import {isConfirmation,isCancellation,isClear,clearContext,describeOperation,type Intent} from './personality.js';
-import {amountsIn,riskSignal,decideCreate,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
+import {categoryInReply,amountsIn,riskSignal,decideCreate,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
 import {groundedText,withoutNumbers,asksToConfirmInText} from './grounding.js';
 /** Tool errors the model can fix by itself: the error (with the schema message) goes back to it for another try. */
 const RETRYABLE=new Set(['VALIDATION_FAILED','UNKNOWN_TOOL']);
@@ -149,10 +149,18 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  try{
   const op=session.memory.operation;session.memory.operation=undefined;session.memory.pending=undefined; // a pending operation lives for exactly one reply
   const live=Boolean(op&&Date.now()>=op.createdAt&&Date.now()<op.expiresAt);
-  const yes=!risk&&isConfirmation(message),no=!risk&&isCancellation(message);
+  const no=!risk&&isCancellation(message);
+  // A reply to a pending new-record confirmation may carry the category: "sim, em alimentação" / "confirmo, mas lança como lazer".
+  const pickedCategory=op&&live&&op.kind==='create'&&!risk&&!no?categoryInReply(message):undefined;
+  const confirmsWithCategory=Boolean(pickedCategory)&&/^\s*(sim|confirmo|confirma|confirmado|pode|ok|isso|claro|beleza|fechado|certo|manda ver)\b/.test(normalize(message));
+  if(pickedCategory)for(const item of op!.items!)item.category=pickedCategory;
+  const yes=!risk&&(isConfirmation(message)||confirmsWithCategory);
+  // Only the category was given ("lança como lazer"): update the pending record and ask again, never write silently.
+  const onlyCategory=Boolean(pickedCategory)&&!yes&&message.length<=80;
   if(command!==undefined){directAnswer=command;}
   else if(isClear(message)){clearContext(session);directAnswer=options.realData?'Conversa limpa. Seus lançamentos continuam salvos.':'Conversa limpa. Os dados fictícios foram preservados.';}
   else if(op&&!live&&(yes||no)){confirmation='expired';kind='confirmacao';directAnswer=yes?'A confirmação expirou. Solicite a alteração novamente.':'Tudo bem. Nada foi alterado.';}
+  else if(op&&live&&onlyCategory){op.expiresAt=Date.now()+5*60000;hold(op,describeOperation(op,`Certo, categoria ${pickedCategory}. Confirma o registro?`),'execucao');}
   else if(op&&live&&no){confirmation='cancelled';kind='confirmacao';directAnswer='Operação cancelada. Os registros foram preservados.';}
   else if(op&&live&&yes){
    kind='confirmacao';if(options.failTools)throw new Error('EXECUTION_FAILED');

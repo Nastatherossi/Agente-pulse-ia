@@ -14,7 +14,8 @@ const closing='Confirma? Responda “sim” ou “cancelar”. Expira em 5 minut
 export function describeOperation(op:PendingOperation,lead?:string){
  if(op.kind==='create'){
   const items=op.items!.map(i=>`• ${i.type==='receita'?'Receita':'Despesa'} · ${display(i)}`).join('\n');
-  return `${lead||'Confirma antes de registrar?'}\n${items}\n${closing}`;
+  const hint=op.items!.some(i=>i.type==='despesa'&&!i.category)?'\nQual categoria? Pode dizer junto com o sim (ex.: "sim, em Lazer").':'';
+  return `${lead||'Confirma antes de registrar?'}\n${items}${hint}\n${closing}`;
  }
  if(op.kind==='goal'&&!op.before)return `Criar meta?\nMeta: ${display(op.after!)}.\n${closing}`;
  return `${op.kind==='delete'?'Excluir':'Alterar'} ${op.kind==='goal'?'meta':'lançamento'}?\nAntes: ${display(op.before!)}${op.after?'\nDepois: '+display(op.after):'\nDepois: lançamento excluído'}.\n${closing}`;

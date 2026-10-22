@@ -1,13 +1,29 @@
 import {CATEGORIES,storedTransaction,goal,normalize,defaultPreferences,type Session,type Period,type ModelCall,type PendingOperation,type State} from './contracts.js';
 export const dateOffset=(date:string,days:number)=>new Date(Date.parse(date+'T12:00:00Z')+days*86400000).toISOString().slice(0,10);
 export const monthPeriod=(today:string,offset=0):Period=>{const d=new Date(today+'T12:00:00Z');const start=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+offset,1)),end=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+offset+1,0));return {start:start.toISOString().slice(0,10),end:end.toISOString().slice(0,10)};};
-/** Deterministic keyword categorization, applied only when the model leaves the category empty. */
+/** Deterministic keyword categorization, applied only when the model leaves the category empty. Obvious cases only; anything ambiguous stays uncategorized and the user is asked. */
 export function knownCategory(description:string):string|undefined{
  const text=normalize(description);
- if(/\b(supermercado|mercado|restaurante|almoco|jantar)\b/.test(text))return 'Alimentação';
- if(/\b(transporte|gasolina|combustivel|uber|onibus)\b/.test(text))return 'Transporte';
- if(/\b(bar|cinema|lazer)\b/.test(text))return 'Lazer';
+ // "conta de água/luz" is a bill, not a drink: check bills before food.
+ if(/\b(conta de (agua|luz|gas|internet|telefone|celular)|luz|energia|internet|telefone|condominio|iptu|ipva|boleto)\b/.test(text))return /\b(condominio|iptu)\b/.test(text)?'Moradia':'Contas e serviços';
+ if(/\b(netflix|spotify|disney|hbo|prime video|youtube premium|chatgpt|assinatura|mensalidade do app|icloud|google one)\b/.test(text))return 'Assinaturas';
+ if(/\b(aluguel|financiamento|reforma|moveis|diarista|faxina)\b/.test(text))return 'Moradia';
+ if(/\b(farmacia|remedio|medico|consulta|dentista|exame|plano de saude|hospital|psicologo|terapia|academia)\b/.test(text))return 'Saúde';
+ if(/\b(curso|faculdade|escola|livro|matricula|apostila|mensalidade escolar)\b/.test(text))return 'Educação';
+ if(/\b(transporte|gasolina|combustivel|uber|99|taxi|onibus|metro|passagem|estacionamento|pedagio|oficina|etanol|diesel)\b/.test(text))return 'Transporte';
+ if(/\b(supermercado|mercado|restaurante|almoco|jantar|cafe|padaria|lanche|pizza|hamburguer|ifood|acougue|feira|hortifruti|sorvete|marmita|churrasco|refrigerante|suco|agua|cerveja|comida|sobremesa|bolo|pao|doce|salgado)\b/.test(text))return 'Alimentação';
+ if(/\b(bar|cinema|lazer|show|ingresso|balada|viagem|festa|jogo|parque|teatro)\b/.test(text))return 'Lazer';
+ if(/\b(roupa|camisa|calca|tenis|sapato|notebook|fone|eletronico|shopping)\b/.test(text))return 'Compras';
+ if(/\b(salario|freela|freelance|pix recebido|dividendo|rendimento|comissao)\b/.test(text))return 'Renda';
  return undefined;
+}
+/** A category named in a reply to a pending confirmation ("sim, em alimentação", "lança como lazer"). Exactly one category, or nothing. */
+export function categoryInReply(message:string):string|undefined{
+ const t=normalize(message);
+ const hits=new Set<string>();
+ for(const c of CATEGORIES)if(new RegExp(`\\b${normalize(c).replace(/ /g,'\\s+')}\\b`).test(t))hits.add(c);
+ if(/\b(comida|alimento|alimentos)\b/.test(t))hits.add('Alimentação');
+ return hits.size===1?[...hits][0]:undefined;
 }
 
 /*
@@ -80,15 +96,19 @@ const expenseCue=(t:string)=>/\b(gastei|paguei|comprei|torrei|custou|deu)\b/.tes
 const incomeCue=(t:string)=>/\b(recebi|ganhei|caiu|entrou|vendi|me pagaram|salario)\b/.test(t);
 
 /** Maps whatever the model sent to the closed taxonomy. Unknown or neutral labels are dropped, never invented. */
-export function normalizeCategory(raw:unknown,message:string,description:string):string|undefined{
+export function normalizeCategory(raw:unknown,message:string,description:string,type?:'receita'|'despesa'):string|undefined{
  if(/nao sei (a |qual )?(e a )?categoria|sem categoria/.test(normalize(message)))return undefined; // explicit user statement wins
  if(typeof raw==='string'&&raw.trim()){const hit=CATEGORIES.find(c=>normalize(c)===normalize(raw.trim()));if(hit)return hit;}
- return knownCategory(description);
+ const guess=knownCategory(description);
+ // Keyword guesses are only for the right kind of record: "Renda" is for income, never for an expense.
+ if(guess==='Renda'&&type==='despesa')return undefined;
+ if(type==='receita'&&guess!=='Renda')return undefined;
+ return guess;
 }
 export type NewEntry={type:'receita'|'despesa';amount:number;description:string;date:string;category?:string};
 function entryFrom(a:Record<string,unknown>,message:string):NewEntry{
  const e:NewEntry={type:a.type as NewEntry['type'],amount:a.amount as number,description:String(a.description),date:String(a.date)};
- const category=normalizeCategory(a.category,message,e.description);if(category)e.category=category;
+ const category=normalizeCategory(a.category,message,e.description,e.type);if(category)e.category=category;
  return e;
 }
 function blockForEntry(e:NewEntry,evidence:string,ctx:PolicyContext):string|undefined{
