@@ -75,7 +75,7 @@ export class SupabaseLedger implements Ledger {
     const { prefer, ...rest } = init;
     const res = await this.fetchImpl(`${this.base}${path}`, {
       ...rest,
-      headers: { apikey: this.serviceKey, Authorization: `Bearer ${this.serviceKey}`, 'Content-Type': 'application/json', ...(prefer ? { Prefer: prefer } : {}) },
+      headers: { apikey: this.serviceKey, ...(this.serviceKey.startsWith('eyJ') ? { Authorization: `Bearer ${this.serviceKey}` } : {}), 'Content-Type': 'application/json', ...(prefer ? { Prefer: prefer } : {}) },
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw Object.assign(new Error(`SUPABASE_${res.status}`), { status: res.status });

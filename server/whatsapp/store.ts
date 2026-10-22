@@ -34,7 +34,8 @@ export class SupabaseStore implements Store {
       ...rest,
       headers: {
         apikey: this.serviceKey,
-        Authorization: `Bearer ${this.serviceKey}`,
+        // Chave nova (sb_secret_…) vai só em apikey; a chave antiga (JWT service_role) também em Authorization.
+        ...(this.serviceKey.startsWith('eyJ') ? { Authorization: `Bearer ${this.serviceKey}` } : {}),
         'Content-Type': 'application/json',
         ...(prefer ? { Prefer: prefer } : {}),
       },

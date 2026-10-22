@@ -1376,7 +1376,8 @@ var SupabaseStore = class {
       ...rest,
       headers: {
         apikey: this.serviceKey,
-        Authorization: `Bearer ${this.serviceKey}`,
+        // Chave nova (sb_secret_…) vai só em apikey; a chave antiga (JWT service_role) também em Authorization.
+        ...this.serviceKey.startsWith("eyJ") ? { Authorization: `Bearer ${this.serviceKey}` } : {},
         "Content-Type": "application/json",
         ...prefer ? { Prefer: prefer } : {}
       },
@@ -1495,7 +1496,7 @@ var SupabaseLedger = class {
     const { prefer, ...rest } = init;
     const res = await this.fetchImpl(`${this.base}${path}`, {
       ...rest,
-      headers: { apikey: this.serviceKey, Authorization: `Bearer ${this.serviceKey}`, "Content-Type": "application/json", ...prefer ? { Prefer: prefer } : {} },
+      headers: { apikey: this.serviceKey, ...this.serviceKey.startsWith("eyJ") ? { Authorization: `Bearer ${this.serviceKey}` } : {}, "Content-Type": "application/json", ...prefer ? { Prefer: prefer } : {} },
       signal: AbortSignal.timeout(1e4)
     });
     if (!res.ok) throw Object.assign(new Error(`SUPABASE_${res.status}`), { status: res.status });
