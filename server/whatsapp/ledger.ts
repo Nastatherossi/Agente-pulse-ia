@@ -129,12 +129,15 @@ export class SupabaseLedger implements Ledger {
   }
 
   async load(ws: Workspace): Promise<Snapshot> {
-    const [summary, rows] = await Promise.all([
+    const [summary, rows, cats] = await Promise.all([
       this.rpc<{ opening_cents: number | string; net_cents: number | string }[]>('whatsapp_ledger_summary', { p_workspace: ws.workspaceId }),
-      this.rest<{ id: string; type: 'income' | 'expense'; amount: number | string; description: string; effective_date: string | null; category: { name: string } | null }[]>(
-        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category:finance_categories(name)&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
+      this.rest<{ id: string; type: 'income' | 'expense'; amount: number | string; description: string; effective_date: string | null; category_id: string | null }[]>(
+        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
       ),
+      this.categoryMap(ws.workspaceId),
     ]);
+    // Sem "embed" do PostgREST: finance_transactions tem duas chaves para finance_categories e a junção automática é ambígua (HTTP 300).
+    const nameOf = new Map([...cats].map(([name, id]) => [id, name]));
     const opening = Number(summary[0]?.opening_cents ?? 0);
     const net = Number(summary[0]?.net_cents ?? 0);
     const visible: Entry[] = [];
@@ -143,7 +146,7 @@ export class SupabaseLedger implements Ledger {
       const amount = Number(r.amount);
       const description = String(r.description ?? '').trim().slice(0, 120);
       if (!agentCanSee({ amount, date: r.effective_date, description })) continue;
-      visible.push({ id: r.id, type: r.type === 'income' ? 'receita' : 'despesa', amount, description, date: r.effective_date as string, ...(r.category?.name ? { category: r.category.name.slice(0, 50) } : {}) });
+      visible.push({ id: r.id, type: r.type === 'income' ? 'receita' : 'despesa', amount, description, date: r.effective_date as string, ...(r.category_id && nameOf.get(r.category_id) ? { category: nameOf.get(r.category_id)!.slice(0, 50) } : {}) });
     }
     visible.reverse(); // do mais antigo para o mais novo
     return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible };
