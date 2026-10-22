@@ -18,6 +18,8 @@ export function describeOperation(op:PendingOperation,lead?:string){
   return `${lead||'Confirma antes de registrar?'}\n${items}${hint}\n${closing}`;
  }
  if(op.kind==='goal'&&!op.before)return `Criar meta?\nMeta: ${display(op.after!)}.\n${closing}`;
+ if(op.kind==='edit'&&op.before&&op.after&&'type' in op.before&&'type' in op.after&&op.after.category&&op.before.category!==op.after.category&&op.before.amount===op.after.amount&&op.before.description===op.after.description&&op.before.date===op.after.date)
+  return `${lead||'Perfeito!'} Quer que eu coloque este lançamento na categoria ${op.after.category}?\n• ${op.before.type==='receita'?'Receita':'Despesa'} · ${op.before.description} · ${brl(Math.round(op.before.amount*100))} · ${op.before.date}\n${closing}`;
  return `${op.kind==='delete'?'Excluir':'Alterar'} ${op.kind==='goal'?'meta':'lançamento'}?\nAntes: ${display(op.before!)}${op.after?'\nDepois: '+display(op.after):'\nDepois: lançamento excluído'}.\n${closing}`;
 }
 export function clearContext(session:Session){session.history=[];session.memory={periods:[]};session.lastRequests=[];}

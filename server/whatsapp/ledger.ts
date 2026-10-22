@@ -12,7 +12,7 @@ import { CATEGORIES } from '../../shared/v2/contracts.js';
 
 export type Workspace = { userId: string; workspaceId: string; accountId: string };
 export type Entry = { id: string; type: 'receita' | 'despesa'; amount: number; description: string; date: string; category?: string };
-export type Snapshot = { initialBalanceCents: number; transactions: Entry[]; /** Categorias do usuário além das padrão do agente. */ customCategories: string[] };
+export type Snapshot = { initialBalanceCents: number; transactions: Entry[]; /** Categorias do usuário além das padrão do agente. */ customCategories: string[]; /** Lançamento criado mais recentemente (a que "isso" se refere). */ lastRecordId?: string };
 export type Changes = { create: Entry[]; update: Entry[]; remove: string[] };
 
 export interface Ledger {
@@ -131,8 +131,8 @@ export class SupabaseLedger implements Ledger {
   async load(ws: Workspace): Promise<Snapshot> {
     const [summary, rows, cats] = await Promise.all([
       this.rpc<{ opening_cents: number | string; net_cents: number | string }[]>('whatsapp_ledger_summary', { p_workspace: ws.workspaceId }),
-      this.rest<{ id: string; type: 'income' | 'expense'; amount: number | string; description: string; effective_date: string | null; category_id: string | null }[]>(
-        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
+      this.rest<{ id: string; type: 'income' | 'expense'; amount: number | string; description: string; effective_date: string | null; category_id: string | null; created_at: string }[]>(
+        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id,created_at&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
       ),
       this.categoryMap(ws.workspaceId),
     ]);
@@ -148,10 +148,11 @@ export class SupabaseLedger implements Ledger {
       if (!agentCanSee({ amount, date: r.effective_date, description })) continue;
       visible.push({ id: r.id, type: r.type === 'income' ? 'receita' : 'despesa', amount, description, date: r.effective_date as string, ...(r.category_id && nameOf.get(r.category_id) ? { category: nameOf.get(r.category_id)!.slice(0, 50) } : {}) });
     }
+    const newest = visible.length ? rows.filter(r => visible.some(v => v.id === r.id)).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0]?.id : undefined;
     visible.reverse(); // do mais antigo para o mais novo
     const builtIn = new Set<string>(CATEGORIES);
     const customCategories = [...cats.keys()].filter(name => !builtIn.has(name) && name.length <= 30).slice(0, 40);
-    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories };
+    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...(newest ? { lastRecordId: newest } : {}) };
   }
 
   async apply(ws: Workspace, changes: Changes, key: string) {
@@ -233,7 +234,7 @@ export class MemoryLedger implements Ledger {
     const w = this.of(ws);
     const visible = w.entries.filter(e => agentCanSee(e)).slice(-MAX_STATE_TRANSACTIONS);
     const net = w.entries.reduce((s, e) => s + signed(e), 0);
-    return { initialBalanceCents: initialBalanceFor(w.opening, net, visible), transactions: visible.map(({ idem: _idem, ...e }: Entry & { idem?: string }) => structuredClone(e)), customCategories: [...(w.categories ?? [])] };
+    return { initialBalanceCents: initialBalanceFor(w.opening, net, visible), transactions: visible.map(({ idem: _idem, ...e }: Entry & { idem?: string }) => structuredClone(e)), customCategories: [...(w.categories ?? [])], ...(visible.length ? { lastRecordId: (w.entries[w.entries.length - 1] as Entry).id } : {}) };
   }
   async apply(ws: Workspace, changes: Changes, key: string) {
     if (this.failNextApply) {

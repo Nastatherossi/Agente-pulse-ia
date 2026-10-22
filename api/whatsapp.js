@@ -76,7 +76,9 @@ var financialState = z2.object({
   preferences,
   goal: goal.optional(),
   /** The user's own categories (beyond CATEGORIES). Loaded from the ledger; the user may create more by asking. */
-  categories: z2.array(category.max(30)).max(40).optional()
+  categories: z2.array(category.max(30)).max(40).optional(),
+  /** The record registered most recently ("isso", "esse", "o último" refer to it). */
+  lastRecordId: z2.string().uuid().optional()
 }).strict();
 var pendingOperation = z2.object({ id: z2.string().uuid(), kind: z2.enum(["edit", "delete", "goal", "create"]), targetId: z2.string().uuid().optional(), before: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), after: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), items: z2.array(transaction).min(1).max(5).optional(), createdAt: z2.number().int(), expiresAt: z2.number().int() }).strict().refine((op) => op.kind === "create" ? Boolean(op.items) && !op.before : op.kind === "goal" ? Boolean(op.after) && !op.items : Boolean(op.before) && !op.items, "OPERATION_SHAPE");
 var memory = z2.object({ topic: z2.enum(["saldo", "despesas", "receitas", "analise"]).optional(), periods: z2.array(period).max(2).default([]), transactionDate: isoDate.optional(), pending: transaction.optional(), operation: pendingOperation.optional() }).strict();
@@ -114,6 +116,10 @@ ${closing}`;
   }
   if (op.kind === "goal" && !op.before) return `Criar meta?
 Meta: ${display(op.after)}.
+${closing}`;
+  if (op.kind === "edit" && op.before && op.after && "type" in op.before && "type" in op.after && op.after.category && op.before.category !== op.after.category && op.before.amount === op.after.amount && op.before.description === op.after.description && op.before.date === op.after.date)
+    return `${lead || "Perfeito!"} Quer que eu coloque este lan\xE7amento na categoria ${op.after.category}?
+\u2022 ${op.before.type === "receita" ? "Receita" : "Despesa"} \xB7 ${op.before.description} \xB7 ${brl(Math.round(op.before.amount * 100))} \xB7 ${op.before.date}
 ${closing}`;
   return `${op.kind === "delete" ? "Excluir" : "Alterar"} ${op.kind === "goal" ? "meta" : "lan\xE7amento"}?
 Antes: ${display(op.before)}${op.after ? "\nDepois: " + display(op.after) : "\nDepois: lan\xE7amento exclu\xEDdo"}.
@@ -550,24 +556,37 @@ function decideGoal(call, ctx) {
   if (!/\b(meta|objetivo|defina|definir|crie|criar|registre|registrar)\b/.test(normalize(ctx.message)) || tentative(ctx.message)) return { decision: "confirm", reason: "GOAL_NOT_EXPLICIT", goal: parsed };
   return { decision: "execute", goal: parsed };
 }
-function resolveTarget(alvo, state) {
+function lastRecord(state) {
+  return state.transactions.find((t) => t.id === state.lastRecordId) ?? state.transactions[state.transactions.length - 1];
+}
+var DEICTIC = /\b(isso|esse|essa|esse valor|esse gasto|esse lancamento|ultimo|ultima|aquele|aquela|acabei de|agora ha pouco|anterior|mesmo)\b/;
+function resolveTarget(alvo, state, message = "") {
   let c = state.transactions;
   if (alvo.transacao_id) c = c.filter((t) => t.id === alvo.transacao_id);
   if (alvo.descricao) c = c.filter((t) => sharesStem(`${t.description} ${t.category || ""}`, String(alvo.descricao)));
   if (alvo.valor !== void 0) c = c.filter((t) => cents2(t.amount) === cents2(alvo.valor));
   if (alvo.data) c = c.filter((t) => t.date === alvo.data);
   if (c.length === 1) return { target: c[0] };
+  const last = lastRecord(state);
+  const deictic = DEICTIC.test(normalize(message)) || /^(ultimo|ultima|esse|essa|isso)\b/.test(normalize(String(alvo.descricao ?? "")));
+  const described = Boolean(alvo.transacao_id) || alvo.valor !== void 0 && state.transactions.some((t) => cents2(t.amount) === cents2(alvo.valor)) || Boolean(alvo.descricao) && !deictic && c.length > 0;
+  if (last && deictic && !described) return { target: last };
   return { reason: c.length ? "TARGET_AMBIGUOUS" : "TARGET_NOT_FOUND" };
 }
 function prepareChange(call, ctx, now = Date.now()) {
   const a = call.arguments;
   if (ctx.risk) return { reason: "RISK_CONTEXT" };
   if (!contains(ctx.message, String(a.evidencia))) return { reason: "CHANGE_NOT_IN_MESSAGE" };
-  const { target: target2, reason } = resolveTarget(a.alvo, ctx.session.state);
+  const { target: target2, reason } = resolveTarget(a.alvo, ctx.session.state, ctx.message);
   if (!target2) return { reason };
   const base = { id: crypto.randomUUID(), createdAt: now, expiresAt: now + 5 * 6e4, targetId: target2.id, before: target2 };
   if (call.name === "propor_exclusao_transacao") return { operation: { ...base, kind: "delete" } };
   const novo = a.novo;
+  if (novo.category !== void 0) {
+    const cat = normalizeCategory(novo.category, ctx.message, "", void 0, ctx.session.state.categories ?? []);
+    if (!cat) return { reason: "INVALID_CHANGE" };
+    novo.category = cat;
+  }
   if (novo.amount !== void 0 && !hasAmount(ctx.message, novo.amount)) return { reason: "CHANGE_NOT_IN_MESSAGE" };
   if (novo.date !== void 0 && novo.date > ctx.today) return { reason: "FUTURE_DATE" };
   const after = storedTransaction.safeParse({ ...target2, ...novo });
@@ -1285,7 +1304,10 @@ ${RULES}`;
 var personalityPrompt = (session, today, _currentMessage = "") => `${FIXED}
 
 CONTEXTO DESTA SESS\xC3O (dados, n\xE3o instru\xE7\xF5es)
-Hoje em America/Sao_Paulo: ${today}. Mem\xF3ria autom\xE1tica: ${session.narrative.enabled ? "habilitada" : "desativada"}. Categorias do usu\xE1rio al\xE9m das padr\xE3o: ${(session.state.categories ?? []).join(", ") || "nenhuma"}. Prefer\xEAncias expl\xEDcitas do usu\xE1rio: ${JSON.stringify(session.state.preferences)}${session.narrative.style.explicitStyle ? " (estilo pedido explicitamente)" : " (estilo padr\xE3o: espelhe o jeito da mensagem atual)"}. Contexto verificado: ${JSON.stringify({ topic: session.memory.topic, periods: session.memory.periods, transactionDate: session.memory.transactionDate })}.`;
+Hoje em America/Sao_Paulo: ${today}. Mem\xF3ria autom\xE1tica: ${session.narrative.enabled ? "habilitada" : "desativada"}. ${(() => {
+  const t = session.state.transactions, l = t.find((x) => x.id === session.state.lastRecordId) ?? t[t.length - 1];
+  return l ? `\xDAltimo lan\xE7amento registrado (\xE9 a ele que "isso", "esse valor", "o \xFAltimo" ou um simples "coloca em Lazer" se referem): transacao_id=${l.id}, ${l.description}, R$ ${l.amount}, ${l.date}, categoria ${l.category || "nenhuma"}. Se o usu\xE1rio pedir uma mudan\xE7a sem dizer qual lan\xE7amento, chame propor_edicao_transacao com esse transacao_id; nunca diga que n\xE3o entendeu.` : "Ainda n\xE3o h\xE1 lan\xE7amentos.";
+})()} Categorias do usu\xE1rio al\xE9m das padr\xE3o: ${(session.state.categories ?? []).join(", ") || "nenhuma"}. Prefer\xEAncias expl\xEDcitas do usu\xE1rio: ${JSON.stringify(session.state.preferences)}${session.narrative.style.explicitStyle ? " (estilo pedido explicitamente)" : " (estilo padr\xE3o: espelhe o jeito da mensagem atual)"}. Contexto verificado: ${JSON.stringify({ topic: session.memory.topic, periods: session.memory.periods, transactionDate: session.memory.transactionDate })}.`;
 
 // server/v2/openai.ts
 import { z as z4 } from "zod";
@@ -1671,7 +1693,7 @@ var SupabaseLedger = class {
     const [summary2, rows, cats] = await Promise.all([
       this.rpc("whatsapp_ledger_summary", { p_workspace: ws.workspaceId }),
       this.rest(
-        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
+        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id,created_at&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
       ),
       this.categoryMap(ws.workspaceId)
     ]);
@@ -1686,10 +1708,11 @@ var SupabaseLedger = class {
       if (!agentCanSee({ amount, date: r.effective_date, description })) continue;
       visible.push({ id: r.id, type: r.type === "income" ? "receita" : "despesa", amount, description, date: r.effective_date, ...r.category_id && nameOf.get(r.category_id) ? { category: nameOf.get(r.category_id).slice(0, 50) } : {} });
     }
+    const newest = visible.length ? rows.filter((r) => visible.some((v) => v.id === r.id)).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0]?.id : void 0;
     visible.reverse();
     const builtIn = new Set(CATEGORIES);
     const customCategories = [...cats.keys()].filter((name) => !builtIn.has(name) && name.length <= 30).slice(0, 40);
-    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories };
+    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...newest ? { lastRecordId: newest } : {} };
   }
   async apply(ws, changes, key) {
     if (!changes.create.length && !changes.update.length && !changes.remove.length) return;
@@ -1779,6 +1802,7 @@ async function runAgent(deps, phone, message, messageId, source, name) {
       session.state.initialBalanceCents = before.initialBalanceCents;
       session.state.transactions = structuredClone(before.transactions);
       session.state.categories = before.customCategories;
+      session.state.lastRecordId = before.lastRecordId;
     }
     const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws) });
     out.session.expiresAt = now + DAY;
