@@ -77,6 +77,7 @@ async function runAgent(deps: Deps, phone: string, message: string, messageId: s
       session.state.transactions = structuredClone(before.transactions);
       session.state.categories = before.customCategories;
       session.state.lastRecordId = before.lastRecordId;
+      session.state.invoices = before.invoices ?? [];
       session.state.cards = before.cards?.map(c => ({ name: c.name, closingDay: c.closingDay, dueDay: c.dueDay })) ?? [];
     }
     session.state.cardPurchases = []; // compras no cartão valem só para a mensagem atual

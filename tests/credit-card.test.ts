@@ -209,3 +209,26 @@ describe('avisos de fatura',()=>{
   expect(ledger.paidInvoices).toHaveLength(0);
  });
 });
+
+describe('consulta de fatura',()=>{
+ const inv=(card:string,competence:string,closingDate:string,dueDate:string,amount:number,status:'planned'|'paid'='planned')=>({card,competence,closingDate,dueDate,amount,status});
+ const withInvoices=()=>{const s=withCards(nubank);s.state.invoices=[inv('Nubank','2026-10-01','2026-10-27','2026-11-10',480),inv('Nubank','2026-11-01','2026-11-27','2026-12-10',480)];return s;};
+ it('"fatura do mês que vem" responde com a fatura que vence no mês que vem',async()=>{
+  const r=await send(model({calls:[tc('consultar_fatura',{month:'2026-11'})]}),withInvoices(),'quanto vai vir na minha fatura mes que vem?');
+  expect(r.trace.message).toContain('Faturas que vencem em novembro de 2026');
+  expect(r.trace.message).toMatch(/Nubank: R\$\s480,00 · fecha 27\/10 · vence 10\/11/);
+ });
+ it('sem mês, lista as faturas em aberto com o total',async()=>{
+  const r=await send(model({calls:[tc('consultar_fatura',{})]}),withInvoices(),'como estão minhas faturas?');
+  expect(r.trace.message).toContain('Suas faturas em aberto');
+  expect(r.trace.message).toMatch(/Total: R\$\s960,00/);
+ });
+ it('mês sem fatura diz isso',async()=>{
+  const r=await send(model({calls:[tc('consultar_fatura',{month:'2027-03'})]}),withInvoices(),'e em março?');
+  expect(r.trace.message).toContain('Não tenho nenhuma fatura vencendo em março de 2027');
+ });
+ it('nome do cartão digitado em minúsculas é guardado com inicial maiúscula',async()=>{
+  const r=await send(model({calls:[tc('cadastrar_cartao',{nome:'nubank',dia_fechamento:27,dia_vencimento:10,evidencia:'fecha dia 27 e vence dia 10'})]}),undefined,'pode chamar de cartão "nubank" ele fecha dia 27 e vence dia 10');
+  expect(r.session.state.cards).toEqual([{name:'Nubank',closingDay:27,dueDay:10}]);
+ });
+});

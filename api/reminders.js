@@ -27,6 +27,7 @@ var money = z2.number().finite().positive().max(1e6).refine((v) => Math.abs(v * 
 var category = z2.string().trim().min(1).max(50);
 var cardRef = z2.object({ name: z2.string().trim().min(1).max(30).optional(), installments: z2.number().int().min(1).max(48).optional() }).strict();
 var cardInfo = z2.object({ name: z2.string().trim().min(1).max(30), closingDay: z2.number().int().min(1).max(31), dueDay: z2.number().int().min(1).max(31) }).strict();
+var invoiceInfo = z2.object({ card: z2.string().max(30), competence: isoDate, closingDate: isoDate, dueDate: isoDate, amount: z2.number().min(0).max(1e8), status: z2.enum(["planned", "overdue", "paid"]) }).strict();
 var transaction = z2.object({ type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: category.optional(), card: cardRef.optional() }).strict();
 var storedTransaction = transaction.extend({ id: z2.string().uuid() });
 var period = z2.object({ start: isoDate, end: isoDate }).strict().refine((p) => p.start <= p.end, "Per\xEDodo invertido");
@@ -43,7 +44,8 @@ var schemas = {
   atualizar_preferencias: preferences,
   simular_compra: z2.object({ amount: money, available: money.optional() }).strict(),
   definir_objetivo: goal,
-  cadastrar_cartao: cardInfo
+  cadastrar_cartao: cardInfo,
+  consultar_fatura: z2.object({ month: z2.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(), card: z2.string().trim().max(30).optional() }).strict()
 };
 var CATEGORIES = ["Alimenta\xE7\xE3o", "Transporte", "Lazer", "Moradia", "Sa\xFAde", "Educa\xE7\xE3o", "Compras", "Contas e servi\xE7os", "Assinaturas", "Renda"];
 var NATURE_ALIASES = { fato: "fato_ocorrido", ocorrido: "fato_ocorrido", fato_ocorrida: "fato_ocorrido", fato_realizado: "fato_ocorrido", realizado: "fato_ocorrido", hipotetico: "hipotese", hipotetica: "hipotese", planejamento: "plano", intencao: "desejo", vontade: "desejo", pergunta: "duvida" };
@@ -59,6 +61,7 @@ var entryFields = { type: z2.enum(["receita", "despesa"]), amount: money, descri
 var target = z2.object({ transacao_id: z2.string().uuid().optional(), descricao: z2.string().trim().min(1).max(120).optional(), valor: money.optional(), data: isoDate.optional() }).strict().refine((t) => Object.keys(t).length > 0, "TARGET_REQUIRED");
 var toolSchemas = {
   consultar_saldo: schemas.consultar_saldo,
+  consultar_fatura: schemas.consultar_fatura,
   listar_transacoes: schemas.listar_transacoes,
   resumir_financas: schemas.resumir_financas,
   comparar_periodos: schemas.comparar_periodos,
@@ -84,6 +87,8 @@ var financialState = z2.object({
   lastRecordId: z2.string().uuid().optional(),
   /** Cartões cadastrados (vêm do banco a cada mensagem). */
   cards: z2.array(cardInfo).max(10).optional(),
+  /** Faturas dos cartões (vencimento a partir de ~45 dias atrás), vindas do banco. */
+  invoices: z2.array(invoiceInfo).max(40).optional(),
   /** Compras no cartão registradas NESTA mensagem; o servidor grava na fatura e esvazia. Não entram no saldo. */
   cardPurchases: z2.array(transaction.extend({ id: z2.string().uuid() })).max(20).optional()
 }).strict();
@@ -213,6 +218,15 @@ var SupabaseLedger = class {
     const rows = await this.rest(`finance_cards?workspace_id=eq.${workspaceId}&status=eq.active&select=id,name,closing_day,due_day&order=created_at.asc&limit=20`);
     return rows.map((r) => ({ id: r.id, name: r.name, closingDay: r.closing_day, dueDay: r.due_day }));
   }
+  async invoiceRows(workspaceId) {
+    const from = new Date(Date.now() - 45 * 864e5).toISOString().slice(0, 10);
+    const [rows, cards] = await Promise.all([
+      this.rest(`finance_invoices?workspace_id=eq.${workspaceId}&due_date=gte.${from}&select=card_id,competence,closing_date,due_date,amount,status&order=due_date.asc&limit=40`),
+      this.cardRows(workspaceId)
+    ]);
+    const names = new Map(cards.map((c) => [c.id, c.name]));
+    return rows.map((r) => ({ card: (names.get(r.card_id) ?? "cart\xE3o").slice(0, 30), competence: r.competence, closingDate: r.closing_date, dueDate: r.due_date, amount: Number(r.amount), status: r.status }));
+  }
   async invoiceNotices(ws, today) {
     const back = (n) => new Date(Date.parse(`${today}T12:00:00Z`) - n * 864e5).toISOString().slice(0, 10);
     const cols = "id,card_id,amount,status,closing_date,due_date";
@@ -273,13 +287,14 @@ var SupabaseLedger = class {
     return result;
   }
   async load(ws) {
-    const [summary, rows, cats, cardRows] = await Promise.all([
+    const [summary, rows, cats, cardRows, invoiceRows] = await Promise.all([
       this.rpc("whatsapp_ledger_summary", { p_workspace: ws.workspaceId }),
       this.rest(
         `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id,created_at&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
       ),
       this.categoryMap(ws.workspaceId),
-      this.cardRows(ws.workspaceId)
+      this.cardRows(ws.workspaceId),
+      this.invoiceRows(ws.workspaceId)
     ]);
     const nameOf = new Map([...cats].map(([name, id]) => [id, name]));
     const opening = Number(summary[0]?.opening_cents ?? 0);
@@ -296,7 +311,7 @@ var SupabaseLedger = class {
     visible.reverse();
     const builtIn = new Set(CATEGORIES);
     const customCategories = [...cats.keys()].filter((name) => !builtIn.has(name) && name.length <= 30).slice(0, 40);
-    return { cards: cardRows, initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...newest ? { lastRecordId: newest } : {} };
+    return { invoices: invoiceRows, cards: cardRows, initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...newest ? { lastRecordId: newest } : {} };
   }
   async apply(ws, changes, key) {
     const hasCards = Boolean(changes.cardUpserts?.length || changes.cardPurchases?.length);

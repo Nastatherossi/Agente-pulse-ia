@@ -24,6 +24,7 @@ var money = z2.number().finite().positive().max(1e6).refine((v) => Math.abs(v * 
 var category = z2.string().trim().min(1).max(50);
 var cardRef = z2.object({ name: z2.string().trim().min(1).max(30).optional(), installments: z2.number().int().min(1).max(48).optional() }).strict();
 var cardInfo = z2.object({ name: z2.string().trim().min(1).max(30), closingDay: z2.number().int().min(1).max(31), dueDay: z2.number().int().min(1).max(31) }).strict();
+var invoiceInfo = z2.object({ card: z2.string().max(30), competence: isoDate, closingDate: isoDate, dueDate: isoDate, amount: z2.number().min(0).max(1e8), status: z2.enum(["planned", "overdue", "paid"]) }).strict();
 var transaction = z2.object({ type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: category.optional(), card: cardRef.optional() }).strict();
 var storedTransaction = transaction.extend({ id: z2.string().uuid() });
 var period = z2.object({ start: isoDate, end: isoDate }).strict().refine((p) => p.start <= p.end, "Per\xEDodo invertido");
@@ -41,7 +42,8 @@ var schemas = {
   atualizar_preferencias: preferences,
   simular_compra: z2.object({ amount: money, available: money.optional() }).strict(),
   definir_objetivo: goal,
-  cadastrar_cartao: cardInfo
+  cadastrar_cartao: cardInfo,
+  consultar_fatura: z2.object({ month: z2.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(), card: z2.string().trim().max(30).optional() }).strict()
 };
 var CATEGORIES = ["Alimenta\xE7\xE3o", "Transporte", "Lazer", "Moradia", "Sa\xFAde", "Educa\xE7\xE3o", "Compras", "Contas e servi\xE7os", "Assinaturas", "Renda"];
 var NATURE_ALIASES = { fato: "fato_ocorrido", ocorrido: "fato_ocorrido", fato_ocorrida: "fato_ocorrido", fato_realizado: "fato_ocorrido", realizado: "fato_ocorrido", hipotetico: "hipotese", hipotetica: "hipotese", planejamento: "plano", intencao: "desejo", vontade: "desejo", pergunta: "duvida" };
@@ -57,6 +59,7 @@ var entryFields = { type: z2.enum(["receita", "despesa"]), amount: money, descri
 var target = z2.object({ transacao_id: z2.string().uuid().optional(), descricao: z2.string().trim().min(1).max(120).optional(), valor: money.optional(), data: isoDate.optional() }).strict().refine((t) => Object.keys(t).length > 0, "TARGET_REQUIRED");
 var toolSchemas = {
   consultar_saldo: schemas.consultar_saldo,
+  consultar_fatura: schemas.consultar_fatura,
   listar_transacoes: schemas.listar_transacoes,
   resumir_financas: schemas.resumir_financas,
   comparar_periodos: schemas.comparar_periodos,
@@ -83,6 +86,8 @@ var financialState = z2.object({
   lastRecordId: z2.string().uuid().optional(),
   /** Cartões cadastrados (vêm do banco a cada mensagem). */
   cards: z2.array(cardInfo).max(10).optional(),
+  /** Faturas dos cartões (vencimento a partir de ~45 dias atrás), vindas do banco. */
+  invoices: z2.array(invoiceInfo).max(40).optional(),
   /** Compras no cartão registradas NESTA mensagem; o servidor grava na fatura e esvazia. Não entram no saldo. */
   cardPurchases: z2.array(transaction.extend({ id: z2.string().uuid() })).max(20).optional()
 }).strict();
@@ -445,6 +450,12 @@ var FinancialCoreV2 = class {
         result = { transaction: transaction2, balanceCents: balanceCents(this.state) };
         break;
       }
+      case "consultar_fatura": {
+        const key = a.card ? cardKey(String(a.card)) : "";
+        const list = (this.state.invoices ?? []).filter((i) => (!a.month || i.dueDate.startsWith(String(a.month))) && (!key || cardKey(i.card) === key) && (a.month || i.status !== "paid")).sort((x, y) => x.dueDate.localeCompare(y.dueDate));
+        result = { invoices: list, month: a.month, card: a.card, totalCents: list.reduce((n, i) => n + cents(i.amount), 0) };
+        break;
+      }
       case "cadastrar_cartao": {
         const card = a;
         const key = cardKey(card.name);
@@ -661,7 +672,8 @@ function decideCard(call, ctx) {
   const closingDay = a.dia_fechamento, dueDay = a.dia_vencimento;
   const digits = (n) => new RegExp(`(^|[^0-9])0?${n}([^0-9]|$)`).test(ctx.message);
   if (!digits(closingDay) || !digits(dueDay)) return { decision: "block", reason: "CARD_DAYS_NOT_IN_MESSAGE" };
-  const name = String(a.nome).replace(/[^\p{L}\p{N} &'\-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 30);
+  const cleaned = String(a.nome).replace(/[^\p{L}\p{N} &'\-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 30);
+  const name = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
   const recent = [ctx.message, ...ctx.session.history.slice(-4).map((h) => h.content)].map(normalize).join(" ");
   const key = normalize(name).replace(/\bcartao\b/g, " ").replace(/\s+/g, " ").trim();
   if (!key || !recent.includes(key)) return { decision: "block", reason: "CARD_NAME_NOT_IN_MESSAGE" };
@@ -848,6 +860,14 @@ function readable(step, detail, live = false, name, cards = []) {
       return `${hi} Anotei ${r.created.map(noted).join("; ")}.${asks(r.created)}`;
     case "registrar_transacao":
       return `${hi} Anotei ${noted(r.transaction)}.${asks([r.transaction])}`;
+    case "consultar_fatura": {
+      const monthName = r.month ? new Intl.DateTimeFormat("pt-BR", { month: "long", year: "numeric", timeZone: "UTC" }).format(/* @__PURE__ */ new Date(`${r.month}-15T12:00:00Z`)) : "";
+      if (!r.invoices.length) return r.month ? `N\xE3o tenho nenhuma fatura vencendo em ${monthName}${r.card ? ` no ${r.card}` : ""}.` : "Voc\xEA n\xE3o tem fatura em aberto.";
+      const lines = r.invoices.map((i) => `\u2022 ${i.card}: ${brl(Math.round(i.amount * 100))} \xB7 fecha ${dm(i.closingDate)} \xB7 vence ${dm(i.dueDate)}${i.status === "paid" ? " (paga)" : ""}`).join("\n");
+      return `${r.month ? `Faturas que vencem em ${monthName}` : "Suas faturas em aberto"}:
+${lines}${r.invoices.length > 1 ? `
+Total: ${brl(r.totalCents)}` : ""}`;
+    }
     case "cadastrar_cartao":
       return `${hi} Cart\xE3o ${r.card.name} cadastrado: fecha dia ${r.card.closingDay} e vence dia ${r.card.dueDay}.`;
     case "listar_transacoes":
@@ -870,7 +890,7 @@ function readable(step, detail, live = false, name, cards = []) {
   }
 }
 var DATA_WRITES = /* @__PURE__ */ new Set(["cadastrar_cartao", "registrar_transacao", "registrar_confirmado", "editar_transacao", "excluir_transacao", "alterar_objetivo", "definir_objetivo", "atualizar_preferencias"]);
-var LOOKUPS = /* @__PURE__ */ new Set(["consultar_saldo", "listar_transacoes", "consultar_gastos_categoria"]);
+var LOOKUPS = /* @__PURE__ */ new Set(["consultar_fatura", "consultar_saldo", "listar_transacoes", "consultar_gastos_categoria"]);
 function renderAnswer(steps, draft, session, context = {}) {
   const success = steps.filter((s) => s.status === "success");
   const facts = success.map((s) => readable(s, session.state.preferences.detail, context.live, context.name, session.state.cards)).join("\n\n");
@@ -1239,7 +1259,7 @@ var RULES = `REGRAS DE OPERA\xC7\xC3O
 Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real. Nunca mencione ao usu\xE1rio nomes de campos ou de ferramentas (natureza, evidencia, registrar_transacao\u2026); se uma ferramenta der erro, corrija a chamada ou pergunte em linguagem comum.
 Nem toda mensagem \xE9 uma opera\xE7\xE3o. "Sim", "n\xE3o", "pode", "claro" respondem \xE0 sua \xFAltima pergunta da conversa; confirma\xE7\xF5es de opera\xE7\xF5es pendentes j\xE1 foram tratadas pelo c\xF3digo antes de chegar a voc\xEA, ent\xE3o n\xE3o as trate como comandos financeiros.
 Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho copiado da mensagem atual que cont\xE9m o valor, sem acrescentar "R$" ou palavras. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Pix, d\xE9bito ou dinheiro n\xE3o mudam o registro.
-Cart\xE3o de cr\xE9dito: se o usu\xE1rio diz que foi no cr\xE9dito ("passei no cart\xE3o", "no cr\xE9dito", "parcelei", "no Nubank"), preencha cartao em registrar_transacao com nome (s\xF3 se ele disse) e parcelas (s\xF3 se ele disse; amount \xE9 o TOTAL da compra: "3x de 100" = amount 300, parcelas 3). Compra no cr\xE9dito entra na fatura, n\xE3o no saldo. Se o cart\xE3o ainda n\xE3o est\xE1 cadastrado, o sistema j\xE1 anota a compra e pede o nome, o dia de fechamento e o de vencimento de forma leve; quando o usu\xE1rio responder com esses dados, chame cadastrar_cartao. N\xE3o fa\xE7a interrogat\xF3rio e n\xE3o pe\xE7a os dados antes de registrar. D\xE9bito n\xE3o \xE9 cr\xE9dito: n\xE3o preencha cartao. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
+Cart\xE3o de cr\xE9dito: se o usu\xE1rio diz que foi no cr\xE9dito ("passei no cart\xE3o", "no cr\xE9dito", "parcelei", "no Nubank"), preencha cartao em registrar_transacao com nome (s\xF3 se ele disse) e parcelas (s\xF3 se ele disse; amount \xE9 o TOTAL da compra: "3x de 100" = amount 300, parcelas 3). Compra no cr\xE9dito entra na fatura, n\xE3o no saldo. Se o cart\xE3o ainda n\xE3o est\xE1 cadastrado, o sistema j\xE1 anota a compra e pede o nome, o dia de fechamento e o de vencimento de forma leve; quando o usu\xE1rio responder com esses dados, chame cadastrar_cartao. N\xE3o fa\xE7a interrogat\xF3rio e n\xE3o pe\xE7a os dados antes de registrar. D\xE9bito n\xE3o \xE9 cr\xE9dito: n\xE3o preencha cartao. Perguntas sobre fatura ("quanto vai vir na fatura do m\xEAs que vem?", "quando vence meu cart\xE3o?") usam consultar_fatura, nunca listar_transacoes; "fatura do m\xEAs que vem" = a que vence no pr\xF3ximo m\xEAs do calend\xE1rio (month em YYYY-MM). Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
 amount \xE9 n\xFAmero JSON em reais (R$ 1.900 = 1900; R$ 1.900,50 = 1900.50; "3 mil" = 3000), nunca string ou centavos. date em YYYY-MM-DD: sem data = hoje; "ontem" = ontem; nunca data futura. description curta, sem verbo, valor ou data ("almo\xE7o", "Uber", "celular"). category: escolha uma de ${CATEGORIES.join(", ")}; escolha sempre que for razoavelmente \xF3bvia (\xE1gua, caf\xE9, mercado, padaria \u2192 Alimenta\xE7\xE3o; Uber, gasolina \u2192 Transporte; farm\xE1cia, consulta \u2192 Sa\xFAde; Netflix \u2192 Assinaturas). S\xF3 OMITA category quando for realmente amb\xEDguo ou se o usu\xE1rio disser que n\xE3o sabe; nesse caso o sistema pergunta a categoria. O usu\xE1rio PODE criar categorias novas quando quiser: se ele pedir ("cria a categoria namorado e registra isso l\xE1", "p\xF5e em Pets"), use exatamente o nome que ele disse em category e N\xC3O diga que n\xE3o \xE9 poss\xEDvel. Nunca crie categoria por conta pr\xF3pria. N\xE3o invente categoria que o usu\xE1rio n\xE3o pediu.
 Consultas sem per\xEDodo dito pelo usu\xE1rio: use o m\xEAs atual.
 Corre\xE7\xF5es e exclus\xF5es de lan\xE7amentos existentes: propor_edicao_transacao ou propor_exclusao_transacao; o c\xF3digo mostra antes/depois e pede confirma\xE7\xE3o. Se o alvo for amb\xEDguo, consulte listar_transacoes ou pergunte.
@@ -1277,6 +1297,7 @@ var descriptions = {
   consultar_gastos_categoria: "Total e registros de despesas de uma categoria no per\xEDodo.",
   projetar_despesas: "Estimativa calculada pelo core: m\xE9dia di\xE1ria at\xE9 asOf projetada at\xE9 o fim do per\xEDodo.",
   atualizar_preferencias: "Altera apenas prefer\xEAncias de comunica\xE7\xE3o pedidas explicitamente; envie s\xF3 os campos alterados (ou redefinir=true) e a evidencia literal. N\xE3o inferir personalidade.",
+  consultar_fatura: "Faturas dos cart\xF5es de cr\xE9dito do usu\xE1rio: valor, fechamento e vencimento. month = m\xEAs de VENCIMENTO da fatura (YYYY-MM); sem month, lista as faturas em aberto. card = nome do cart\xE3o, se ele disse.",
   cadastrar_cartao: "Cadastra (ou atualiza) um cart\xE3o de cr\xE9dito quando o usu\xE1rio diz o nome, o dia que a fatura fecha e o dia que vence. S\xF3 com os tr\xEAs dados ditos por ele; evidencia = trecho literal da mensagem.",
   definir_objetivo: "Cria uma meta financeira pedida explicitamente, com valor dito pelo usu\xE1rio. Substituir meta existente gera pedido de confirma\xE7\xE3o."
 };

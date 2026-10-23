@@ -209,7 +209,8 @@ export function decideCard(call:ModelCall,ctx:PolicyContext):WriteDecision&{card
  const closingDay=a.dia_fechamento as number,dueDay=a.dia_vencimento as number;
  const digits=(n:number)=>new RegExp(`(^|[^0-9])0?${n}([^0-9]|$)`).test(ctx.message);
  if(!digits(closingDay)||!digits(dueDay))return {decision:'block',reason:'CARD_DAYS_NOT_IN_MESSAGE'};
- const name=String(a.nome).replace(/[^\p{L}\p{N} &'\-]/gu,' ').replace(/\s+/g,' ').trim().slice(0,30);
+ const cleaned=String(a.nome).replace(/[^\p{L}\p{N} &'\-]/gu,' ').replace(/\s+/g,' ').trim().slice(0,30);
+ const name=cleaned.charAt(0).toUpperCase()+cleaned.slice(1);
  const recent=[ctx.message,...ctx.session.history.slice(-4).map(h=>h.content)].map(normalize).join(' ');
  const key=normalize(name).replace(/\bcartao\b/g,' ').replace(/\s+/g,' ').trim();
  if(!key||!recent.includes(key))return {decision:'block',reason:'CARD_NAME_NOT_IN_MESSAGE'};

@@ -6,6 +6,7 @@ export const category=z.string().trim().min(1).max(50);
 /** Compra no cartão de crédito: não mexe no saldo, entra na fatura. */
 export const cardRef=z.object({name:z.string().trim().min(1).max(30).optional(),installments:z.number().int().min(1).max(48).optional()}).strict();
 export const cardInfo=z.object({name:z.string().trim().min(1).max(30),closingDay:z.number().int().min(1).max(31),dueDay:z.number().int().min(1).max(31)}).strict();
+export const invoiceInfo=z.object({card:z.string().max(30),competence:isoDate,closingDate:isoDate,dueDate:isoDate,amount:z.number().min(0).max(100000000),status:z.enum(['planned','overdue','paid'])}).strict();
 export const transaction=z.object({type:z.enum(['receita','despesa']),amount:money,description:z.string().trim().min(1).max(120),date:isoDate,category:category.optional(),card:cardRef.optional()}).strict();
 export const storedTransaction=transaction.extend({id:z.string().uuid()});
 export const period=z.object({start:isoDate,end:isoDate}).strict().refine(p=>p.start<=p.end,'Período invertido');
@@ -23,7 +24,8 @@ export const schemas={
  atualizar_preferencias:preferences,
  simular_compra:z.object({amount:money,available:money.optional()}).strict(),
  definir_objetivo:goal,
- cadastrar_cartao:cardInfo
+ cadastrar_cartao:cardInfo,
+ consultar_fatura:z.object({month:z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(),card:z.string().trim().max(30).optional()}).strict()
 };
 export type ToolName=keyof typeof schemas;
 /** Closed category taxonomy the model may choose from. Anything else is dropped, never invented. */
@@ -44,6 +46,7 @@ const target=z.object({transacao_id:z.string().uuid().optional(),descricao:z.str
  */
 export const toolSchemas={
  consultar_saldo:schemas.consultar_saldo,
+ consultar_fatura:schemas.consultar_fatura,
  listar_transacoes:schemas.listar_transacoes,
  resumir_financas:schemas.resumir_financas,
  comparar_periodos:schemas.comparar_periodos,
@@ -63,7 +66,7 @@ export const WRITE_TOOLS:ReadonlySet<string>=new Set(['registrar_transacao','reg
 export type Call={id:string;name:string;arguments:unknown};
 export type ValidCall={id:string;name:ToolName;arguments:Record<string,unknown>};
 export type ModelCall={id:string;name:ModelToolName;arguments:Record<string,unknown>};
-export const financialState=z.object({initialBalanceCents:z.number().int().min(0).max(100000000),transactions:z.array(transaction.extend({id:z.string().uuid()})).max(300),preferences,goal:goal.optional(),/** The user's own categories (beyond CATEGORIES). Loaded from the ledger; the user may create more by asking. */categories:z.array(category.max(30)).max(40).optional(),/** The record registered most recently ("isso", "esse", "o último" refer to it). */lastRecordId:z.string().uuid().optional(),/** Cartões cadastrados (vêm do banco a cada mensagem). */cards:z.array(cardInfo).max(10).optional(),/** Compras no cartão registradas NESTA mensagem; o servidor grava na fatura e esvazia. Não entram no saldo. */cardPurchases:z.array(transaction.extend({id:z.string().uuid()})).max(20).optional()}).strict();
+export const financialState=z.object({initialBalanceCents:z.number().int().min(0).max(100000000),transactions:z.array(transaction.extend({id:z.string().uuid()})).max(300),preferences,goal:goal.optional(),/** The user's own categories (beyond CATEGORIES). Loaded from the ledger; the user may create more by asking. */categories:z.array(category.max(30)).max(40).optional(),/** The record registered most recently ("isso", "esse", "o último" refer to it). */lastRecordId:z.string().uuid().optional(),/** Cartões cadastrados (vêm do banco a cada mensagem). */cards:z.array(cardInfo).max(10).optional(),/** Faturas dos cartões (vencimento a partir de ~45 dias atrás), vindas do banco. */invoices:z.array(invoiceInfo).max(40).optional(),/** Compras no cartão registradas NESTA mensagem; o servidor grava na fatura e esvazia. Não entram no saldo. */cardPurchases:z.array(transaction.extend({id:z.string().uuid()})).max(20).optional()}).strict();
 export type State=z.infer<typeof financialState>;
 export type Period=z.infer<typeof period>;
 export type Step={order:number;id:string;name:string;arguments?:unknown;status:'success'|'error'|'blocked';result?:unknown;error?:{code:string;message:string;reason?:string;issues?:{field:string;code:string}[]};durationMs:number};

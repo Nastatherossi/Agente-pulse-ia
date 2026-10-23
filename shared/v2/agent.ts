@@ -3,7 +3,7 @@ import {z} from 'zod';
 import {createSession,sessionSchema,validateModelCall,brl,normalize,WRITE_TOOLS,type Session,type Trace,type Step,type Provider,type ModelMessage,type ModelCall,type PendingOperation} from './contracts.js';
 import {FinancialCoreV2} from './finance.js';
 import {isConfirmation,isRecordRequest,isCancellation,isClear,clearContext,describeOperation,type Intent} from './personality.js';
-import {findCard,type Card} from './cards.js';
+import {findCard,dm,type Card} from './cards.js';
 import {cardPhrase} from './personality.js';
 import {cleanCategoryName,categoryInReply,amountsIn,riskSignal,decideCreate,decideCard,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
 import {groundedText,withoutNumbers,asksToConfirmInText} from './grounding.js';
@@ -29,6 +29,11 @@ function readable(step:Step,detail:Session['state']['preferences']['detail'],liv
   case 'alterar_objetivo':return `${hi} Meta atualizada.`;
   case 'registrar_confirmado':return `${hi} Anotei ${r.created.map(noted).join('; ')}.${asks(r.created)}`;
   case 'registrar_transacao':return `${hi} Anotei ${noted(r.transaction)}.${asks([r.transaction])}`;
+  case 'consultar_fatura':{
+   const monthName=r.month?new Intl.DateTimeFormat('pt-BR',{month:'long',year:'numeric',timeZone:'UTC'}).format(new Date(`${r.month}-15T12:00:00Z`)):'';
+   if(!r.invoices.length)return r.month?`Não tenho nenhuma fatura vencendo em ${monthName}${r.card?` no ${r.card}`:''}.`:'Você não tem fatura em aberto.';
+   const lines=r.invoices.map((i:any)=>`• ${i.card}: ${brl(Math.round(i.amount*100))} · fecha ${dm(i.closingDate)} · vence ${dm(i.dueDate)}${i.status==='paid'?' (paga)':''}`).join('\n');
+   return `${r.month?`Faturas que vencem em ${monthName}`:'Suas faturas em aberto'}:\n${lines}${r.invoices.length>1?`\nTotal: ${brl(r.totalCents)}`:''}`;}
   case 'cadastrar_cartao':return `${hi} Cartão ${r.card.name} cadastrado: fecha dia ${r.card.closingDay} e vence dia ${r.card.dueDay}.`;
   case 'listar_transacoes':return r.totalCount?`${r.totalCount} transações no filtro.\n`+r.transactions.map((t:any)=>`${t.date} · ${t.description} · ${t.type==='receita'?'+':'−'} ${brl(Math.round(t.amount*100))} · ${t.category||'sem categoria'}`).join('\n'):'Nenhuma transação neste filtro.';
   case 'resumir_financas':return `${r.period.start} a ${r.period.end}: receitas ${brl(r.incomeCents)}, despesas ${brl(r.expenseCents)} e resultado ${brl(r.netCents)} (${r.count} registros).`+(r.categories.length?'\n'+r.categories.filter((c:any)=>c.expenseCents).map((c:any)=>`${c.category}: ${brl(c.expenseCents)} (${c.expenseSharePercent}%).`).join('\n'):'')+(r.limitedData?'\nOs dados registrados ainda são limitados; isso não descreve toda a sua vida financeira.':'');
@@ -43,7 +48,7 @@ function readable(step:Step,detail:Session['state']['preferences']['detail'],liv
 /** Tools whose success means data changed this turn: the answer is the code-written receipt, nothing else. */
 const DATA_WRITES=new Set(['cadastrar_cartao','registrar_transacao','registrar_confirmado','editar_transacao','excluir_transacao','alterar_objetivo','definir_objetivo','atualizar_preferencias']);
 /** Plain lookups: the code-written facts answer the question; model commentary is not appended (discreet by default). */
-const LOOKUPS=new Set(['consultar_saldo','listar_transacoes','consultar_gastos_categoria']);
+const LOOKUPS=new Set(['consultar_fatura','consultar_saldo','listar_transacoes','consultar_gastos_categoria']);
 export type AnswerContext={message?:string;history?:string[];live?:boolean;name?:string};
 /**
  * Financial values and receipts are rendered by code from validated tool results, never copied from the model.
