@@ -97,3 +97,27 @@ describe('lembrete da parcela',()=>{
   expect(ledger.debtPayments).toHaveLength(0);
  });
 });
+
+describe('erro de digitação não faz a conversa voltar',()=>{
+ it('"poed" confirma como "pode"',async()=>{
+  const a=await send(model({calls:[tc('registrar_financiamento',fin({primeiro_vencimento:'2026-11-10'}))]}),start(),`${MSG}, primeira parcela dia 10/11`);
+  expect(a.trace.confirmation).toBe('pending');
+  const b=await send(model({content:'x'}),a.session,'poed');
+  expect(b.trace.confirmation).toBe('confirmed');
+  expect(b.session.state.newDebts).toHaveLength(1);
+ });
+ it('variações comuns de sim/pode confirmam, "sem" e "podemos" não',async()=>{
+  const {isConfirmation}=await import('../shared/v2/personality');
+  for(const m of ['poed','podee','simm','ssim','pode sim','cnfirmo','claroo','fechdo'])expect(isConfirmation(m)).toBe(true);
+  for(const m of ['sem','podemos ver','não','quero outro valor'])expect(isConfirmation(m)).toBe(false);
+ });
+ it('se o modelo repropõe depois de uma mensagem solta, o vencimento dito antes vale',async()=>{
+  const s=start();
+  const a=await send(model({calls:[tc('registrar_financiamento',fin())]}),s,MSG);
+  expect(a.trace.message).toMatch(/quando vence a primeira/i);
+  const b=await send(model({calls:[tc('registrar_financiamento',fin({primeiro_vencimento:'2026-11-10'}))]}),a.session,'vence mes que vem dia 10, é esse valor mesmo');
+  expect(b.trace.confirmation).toBe('pending');
+  const c=await send(model({calls:[tc('registrar_financiamento',fin({primeiro_vencimento:'2026-11-10'}))]}),b.session,'hmm');
+  expect(c.trace.message).not.toMatch(/quando vence a primeira/i);
+ });
+});

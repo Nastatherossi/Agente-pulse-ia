@@ -239,7 +239,9 @@ export function decideDebt(call:ModelCall,ctx:PolicyContext):{decision:'confirm'
  const final=installment??calc;
  const first=a.primeiro_vencimento as string|undefined;
  const day=first?Number(first.slice(8,10)):0;
- if(!first||first<ctx.today||first>dateOffset(ctx.today,400)||!(new RegExp(`(^|[^0-9])0?${day}([^0-9]|$)`).test(ctx.message)||ctx.message.includes(first)))return {decision:'ask',reason:'DEBT_FIRST_DUE_MISSING',installment:final};
+ const said=(m:string)=>new RegExp(`(^|[^0-9])0?${day}([^0-9]|$)`).test(m)||m.includes(first||'-');
+ const earlier=ctx.session.history.filter(h=>h.role==='user').slice(-2).map(h=>h.content).some(m=>new RegExp(`dia\\s*0?${day}\\b|(^|[^0-9])0?${day}/\\d{1,2}`).test(normalize(m))||m.includes(first||'-'));
+ if(!first||first<ctx.today||first>dateOffset(ctx.today,400)||!(said(ctx.message)||earlier))return {decision:'ask',reason:'DEBT_FIRST_DUE_MISSING',installment:final};
  const description=String(a.descricao).trim();
  return {decision:'confirm',installment:final,debt:{description,principal,rate,ratePeriod:period,termMonths:term,installment:final,firstDue:first,receivedInAccount:a.entrou_na_conta===true}};
 }
