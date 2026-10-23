@@ -133,6 +133,20 @@ export class SupabaseStore implements Store {
     return this.rest<TurnDetail[]>(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
   }
 
+  /** Painel de gestão: configuração salva (admin_settings). null = nada salvo. */
+  async getSetting(key: string): Promise<unknown> {
+    const rows = await this.rest<{ value: unknown }[]>(`admin_settings?key=eq.${encodeURIComponent(key)}&select=value&limit=1`);
+    return rows[0]?.value ?? null;
+  }
+
+  async setSetting(key: string, value: unknown) {
+    await this.rest('admin_settings?on_conflict=key', { method: 'POST', body: JSON.stringify({ key, value, updated_at: new Date().toISOString() }), prefer: 'resolution=merge-duplicates,return=minimal' });
+  }
+
+  async deleteSetting(key: string) {
+    await this.rest(`admin_settings?key=eq.${encodeURIComponent(key)}`, { method: 'DELETE', prefer: 'return=minimal' });
+  }
+
   /** Painel de gestão: marca (ou desmarca, com null) um problema como resolvido. */
   async setResolved(messageId: string, atIso: string | null) {
     await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}`, { method: 'PATCH', body: JSON.stringify({ resolved_at: atIso }), prefer: 'return=minimal' });

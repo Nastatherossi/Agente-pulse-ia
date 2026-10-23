@@ -167,6 +167,17 @@ var SupabaseStore = class {
   async problemTurns(iso, limit = 100) {
     return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
   }
+  /** Painel de gestão: configuração salva (admin_settings). null = nada salvo. */
+  async getSetting(key) {
+    const rows = await this.rest(`admin_settings?key=eq.${encodeURIComponent(key)}&select=value&limit=1`);
+    return rows[0]?.value ?? null;
+  }
+  async setSetting(key, value) {
+    await this.rest("admin_settings?on_conflict=key", { method: "POST", body: JSON.stringify({ key, value, updated_at: (/* @__PURE__ */ new Date()).toISOString() }), prefer: "resolution=merge-duplicates,return=minimal" });
+  }
+  async deleteSetting(key) {
+    await this.rest(`admin_settings?key=eq.${encodeURIComponent(key)}`, { method: "DELETE", prefer: "return=minimal" });
+  }
   /** Painel de gestão: marca (ou desmarca, com null) um problema como resolvido. */
   async setResolved(messageId, atIso) {
     await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}`, { method: "PATCH", body: JSON.stringify({ resolved_at: atIso }), prefer: "return=minimal" });
@@ -773,6 +784,73 @@ async function execOwnerCommand(deps, cmd) {
   return messages.ownerAuthorized(phone, contact.name);
 }
 
+// server/admin/prices.ts
+var PRICES_KEY = "openai_prices";
+var MAX_PRICE = 1e4;
+function parsePrice(raw) {
+  const s = String(raw ?? "").trim().replace(/\s/g, "").replace(/^US\$/i, "").replace(/^\$/, "");
+  if (!s || !/^\d+([.,]\d+)?$/.test(s)) return void 0;
+  const n = Number(s.replace(",", "."));
+  return Number.isFinite(n) && n >= 0 && n <= MAX_PRICE ? n : void 0;
+}
+function toTable(p) {
+  if (!p) return void 0;
+  if ("inputPerMTok" in p) return { default: p, models: {} };
+  return { default: p.default, models: { ...p.models ?? {} } };
+}
+function fromStored(v) {
+  if (!v || typeof v !== "object") return void 0;
+  const s = v;
+  const conv = (x) => {
+    const i = parsePrice(x?.in), o = parsePrice(x?.out);
+    return i !== void 0 && o !== void 0 ? { inputPerMTok: i, outputPerMTok: o } : void 0;
+  };
+  const models = {};
+  for (const [m, x] of Object.entries(s.models ?? {})) {
+    const p = conv(x);
+    if (p && m.length <= 100) models[m] = p;
+  }
+  return { default: conv(s.default), models };
+}
+function toStored(t) {
+  const c = (p) => ({ in: p.inputPerMTok, out: p.outputPerMTok });
+  return { ...t.default ? { default: c(t.default) } : {}, models: Object.fromEntries(Object.entries(t.models).map(([m, p]) => [m, c(p)])) };
+}
+function mergePrices(base, over) {
+  if (!base && !over) return void 0;
+  return { default: over?.default ?? base?.default, models: { ...base?.models ?? {}, ...over?.models ?? {} } };
+}
+var isEmpty = (t) => !t || !t.default && Object.keys(t.models).length === 0;
+function priceFor(t, model) {
+  if (!t) return void 0;
+  return (model ? t.models[model] : void 0) ?? t.default;
+}
+function envPrice(env) {
+  const i = parsePrice(env.OPENAI_PRICE_IN_PER_MTOK), o = parsePrice(env.OPENAI_PRICE_OUT_PER_MTOK);
+  return i !== void 0 && o !== void 0 ? { inputPerMTok: i, outputPerMTok: o } : void 0;
+}
+function pricesFromForm(form) {
+  const pair = (label, a, b) => {
+    const blankA = !String(a ?? "").trim(), blankB = !String(b ?? "").trim();
+    if (blankA && blankB) return null;
+    const i = parsePrice(a), o = parsePrice(b);
+    if (i === void 0 || o === void 0) return { error: `Pre\xE7o inv\xE1lido em ${label}: preencha entrada e sa\xEDda com n\xFAmeros, como 0,40 e 1,60.` };
+    return { inputPerMTok: i, outputPerMTok: o };
+  };
+  const d = pair("Padr\xE3o", form.default_in, form.default_out);
+  if (d && "error" in d) return d;
+  const models = {};
+  for (let n = 0; n < 50; n++) {
+    const m = (form[`model_${n}`] ?? "").trim();
+    if (!m) continue;
+    if (m.length > 100) return { error: "Nome de modelo grande demais." };
+    const p = pair(m, form[`in_${n}`], form[`out_${n}`]);
+    if (p && "error" in p) return p;
+    if (p) models[m] = p;
+  }
+  return { table: { default: d ?? void 0, models } };
+}
+
 // server/admin/format.ts
 var esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 var TZ = "America/Sao_Paulo";
@@ -1113,20 +1191,47 @@ function aiPage(s, ctx) {
     const share = s.tokens30d ? Math.round(t / s.tokens30d * 100) : 0;
     return `<li>${avatar(p.contact.name, p.contact.phone)}<div class="rank-body"><div class="rank-line"><span class="rank-name">${esc(p.contact.name || maskPhone(p.contact.phone))}</span><span class="figure-sm">${fmtInt(t)}<small>${share}%</small></span></div><meter min="0" max="${max}" value="${t}" aria-label="Tokens">${t}</meter><span class="rank-sub">${plural(p.messages30d, "mensagem", "mensagens")}, m\xE9dia ${fmtInt(Math.round(t / p.messages30d))} por mensagem${p.cost !== void 0 ? `, ${esc(fmtUsd(p.cost))}` : ""}</span></div></li>`;
   }).join("");
-  const models = s.models.map((m) => `<li><span class="model-name">${icon("cpu")}<code>${esc(m.model)}</code></span><span>${plural(m.messages, "mensagem", "mensagens")}</span><span class="figure-sm">${fmtShort(m.tokens)} tokens</span></li>`).join("");
+  const pricesBlock = priceEditor(s, ctx);
   return shell(
     "ia",
     ctx,
     { title: "IA e custos", lead: "Consumo da OpenAI pelo agente do WhatsApp nos \xFAltimos 30 dias" },
     `<section class="stats" aria-label="Resumo de consumo">${stats}</section>
-${priced ? "" : `<div class="notice">${icon("info")}<p><strong>Custo indispon\xEDvel \u2014 pre\xE7os n\xE3o configurados.</strong> Defina <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> (d\xF3lares por 1 milh\xE3o de tokens) na Vercel para o painel estimar o custo.</p></div>`}
+${priced ? s.unpriced.length ? `<div class="notice warn">${icon("info")}<p><strong>Custo parcial.</strong> Sem pre\xE7o para ${s.unpriced.map((u) => `<code>${esc(u.model)}</code> (${plural(u.messages, "mensagem", "mensagens")})`).join(", ")}. Preencha abaixo ou defina um pre\xE7o padr\xE3o.</p></div>` : "" : `<div class="notice">${icon("info")}<p><strong>Custo indispon\xEDvel \u2014 pre\xE7os n\xE3o configurados.</strong> Preencha o pre\xE7o por modelo em <a href="#precos">Pre\xE7os da OpenAI</a>, logo abaixo.</p></div>`}
 <section class="block"><div class="block-head"><h2>Tokens por dia</h2></div>${ranged("tok", (d, id) => tokenChart(d, id, priced), s.daily, `<p class="legend"><span class="key in"></span>entrada<span class="key out"></span>sa\xEDda<span class="key off"></span>sem registro</p>`)}</section>
-<div class="split wide-left">
- <section class="block"><div class="block-head"><h2>Consumo por pessoa</h2></div>${rows ? `<ol class="rank">${rows}</ol>` : emptyState("users", "Sem consumo", "Ningu\xE9m usou o Pulse nos \xFAltimos 30 dias.")}</section>
- <section class="block"><div class="block-head"><h2>Modelos usados</h2></div>${models ? `<ul class="models">${models}</ul>` : emptyState("cpu", "Sem registros", "Nenhuma chamada \xE0 OpenAI nos \xFAltimos 30 dias.")}</section>
-</div>
+${pricesBlock}
+<section class="block"><div class="block-head"><h2>Consumo por pessoa</h2></div>${rows ? `<ol class="rank">${rows}</ol>` : emptyState("users", "Sem consumo", "Ningu\xE9m usou o Pulse nos \xFAltimos 30 dias.")}</section>
 <p class="foot">Consumo registrado desde ${trackingLabel}/2026. Valores de custo s\xE3o estimativas; a fatura oficial est\xE1 no painel da OpenAI.</p>`
   );
+}
+var fmtPrice = (n) => n === void 0 ? "" : n.toLocaleString("pt-BR", { maximumFractionDigits: 4 });
+function priceEditor(s, ctx) {
+  const info = ctx.prices;
+  const table = info?.table;
+  const editable = Boolean(info?.editable);
+  const from = info?.from ?? "nenhum";
+  const badge = from === "painel" ? '<span class="status authorized"><i aria-hidden="true"></i>Definidos aqui no painel</span>' : from === "vercel" ? '<span class="status neutral"><i aria-hidden="true"></i>Vindos da Vercel</span>' : '<span class="status pending"><i aria-hidden="true"></i>Sem pre\xE7o</span>';
+  const used = s.models.filter((m) => m.model !== "n\xE3o informado");
+  const inp = (name, value, label, placeholder = "") => `<label class="price-in"><span class="sr-only">${esc(label)}</span><span class="cur" aria-hidden="true">US$</span><input name="${name}" value="${esc(value)}" inputmode="decimal" autocomplete="off" placeholder="${esc(placeholder)}" pattern="\\s*\\d+([.,]\\d+)?\\s*"${editable ? "" : " disabled"}></label>`;
+  const def = table?.default;
+  const rows = used.map((m, n) => {
+    const own = table?.models[m.model];
+    const eff = priceFor(table, m.model);
+    return `<tr><td class="who-cell"><input type="hidden" name="model_${n}" value="${esc(m.model)}"><span class="model-name">${icon("cpu")}<code>${esc(m.model)}</code></span><span class="phone">${plural(m.messages, "mensagem", "mensagens")}, ${fmtShort(m.tokens)} tokens</span></td>
+<td data-l="Entrada (1M tokens)">${inp(`in_${n}`, fmtPrice(own?.inputPerMTok), `Pre\xE7o de entrada de ${m.model}`, def ? `padr\xE3o ${fmtPrice(def.inputPerMTok)}` : "")}</td>
+<td data-l="Sa\xEDda (1M tokens)">${inp(`out_${n}`, fmtPrice(own?.outputPerMTok), `Pre\xE7o de sa\xEDda de ${m.model}`, def ? `padr\xE3o ${fmtPrice(def.outputPerMTok)}` : "")}</td>
+<td data-l="Custo em 30 dias" class="num">${eff ? esc(fmtUsd(m.cost)) : '<span class="na">sem pre\xE7o</span>'}${eff && !own ? '<small class="hint">pelo padr\xE3o</small>' : ""}</td></tr>`;
+  }).join("");
+  const defRow = `<tr class="default-row"><td class="who-cell"><span class="pname">Padr\xE3o</span><span class="phone">qualquer modelo sem pre\xE7o pr\xF3prio</span></td>
+<td data-l="Entrada (1M tokens)">${inp("default_in", fmtPrice(def?.inputPerMTok), "Pre\xE7o padr\xE3o de entrada")}</td>
+<td data-l="Sa\xEDda (1M tokens)">${inp("default_out", fmtPrice(def?.outputPerMTok), "Pre\xE7o padr\xE3o de sa\xEDda")}</td><td></td></tr>`;
+  const note = info?.storeMissing ? `<div class="notice warn">${icon("info")}<p><strong>Edi\xE7\xE3o desligada:</strong> a tabela de configura\xE7\xF5es (<code>admin_settings</code>) ainda n\xE3o existe no banco. Enquanto isso, valem as vari\xE1veis <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> da Vercel.</p></div>` : "";
+  return `<section class="block flush" id="precos"><div class="block-head pad"><h2>Pre\xE7os da OpenAI</h2>${badge}</div>
+<p class="block-lead">D\xF3lares por 1 milh\xE3o de tokens, como na tabela de pre\xE7os da OpenAI. Pode usar v\xEDrgula ou ponto. Em branco, o modelo usa o pre\xE7o padr\xE3o.</p>
+${note}<form method="post" action="/admin?v=ia" class="price-form" data-busy="Salvando\u2026"><input type="hidden" name="action" value="prices">
+<div class="table-wrap"><table class="data prices"><caption class="sr-only">Pre\xE7o por modelo</caption><thead><tr><th scope="col">Modelo</th><th scope="col">Entrada</th><th scope="col">Sa\xEDda</th><th scope="col" class="num">Custo em 30 dias</th></tr></thead><tbody>${rows}${defRow}</tbody></table></div>
+${editable ? `<div class="form-foot"><p class="note">${from === "vercel" ? "Ao salvar, os pre\xE7os do painel passam a valer no lugar dos da Vercel." : "Apague tudo e salve para voltar a usar os valores da Vercel."}</p><button type="submit" class="btn primary">Salvar pre\xE7os</button></div>` : ""}
+</form></section>`;
 }
 function problemsPage(all, ctx, mode = "open") {
   const canResolve = Boolean(ctx.can?.resolve);
@@ -1177,14 +1282,15 @@ function turnPage(t, ctx) {
 }
 function configPage(ctx) {
   const row = (ic, title, state, tone, text) => `<li class="setting">${icon(ic)}<div><div class="setting-head"><strong>${esc(title)}</strong><span class="status ${tone}"><i aria-hidden="true"></i>${esc(state)}</span></div><p>${text}</p></div></li>`;
-  const p = ctx.price;
+  const info = ctx.prices;
+  const from = info?.from ?? "nenhum";
   return shell(
     "config",
     ctx,
     { title: "Configura\xE7\xE3o", lead: "O que est\xE1 ligado no painel. Para mudar, edite as vari\xE1veis na Vercel e fa\xE7a um novo deploy." },
     `<section class="block"><ul class="settings">
 ${row("lock", "Acesso ao painel", "Ativo", "authorized", "Senha com 16 ou mais caracteres em <code>ADMIN_PASSWORD</code>. A sess\xE3o vale 30 dias neste navegador; o bot\xE3o Sair encerra.")}
-${row("coin", "Pre\xE7o do modelo", p ? "Configurado" : "N\xE3o configurado", p ? "authorized" : "pending", p ? `US$ ${esc(p.inputPerMTok)} por 1 milh\xE3o de tokens de entrada e US$ ${esc(p.outputPerMTok)} de sa\xEDda (<code>OPENAI_PRICE_IN_PER_MTOK</code>, <code>OPENAI_PRICE_OUT_PER_MTOK</code>).` : "Sem pre\xE7o, o painel mostra tokens mas n\xE3o custo. Defina <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> em d\xF3lares por 1 milh\xE3o de tokens.")}
+${row("coin", "Pre\xE7o do modelo", from === "painel" ? "Definido no painel" : from === "vercel" ? "Da Vercel" : "N\xE3o configurado", from === "nenhum" ? "pending" : "authorized", `Edit\xE1vel em <a href="/admin?v=ia#precos">IA e custos</a>, por modelo e com um pre\xE7o padr\xE3o. ${from === "vercel" ? "Hoje vale o das vari\xE1veis <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> da Vercel." : from === "painel" ? "Os valores do painel valem por cima dos da Vercel." : "Sem pre\xE7o, o painel mostra tokens, mas n\xE3o custo."}`)}
 ${row("pulse", "Registro de consumo", "Ativo", "authorized", `Cada mensagem do WhatsApp grava tokens, modelo e status desde ${trackingLabel}/2026. O painel l\xEA os \xFAltimos 30 dias.`)}
 ${row("message", "Texto das conversas", "S\xF3 em problemas", "neutral", "O texto da mensagem e da resposta s\xF3 \xE9 guardado quando o agente erra, n\xE3o entende ou recusa, para voc\xEA depurar.")}
 ${row("bell", "Lembretes proativos", "Todo dia \xE0s 9h", "authorized", 'Agendados no <code>vercel.json</code> (cron da Vercel). Ligue ou desligue por pessoa em <a href="/admin?v=lembretes">Lembretes</a>. As regras (1 mensagem por dia, at\xE9 3 perguntas por lan\xE7amento) ficam no c\xF3digo.')}
@@ -1265,7 +1371,11 @@ var isErr = (u) => u.status === "error" || Boolean(u.error_code);
 var BRT = -3 * 36e5;
 var dayKey = (ms) => new Date(ms + BRT).toISOString().slice(0, 10);
 function summarize(contacts, usage, nowMs, price) {
-  const cost = (i, o) => price ? (i * price.inputPerMTok + o * price.outputPerMTok) / 1e6 : void 0;
+  const table = isEmpty(toTable(price)) ? void 0 : toTable(price);
+  const costOf = (rows) => table ? rows.reduce((sum, u) => {
+    const p = priceFor(table, u.model);
+    return p ? sum + (u.input_tokens * p.inputPerMTok + u.output_tokens * p.outputPerMTok) / 1e6 : sum;
+  }, 0) : void 0;
   const since = (ms) => usage.filter((u) => nowMs - Date.parse(u.created_at) <= ms);
   const d1 = since(DAY2), d7 = since(7 * DAY2);
   const prev7 = usage.filter((u) => {
@@ -1278,7 +1388,7 @@ function summarize(contacts, usage, nowMs, price) {
     const mine = usage.filter((u) => u.phone === c.phone);
     const t = tokens(mine);
     const last = mine.reduce((m, u) => !m || u.created_at > m ? u.created_at : m, void 0);
-    return { contact: c, messages30d: mine.length, inputTokens: t.i, outputTokens: t.o, cost: cost(t.i, t.o), lastAt: last, errors: mine.filter(isErr).length };
+    return { contact: c, messages30d: mine.length, inputTokens: t.i, outputTokens: t.o, cost: costOf(mine), lastAt: last, errors: mine.filter(isErr).length };
   });
   const order = { pending: 0, authorized: 1, blocked: 2 };
   people.sort((a, b) => (order[a.contact.status] ?? 3) - (order[b.contact.status] ?? 3) || (b.lastAt ?? "").localeCompare(a.lastAt ?? ""));
@@ -1290,16 +1400,19 @@ function summarize(contacts, usage, nowMs, price) {
     const key = dayKey(nowMs - (29 - i) * DAY2);
     const rows = usage.filter((u) => dayKey(Date.parse(u.created_at)) === key);
     const t = tokens(rows);
-    return { day: key, tracked: key >= TRACKING_SINCE, messages: rows.length, input: t.i, output: t.o, errors: rows.filter(isErr).length, cost: cost(t.i, t.o) };
+    return { day: key, tracked: key >= TRACKING_SINCE, messages: rows.length, input: t.i, output: t.o, errors: rows.filter(isErr).length, cost: costOf(rows) };
   });
   const byModel = /* @__PURE__ */ new Map();
   for (const u of usage) {
     const m = u.model || "n\xE3o informado";
-    const row = byModel.get(m) ?? { model: m, messages: 0, tokens: 0 };
+    const row = byModel.get(m) ?? { model: m, messages: 0, tokens: 0, input: 0, output: 0, price: priceFor(table, u.model), own: Boolean(u.model && table?.models[u.model]) };
     row.messages++;
     row.tokens += u.input_tokens + u.output_tokens;
+    row.input += u.input_tokens;
+    row.output += u.output_tokens;
     byModel.set(m, row);
   }
+  for (const r of byModel.values()) r.cost = r.price ? (r.input * r.price.inputPerMTok + r.output * r.price.outputPerMTok) / 1e6 : void 0;
   return {
     counts: { authorized: contacts.filter((c) => c.status === "authorized").length, pending: contacts.filter((c) => c.status === "pending").length, blocked: contacts.filter((c) => c.status === "blocked").length },
     messages: { d1: d1.length, d7: d7.length, d30: usage.length },
@@ -1310,7 +1423,9 @@ function summarize(contacts, usage, nowMs, price) {
     tokensIn30d: t30.i,
     tokensOut30d: t30.o,
     avgTokens: usage.length ? Math.round((t30.i + t30.o) / usage.length) : 0,
-    cost30d: cost(t30.i, t30.o),
+    cost30d: costOf(usage),
+    /** Modelos usados sem preço (nem próprio nem padrão): o custo mostrado é parcial. */
+    unpriced: table ? [...byModel.values()].filter((r) => !r.price).map((r) => ({ model: r.model, messages: r.messages })) : [],
     errors1d: d1.filter(isErr).length,
     errors7d: d7.filter(isErr).length,
     errors30d: usage.filter(isErr).length,
@@ -1373,7 +1488,32 @@ function createAdmin(config, deps) {
       await deps.source.setReminders(phone, on);
       return on ? "Lembretes ligados para esse n\xFAmero." : "Lembretes desligados para esse n\xFAmero.";
     }
+    if (form.action === "prices" && deps.source.setPrices) {
+      const parsed = pricesFromForm(form);
+      if ("error" in parsed) return parsed.error;
+      try {
+        await deps.source.setPrices(parsed.table);
+      } catch (e) {
+        if (e instanceof Error && e.message === "SUPABASE_404") return "N\xE3o consegui salvar: a tabela de configura\xE7\xF5es (admin_settings) ainda n\xE3o existe no banco.";
+        throw e;
+      }
+      return isEmpty(parsed.table) ? "Pre\xE7os do painel removidos. Valem os da Vercel, se houver." : "Pre\xE7os salvos. O custo j\xE1 usa os valores novos.";
+    }
     return void 0;
+  }
+  async function priceInfo() {
+    const env = isEmpty(toTable(deps.price)) ? void 0 : toTable(deps.price);
+    let stored;
+    let storeMissing = false;
+    if (deps.source.prices) {
+      try {
+        stored = await deps.source.prices() ?? void 0;
+      } catch {
+        storeMissing = true;
+      }
+    }
+    const table = mergePrices(env, isEmpty(stored) ? void 0 : stored);
+    return { table: isEmpty(table) ? void 0 : table, from: !isEmpty(stored) ? "painel" : env ? "vercel" : "nenhum", editable: Boolean(deps.source.setPrices) && !storeMissing, storeMissing, env: env?.default };
   }
   return async function handler(req, res) {
     if (config.password.length < MIN_PASSWORD) return html(res, 503, plainPage("Painel desativado", `Defina ADMIN_PASSWORD (m\xEDnimo ${MIN_PASSWORD} caracteres) nas vari\xE1veis da Vercel e fa\xE7a um novo deploy.`));
@@ -1421,7 +1561,7 @@ function createAdmin(config, deps) {
       const view = q.get("v");
       const contacts = await deps.source.contacts();
       const can = { resolve: Boolean(deps.source.setResolved), reminders: Boolean(deps.source.setReminders) };
-      const ctx = (problems2) => ({ now, contacts, problems: problems2.filter((t) => !t.resolved_at).length, pending: contacts.filter((c2) => c2.status === "pending").length, flash, price: deps.price, can });
+      const ctx = (problems2, prices2) => ({ now, contacts, problems: problems2.filter((t) => !t.resolved_at).length, pending: contacts.filter((c2) => c2.status === "pending").length, flash, prices: prices2, can });
       if (view === "turno") {
         const [turn, problems2] = await Promise.all([deps.source.turn(q.get("id") ?? ""), deps.source.problemTurns(since)]);
         return html(res, 200, turnPage(turn, ctx(problems2)), clear);
@@ -1434,11 +1574,14 @@ function createAdmin(config, deps) {
         ]);
         return html(res, 200, remindersPage(history, preview, ctx(problems2)), clear);
       }
-      const [usage, problems] = await Promise.all([deps.source.usageSince(since), deps.source.problemTurns(since)]);
-      const c = ctx(problems);
-      if (view === "problemas") return html(res, 200, problemsPage(problems, c, q.get("estado") === "resolvidos" ? "resolved" : "open"), clear);
+      if (view === "problemas") {
+        const problems2 = await deps.source.problemTurns(since);
+        return html(res, 200, problemsPage(problems2, ctx(problems2), q.get("estado") === "resolvidos" ? "resolved" : "open"), clear);
+      }
+      const [usage, problems, prices] = await Promise.all([deps.source.usageSince(since), deps.source.problemTurns(since), priceInfo()]);
+      const c = ctx(problems, prices);
       if (view === "config") return html(res, 200, configPage(c), clear);
-      const s = summarize(contacts, usage, now, deps.price);
+      const s = summarize(contacts, usage, now, prices.table);
       if (view === "usuarios") return html(res, 200, usersPage(s, c), clear);
       if (view === "ia") return html(res, 200, aiPage(s, c), clear);
       return html(res, 200, homePage(s, problems.filter((t) => !t.resolved_at), c), clear);
@@ -1463,7 +1606,7 @@ async function entry(req, res) {
   }
   const store = new SupabaseStore(url, key);
   const ledger = new SupabaseLedger(url, key);
-  const price = Number(e.OPENAI_PRICE_IN_PER_MTOK) > 0 && Number(e.OPENAI_PRICE_OUT_PER_MTOK) > 0 ? { inputPerMTok: Number(e.OPENAI_PRICE_IN_PER_MTOK), outputPerMTok: Number(e.OPENAI_PRICE_OUT_PER_MTOK) } : void 0;
+  const price = envPrice(e);
   const ownerDeps = {
     ownerPhone,
     store,
@@ -1499,7 +1642,12 @@ async function entry(req, res) {
       setResolved: (id, at) => store.setResolved(id, at),
       setReminders: (phone, on) => store.setRemindersEnabled(phone, on),
       reminders: (since) => store.remindersSince(since),
-      reminderPreview: async () => (await runReminders({ store, ledger: readOnlyLedger, messenger: silent, log }, { dry: true })).messages
+      reminderPreview: async () => (await runReminders({ store, ledger: readOnlyLedger, messenger: silent, log }, { dry: true })).messages,
+      prices: async () => {
+        const v = await store.getSetting(PRICES_KEY);
+        return v == null ? null : fromStored(v) ?? null;
+      },
+      setPrices: (t) => isEmpty(t) ? store.deleteSetting(PRICES_KEY) : store.setSetting(PRICES_KEY, toStored(t))
     },
     run: async (command) => {
       const cmd = parseOwnerCommand(command);

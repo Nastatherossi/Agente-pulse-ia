@@ -11,6 +11,7 @@ import type { Messenger } from '../whatsapp/zapi.js';
 import { homePage, usersPage, aiPage, problemsPage, turnPage, configPage, remindersPage, loginPage, plainPage, type ViewCtx } from './views.js';
 
 import { TRACKING_SINCE } from './format.js';
+import { type Price, type PriceTable, PRICES_KEY, toTable, fromStored, toStored, mergePrices, isEmpty, priceFor, envPrice, pricesFromForm } from './prices.js';
 export { esc, fmtPhone, ERROR_HELP, turnKind, TRACKING_SINCE } from './format.js';
 export { loginPage, homePage, problemsPage, turnPage } from './views.js';
 
@@ -29,15 +30,20 @@ export type AdminSource = {
   reminders?(sinceIso: string): Promise<ReminderState[]>;
   /** O que o lembrete diário mandaria agora. Não envia nada nem cria conta. */
   reminderPreview?(): Promise<ReminderPreview>;
+  /** Preços por modelo definidos no painel (null = nada salvo). Lança erro se a tabela não existir. */
+  prices?(): Promise<PriceTable | null>;
+  setPrices?(t: PriceTable): Promise<void>;
 };
+/** De onde vêm os preços que o painel está usando. */
+export type PriceInfo = { table?: PriceTable; from: 'painel' | 'vercel' | 'nenhum'; editable: boolean; storeMissing?: boolean; env?: Price };
 export type AdminDeps = {
   source: AdminSource;
   /** Autorizar ou bloquear com o mesmo efeito do comando do dono no WhatsApp (cria conta, manda boas-vindas). */
   run: (command: string) => Promise<string>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
-  /** Preço por 1 milhão de tokens, em dólar. Sem preço, o painel mostra só tokens. */
-  price?: { inputPerMTok: number; outputPerMTok: number };
+  /** Preço por 1 milhão de tokens, em dólar (variáveis da Vercel). Os do painel valem por cima. */
+  price?: Price | PriceTable;
 };
 
 type Req = { method?: string; url?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
@@ -75,8 +81,11 @@ const BRT = -3 * 3_600_000;
 const dayKey = (ms: number) => new Date(ms + BRT).toISOString().slice(0, 10);
 
 /** Agrega o consumo: totais por período, por pessoa e por dia. Puro, para ser testado sem banco. */
-export function summarize(contacts: Contact[], usage: UsageRecord[], nowMs: number, price?: AdminDeps['price']) {
-  const cost = (i: number, o: number) => (price ? (i * price.inputPerMTok + o * price.outputPerMTok) / 1_000_000 : undefined);
+export function summarize(contacts: Contact[], usage: UsageRecord[], nowMs: number, price?: Price | PriceTable) {
+  const table = isEmpty(toTable(price)) ? undefined : toTable(price);
+  /** Custo das linhas com preço (pelo modelo de cada uma). Sem nenhum preço configurado: undefined. */
+  const costOf = (rows: UsageRecord[]) =>
+    table ? rows.reduce((sum, u) => { const p = priceFor(table, u.model); return p ? sum + (u.input_tokens * p.inputPerMTok + u.output_tokens * p.outputPerMTok) / 1_000_000 : sum; }, 0) : undefined;
   const since = (ms: number) => usage.filter(u => nowMs - Date.parse(u.created_at) <= ms);
   const d1 = since(DAY), d7 = since(7 * DAY);
   const prev7 = usage.filter(u => { const age = nowMs - Date.parse(u.created_at); return age > 7 * DAY && age <= 14 * DAY; });
@@ -86,7 +95,7 @@ export function summarize(contacts: Contact[], usage: UsageRecord[], nowMs: numb
     const mine = usage.filter(u => u.phone === c.phone);
     const t = tokens(mine);
     const last = mine.reduce<string | undefined>((m, u) => (!m || u.created_at > m ? u.created_at : m), undefined);
-    return { contact: c, messages30d: mine.length, inputTokens: t.i, outputTokens: t.o, cost: cost(t.i, t.o), lastAt: last, errors: mine.filter(isErr).length };
+    return { contact: c, messages30d: mine.length, inputTokens: t.i, outputTokens: t.o, cost: costOf(mine), lastAt: last, errors: mine.filter(isErr).length };
   });
   const order = { pending: 0, authorized: 1, blocked: 2 } as Record<string, number>;
   people.sort((a, b) => (order[a.contact.status] ?? 3) - (order[b.contact.status] ?? 3) || (b.lastAt ?? '').localeCompare(a.lastAt ?? ''));
@@ -99,16 +108,19 @@ export function summarize(contacts: Contact[], usage: UsageRecord[], nowMs: numb
     const key = dayKey(nowMs - (29 - i) * DAY);
     const rows = usage.filter(u => dayKey(Date.parse(u.created_at)) === key);
     const t = tokens(rows);
-    return { day: key, tracked: key >= TRACKING_SINCE, messages: rows.length, input: t.i, output: t.o, errors: rows.filter(isErr).length, cost: cost(t.i, t.o) };
+    return { day: key, tracked: key >= TRACKING_SINCE, messages: rows.length, input: t.i, output: t.o, errors: rows.filter(isErr).length, cost: costOf(rows) };
   });
-  const byModel = new Map<string, { model: string; messages: number; tokens: number }>();
+  const byModel = new Map<string, { model: string; messages: number; tokens: number; input: number; output: number; price?: Price; own: boolean; cost?: number }>();
   for (const u of usage) {
     const m = u.model || 'não informado';
-    const row = byModel.get(m) ?? { model: m, messages: 0, tokens: 0 };
+    const row = byModel.get(m) ?? { model: m, messages: 0, tokens: 0, input: 0, output: 0, price: priceFor(table, u.model), own: Boolean(u.model && table?.models[u.model]) };
     row.messages++;
     row.tokens += u.input_tokens + u.output_tokens;
+    row.input += u.input_tokens;
+    row.output += u.output_tokens;
     byModel.set(m, row);
   }
+  for (const r of byModel.values()) r.cost = r.price ? (r.input * r.price.inputPerMTok + r.output * r.price.outputPerMTok) / 1_000_000 : undefined;
   return {
     counts: { authorized: contacts.filter(c => c.status === 'authorized').length, pending: contacts.filter(c => c.status === 'pending').length, blocked: contacts.filter(c => c.status === 'blocked').length },
     messages: { d1: d1.length, d7: d7.length, d30: usage.length },
@@ -119,7 +131,9 @@ export function summarize(contacts: Contact[], usage: UsageRecord[], nowMs: numb
     tokensIn30d: t30.i,
     tokensOut30d: t30.o,
     avgTokens: usage.length ? Math.round((t30.i + t30.o) / usage.length) : 0,
-    cost30d: cost(t30.i, t30.o),
+    cost30d: costOf(usage),
+    /** Modelos usados sem preço (nem próprio nem padrão): o custo mostrado é parcial. */
+    unpriced: table ? [...byModel.values()].filter(r => !r.price).map(r => ({ model: r.model, messages: r.messages })) : [],
     errors1d: d1.filter(isErr).length,
     errors7d: d7.filter(isErr).length,
     errors30d: usage.filter(isErr).length,
@@ -188,7 +202,34 @@ export function createAdmin(config: { password: string }, deps: AdminDeps) {
       await deps.source.setReminders(phone, on);
       return on ? 'Lembretes ligados para esse número.' : 'Lembretes desligados para esse número.';
     }
+    if (form.action === 'prices' && deps.source.setPrices) {
+      const parsed = pricesFromForm(form);
+      if ('error' in parsed) return parsed.error;
+      try {
+        await deps.source.setPrices(parsed.table);
+      } catch (e) {
+        if (e instanceof Error && e.message === 'SUPABASE_404') return 'Não consegui salvar: a tabela de configurações (admin_settings) ainda não existe no banco.';
+        throw e;
+      }
+      return isEmpty(parsed.table) ? 'Preços do painel removidos. Valem os da Vercel, se houver.' : 'Preços salvos. O custo já usa os valores novos.';
+    }
     return undefined;
+  }
+
+  /** Preços em uso: os do painel por cima dos da Vercel. Uma leitura pequena, só nas telas que mostram custo. */
+  async function priceInfo(): Promise<PriceInfo> {
+    const env = isEmpty(toTable(deps.price)) ? undefined : toTable(deps.price);
+    let stored: PriceTable | undefined;
+    let storeMissing = false;
+    if (deps.source.prices) {
+      try {
+        stored = (await deps.source.prices()) ?? undefined;
+      } catch {
+        storeMissing = true;
+      }
+    }
+    const table = mergePrices(env, isEmpty(stored) ? undefined : stored);
+    return { table: isEmpty(table) ? undefined : table, from: !isEmpty(stored) ? 'painel' : env ? 'vercel' : 'nenhum', editable: Boolean(deps.source.setPrices) && !storeMissing, storeMissing, env: env?.default };
   }
 
   return async function handler(req: Req, res: Res) {
@@ -239,7 +280,7 @@ export function createAdmin(config: { password: string }, deps: AdminDeps) {
       const view = q.get('v');
       const contacts = await deps.source.contacts();
       const can = { resolve: Boolean(deps.source.setResolved), reminders: Boolean(deps.source.setReminders) };
-      const ctx = (problems: TurnDetail[]): ViewCtx => ({ now, contacts, problems: problems.filter(t => !t.resolved_at).length, pending: contacts.filter(c => c.status === 'pending').length, flash, price: deps.price, can });
+      const ctx = (problems: TurnDetail[], prices?: PriceInfo): ViewCtx => ({ now, contacts, problems: problems.filter(t => !t.resolved_at).length, pending: contacts.filter(c => c.status === 'pending').length, flash, prices, can });
       if (view === 'turno') {
         const [turn, problems] = await Promise.all([deps.source.turn(q.get('id') ?? ''), deps.source.problemTurns(since)]);
         return html(res, 200, turnPage(turn, ctx(problems)), clear);
@@ -252,11 +293,14 @@ export function createAdmin(config: { password: string }, deps: AdminDeps) {
         ]);
         return html(res, 200, remindersPage(history, preview, ctx(problems)), clear);
       }
-      const [usage, problems] = await Promise.all([deps.source.usageSince(since), deps.source.problemTurns(since)]);
-      const c = ctx(problems);
-      if (view === 'problemas') return html(res, 200, problemsPage(problems, c, q.get('estado') === 'resolvidos' ? 'resolved' : 'open'), clear);
+      if (view === 'problemas') {
+        const problems = await deps.source.problemTurns(since);
+        return html(res, 200, problemsPage(problems, ctx(problems), q.get('estado') === 'resolvidos' ? 'resolved' : 'open'), clear);
+      }
+      const [usage, problems, prices] = await Promise.all([deps.source.usageSince(since), deps.source.problemTurns(since), priceInfo()]);
+      const c = ctx(problems, prices);
       if (view === 'config') return html(res, 200, configPage(c), clear);
-      const s = summarize(contacts, usage, now, deps.price);
+      const s = summarize(contacts, usage, now, prices.table);
       if (view === 'usuarios') return html(res, 200, usersPage(s, c), clear);
       if (view === 'ia') return html(res, 200, aiPage(s, c), clear);
       return html(res, 200, homePage(s, problems.filter(t => !t.resolved_at), c), clear);
@@ -285,7 +329,7 @@ export default async function entry(req: Req, res: Res) {
   }
   const store = new SupabaseStore(url, key);
   const ledger = new SupabaseLedger(url, key);
-  const price = Number(e.OPENAI_PRICE_IN_PER_MTOK) > 0 && Number(e.OPENAI_PRICE_OUT_PER_MTOK) > 0 ? { inputPerMTok: Number(e.OPENAI_PRICE_IN_PER_MTOK), outputPerMTok: Number(e.OPENAI_PRICE_OUT_PER_MTOK) } : undefined;
+  const price = envPrice(e); // aceita 1,6 e 1.6
   const ownerDeps: Deps = {
     ownerPhone,
     store,
@@ -315,6 +359,11 @@ export default async function entry(req: Req, res: Res) {
       setReminders: (phone, on) => store.setRemindersEnabled(phone, on),
       reminders: since => store.remindersSince(since),
       reminderPreview: async () => (await runReminders({ store, ledger: readOnlyLedger, messenger: silent, log }, { dry: true })).messages,
+      prices: async () => {
+        const v = await store.getSetting(PRICES_KEY);
+        return v == null ? null : fromStored(v) ?? null;
+      },
+      setPrices: t => (isEmpty(t) ? store.deleteSetting(PRICES_KEY) : store.setSetting(PRICES_KEY, toStored(t))),
     },
     run: async command => {
       const cmd = parseOwnerCommand(command);

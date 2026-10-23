@@ -1,5 +1,6 @@
 import {describe,it,expect,vi} from 'vitest';
 import entry,{createAdmin,summarize,sessionToken,esc,COOKIE,backTo,type AdminDeps} from '../server/admin/panel';
+import {parsePrice,envPrice} from '../server/admin/prices';
 import type {UsageRecord,TurnDetail} from '../server/whatsapp/store';
 import {fmtPhone} from '../server/admin/panel';
 import type {Contact} from '../shared/whatsapp/access';
@@ -169,7 +170,7 @@ describe('resumo diário',()=>{
  });
  it('agrupa por modelo',()=>{
   const s=summarize([],[u('1',1,{model:'a'}),u('1',2,{model:'a'}),u('1',3,{model:null})],NOW);
-  expect(s.models[0]).toEqual({model:'a',messages:2,tokens:2200});
+  expect(s.models[0]).toMatchObject({model:'a',messages:2,tokens:2200});
  });
 });
 
@@ -231,5 +232,49 @@ describe('ajustes de backend do painel',()=>{
   vi.stubEnv('ADMIN_PASSWORD',PASS);const r2=res();await entry({method:'GET',url:'/admin',headers:{}},r2);
   expect(r2.code).toBe(503);expect(r2.body).toContain('SUPABASE_URL');expect(r2.body).not.toContain(PASS);
   vi.unstubAllEnvs();
+ });
+});
+
+describe('preços por modelo',()=>{
+ it('aceita vírgula ou ponto e recusa o resto',()=>{
+  expect(parsePrice('1,6')).toBe(1.6);expect(parsePrice(' 0,40 ')).toBe(0.4);expect(parsePrice('1.6')).toBe(1.6);expect(parsePrice('US$ 2')).toBe(2);
+  expect(parsePrice('abc')).toBeUndefined();expect(parsePrice('-1')).toBeUndefined();expect(parsePrice('1,2,3')).toBeUndefined();expect(parsePrice('')).toBeUndefined();
+  expect(envPrice({OPENAI_PRICE_IN_PER_MTOK:'0,4',OPENAI_PRICE_OUT_PER_MTOK:'1,6'})).toEqual({inputPerMTok:0.4,outputPerMTok:1.6});
+ });
+ it('custo por modelo; modelo sem preço fica fora e aparece como pendente',()=>{
+  const usage=[u('1',1,{model:'mini',input_tokens:1_000_000,output_tokens:1_000_000}),u('1',2,{model:'grande',input_tokens:1_000_000,output_tokens:0})];
+  const s=summarize([c('1','authorized')],usage,NOW,{models:{mini:{inputPerMTok:0.4,outputPerMTok:1.6}}});
+  expect(s.cost30d).toBe(2);expect(s.unpriced).toEqual([{model:'grande',messages:1}]);
+  const s2=summarize([c('1','authorized')],usage,NOW,{default:{inputPerMTok:3,outputPerMTok:10},models:{mini:{inputPerMTok:0.4,outputPerMTok:1.6}}});
+  expect(s2.cost30d).toBe(5);expect(s2.unpriced).toEqual([]);
+ });
+ const make=(over:Partial<AdminDeps['source']>={},price?:AdminDeps['price'])=>{
+  let saved:any=null;const setPrices=vi.fn().mockImplementation(async(t:any)=>{saved=t;});
+  const source:AdminDeps['source']={contacts:async()=>[c('5511911110000','authorized','Ana')],usageSince:async()=>[u('5511911110000',1,{model:'gpt-x',input_tokens:1_000_000,output_tokens:1_000_000})],problemTurns:async()=>[],turn:async()=>null,prices:async()=>saved,setPrices,...over};
+  return {setPrices,handler:createAdmin({password:PASS},{source,run:vi.fn(),now:()=>NOW,price})};
+ };
+ const post=async(h:any,body:any)=>{const r=res();await h({method:'POST',url:'/admin?v=ia',headers:authed,body},r);return r;};
+ it('salva pelo painel e o custo passa a usar o valor salvo',async()=>{
+  const {handler,setPrices}=make();
+  const r=await post(handler,{action:'prices',model_0:'gpt-x',in_0:'1,5',out_0:'2.5',default_in:'',default_out:''});
+  expect(setPrices).toHaveBeenCalledWith({default:undefined,models:{'gpt-x':{inputPerMTok:1.5,outputPerMTok:2.5}}});
+  const page=await follow(handler,r);expect(page.body).toContain('Preços salvos');expect(page.body).toContain('US$ 4.00');expect(page.body).toContain('Definidos aqui no painel');expect(page.body).toContain('value="1,5"');
+ });
+ it('valor inválido não salva e explica',async()=>{
+  const {handler,setPrices}=make();const r=await post(handler,{action:'prices',model_0:'gpt-x',in_0:'abc',out_0:'1'});
+  expect(setPrices).not.toHaveBeenCalled();expect((await follow(handler,r)).body).toContain('Preço inválido em gpt-x');
+ });
+ it('painel vale por cima da Vercel',async()=>{
+  const {handler}=make({prices:async()=>({models:{'gpt-x':{inputPerMTok:1,outputPerMTok:1}}})},{inputPerMTok:100,outputPerMTok:100});
+  const r=res();await handler({method:'GET',url:'/admin?v=ia',headers:authed},r);expect(r.body).toContain('US$ 2.00');expect(r.body).toContain('Definidos aqui no painel');
+ });
+ it('sem a tabela no banco: edição desligada e vale a Vercel',async()=>{
+  const {handler}=make({prices:async()=>{throw new Error('SUPABASE_404');}},{inputPerMTok:1,outputPerMTok:1});
+  const r=res();await handler({method:'GET',url:'/admin?v=ia',headers:authed},r);
+  expect(r.code).toBe(200);expect(r.body).toContain('admin_settings');expect(r.body).toContain('Vindos da Vercel');expect(r.body).not.toContain('Salvar preços');expect(r.body).toContain('US$ 2.00');
+ });
+ it('tabela ausente ao salvar vira aviso claro',async()=>{
+  const {handler}=make({setPrices:async()=>{throw new Error('SUPABASE_404');}});const r=await post(handler,{action:'prices',default_in:'1',default_out:'2'});
+  expect((await follow(handler,r)).body).toContain('ainda não existe no banco');
  });
 });
