@@ -167,7 +167,9 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
   const pickedCategory=op&&live&&op.kind==='create'&&!risk&&!no?categoryInReply(message,session.state.categories??[]):undefined;
   const confirmsWithCategory=Boolean(pickedCategory)&&/^\s*(sim|confirmo|confirma|confirmado|pode|ok|isso|claro|beleza|fechado|certo|manda ver)\b/.test(normalize(message));
   if(pickedCategory)for(const item of op!.items!)item.category=pickedCategory;
-  const yes=!risk&&(isConfirmation(message)||confirmsWithCategory);
+  // "sim, em despesas da casa": confirma mesmo quando o complemento não é uma categoria que eu conheça (o registro fica sem categoria e eu aviso).
+  const yesWithPhrase=Boolean(op&&live&&op.kind==='create'&&!risk&&!no&&!pickedCategory&&/^\s*(sim|confirmo|confirma|pode|ok|isso|claro|beleza|fechado|certo)\b[,.! ]+(em|na|no|como|de|pra|para|categoria)\b(\s+\S+){1,4}\s*[.!]*$/.test(normalize(message)));
+  const yes=!risk&&(isConfirmation(message)||confirmsWithCategory||yesWithPhrase);
   // Only the category was given ("lança como lazer"): update the pending record and ask again, never write silently.
   const onlyCategory=Boolean(pickedCategory)&&!yes&&message.length<=80;
   if(command!==undefined){directAnswer=command;}

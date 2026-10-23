@@ -515,6 +515,7 @@ function categoryInReply(message, custom = []) {
   const hits = /* @__PURE__ */ new Set();
   for (const c of [...CATEGORIES, ...custom]) if (new RegExp(`\\b${normalize(c).replace(/ /g, "\\s+")}\\b`).test(t)) hits.add(c);
   if (/\b(comida|alimento|alimentos)\b/.test(t)) hits.add("Alimenta\xE7\xE3o");
+  if (/\b(casa|lar|despesas? da casa|apartamento)\b/.test(t)) hits.add("Moradia");
   return hits.size === 1 ? [...hits][0] : void 0;
 }
 function backing(ctx) {
@@ -1044,7 +1045,8 @@ async function runConversation(provider, sessionInput, message, requestId, today
     const pickedCategory = op && live && op.kind === "create" && !risk && !no ? categoryInReply(message, session.state.categories ?? []) : void 0;
     const confirmsWithCategory = Boolean(pickedCategory) && /^\s*(sim|confirmo|confirma|confirmado|pode|ok|isso|claro|beleza|fechado|certo|manda ver)\b/.test(normalize(message));
     if (pickedCategory) for (const item of op.items) item.category = pickedCategory;
-    const yes = !risk && (isConfirmation(message) || confirmsWithCategory);
+    const yesWithPhrase = Boolean(op && live && op.kind === "create" && !risk && !no && !pickedCategory && /^\s*(sim|confirmo|confirma|pode|ok|isso|claro|beleza|fechado|certo)\b[,.! ]+(em|na|no|como|de|pra|para|categoria)\b(\s+\S+){1,4}\s*[.!]*$/.test(normalize(message)));
+    const yes = !risk && (isConfirmation(message) || confirmsWithCategory || yesWithPhrase);
     const onlyCategory = Boolean(pickedCategory) && !yes && message.length <= 80;
     if (command !== void 0) {
       directAnswer = command;

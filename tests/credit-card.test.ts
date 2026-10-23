@@ -98,6 +98,28 @@ describe('compra no cartão pelo agente',()=>{
  });
 });
 
+describe('"sim" com complemento na confirmação (caso real)',()=>{
+ const m1='comprei um ar-condicionado de 2,4k em 5 parcelas no crédito';
+ const first=()=>send(model({calls:[tc('registrar_transacao',buy(2400,'ar-condicionado','2,4k em 5 parcelas',{nome:null,parcelas:5},'Compras'))]}),undefined,m1);
+ it('"sim, em despesas da casa" confirma e usa Moradia',async()=>{
+  const a=await first();
+  const b=await send(model({content:'x'}),a.session,'sim, em despesas da casa');
+  expect(b.session.state.cardPurchases).toHaveLength(1);
+  expect(b.session.state.cardPurchases![0].category).toBe('Moradia');
+  expect(b.session.state.cardPurchases![0].card?.installments).toBe(5);
+ });
+ it('"sim, na categoria xyz" confirma sem categoria conhecida',async()=>{
+  const a=await first();
+  const b=await send(model({content:'x'}),a.session,'sim, na parte do escritório');
+  expect(b.session.state.cardPurchases).toHaveLength(1);
+ });
+ it('"sim, mas o valor era 300" não confirma',async()=>{
+  const a=await first();
+  const b=await send(model({content:'ok'}),a.session,'sim, mas o valor era 300');
+  expect(b.session.state.cardPurchases??[]).toHaveLength(0);
+ });
+});
+
 describe('cadastro leve do cartão',()=>{
  it('o usuário conta nome e dias e o cartão fica cadastrado',async()=>{
   const r=await send(model({calls:[tc('cadastrar_cartao',{nome:'Nubank',dia_fechamento:5,dia_vencimento:12,evidencia:'fecha dia 5 e vence dia 12'})]}),undefined,'Nubank, fecha dia 5 e vence dia 12');
