@@ -147,9 +147,30 @@ function installmentsIn(text) {
 var dm = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
 
 // shared/v2/personality.ts
-var isConfirmation = (m) => /^(sim|s|isso|isso mesmo|pode|pode sim|pode registrar|pode confirmar|pode alterar|pode excluir|claro|confirmo|confirma|confirmar|confirmado|ok|beleza|certo|fechado|manda ver|confirmar registro ficticio)[.! ]*$/.test(normalize(m.trim()));
+var CONFIRM_RE = /^(sim|s|isso|isso mesmo|pode|pode sim|pode registrar|pode confirmar|pode alterar|pode excluir|claro|confirmo|confirma|confirmar|confirmado|ok|beleza|certo|fechado|manda ver|confirmar registro ficticio)[.! ]*$/;
+var typoDistance = (a, b) => {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+  }
+  return d[a.length][b.length];
+};
+var CONFIRM_WORDS = ["pode", "claro", "confirmo", "confirma", "confirmado", "beleza", "certo", "fechado", "isso"];
+var typoConfirmation = (t) => {
+  if (/^s+i+m+[.! ]*$/.test(t) || /^ss+[.! ]*$/.test(t)) return true;
+  const words = t.replace(/[.!]+$/, "").split(/\s+/);
+  if (words.length > 2 || words.length === 2 && words[1] !== "sim") return false;
+  const w = words[0];
+  return w.length >= 4 && CONFIRM_WORDS.some((c) => typoDistance(w, c) <= 1);
+};
+var isConfirmation = (m) => {
+  const t = normalize(m.trim());
+  return CONFIRM_RE.test(t) || typoConfirmation(t);
+};
 var isRecordRequest = (m) => /^(nada( ainda)?[,.! ]+)?(so |apenas |entao |pode )?(registra|registre|registrar|anota|anote|anotar|lanca|lance|lancar)( isso| ai| a compra| esse gasto| por favor| pf| pfv)*[.! ]*$/.test(normalize(m.trim()));
-var isCancellation = (m) => /^(nao|n|cancela|cancelar|cancelado|deixa|deixa pra la|deixa quieto|melhor nao|nao quero|esquece|nao,? deixa como estava|nao,? cancela)[.!, ]*$/.test(normalize(m.trim()));
+var isCancellation = (m) => /^(n+a+o+|noa|nao|n|cancela|cancelar|cancelado|deixa|deixa pra la|deixa quieto|melhor nao|nao quero|esquece|nao,? deixa como estava|nao,? cancela)[.!, ]*$/.test(normalize(m.trim()));
 var isClear = (m) => /^(limpa|limpar|apaga|apagar) (nossa |a )?conversa[.!]*$/.test(normalize(m.trim()));
 var display = (v) => "type" in v ? `${v.description} \xB7 ${brl(Math.round(v.amount * 100))} \xB7 ${v.date} \xB7 ${v.category || "sem categoria"}` : `${v.description} \xB7 ${brl(Math.round(v.amount * 100))}${v.targetDate ? " \xB7 " + v.targetDate : ""}`;
 function cardPhrase(i, cards) {
@@ -727,7 +748,9 @@ function decideDebt(call, ctx) {
   const final = installment ?? calc;
   const first = a.primeiro_vencimento;
   const day = first ? Number(first.slice(8, 10)) : 0;
-  if (!first || first < ctx.today || first > dateOffset(ctx.today, 400) || !(new RegExp(`(^|[^0-9])0?${day}([^0-9]|$)`).test(ctx.message) || ctx.message.includes(first))) return { decision: "ask", reason: "DEBT_FIRST_DUE_MISSING", installment: final };
+  const said = (m) => new RegExp(`(^|[^0-9])0?${day}([^0-9]|$)`).test(m) || m.includes(first || "-");
+  const earlier = ctx.session.history.filter((h) => h.role === "user").slice(-2).map((h) => h.content).some((m) => new RegExp(`dia\\s*0?${day}\\b|(^|[^0-9])0?${day}/\\d{1,2}`).test(normalize(m)) || m.includes(first || "-"));
+  if (!first || first < ctx.today || first > dateOffset(ctx.today, 400) || !(said(ctx.message) || earlier)) return { decision: "ask", reason: "DEBT_FIRST_DUE_MISSING", installment: final };
   const description = String(a.descricao).trim();
   return { decision: "confirm", installment: final, debt: { description, principal, rate: rate2, ratePeriod: period2, termMonths: term, installment: final, firstDue: first, receivedInAccount: a.entrou_na_conta === true } };
 }

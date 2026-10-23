@@ -6,10 +6,22 @@ export type Intent='execucao'|'consulta'|'orientacao'|'alteracao'|'preferencias'
  * Yes/no replies. These are consulted ONLY while a valid pending operation exists (see agent.ts).
  * Without one, "sim", "não", "pode", "cancela"… are ordinary conversation and go to the model.
  */
-export const isConfirmation=(m:string)=>/^(sim|s|isso|isso mesmo|pode|pode sim|pode registrar|pode confirmar|pode alterar|pode excluir|claro|confirmo|confirma|confirmar|confirmado|ok|beleza|certo|fechado|manda ver|confirmar registro ficticio)[.! ]*$/.test(normalize(m.trim()));
+const CONFIRM_RE=/^(sim|s|isso|isso mesmo|pode|pode sim|pode registrar|pode confirmar|pode alterar|pode excluir|claro|confirmo|confirma|confirmar|confirmado|ok|beleza|certo|fechado|manda ver|confirmar registro ficticio)[.! ]*$/;
+/** Distância de edição com troca de letras vizinhas ("poed" → "pode" = 1). */
+const typoDistance=(a:string,b:string)=>{const d:number[][]=Array.from({length:a.length+1},(_,i)=>[i,...Array(b.length).fill(0)]);for(let j=1;j<=b.length;j++)d[0][j]=j;for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++){d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1));if(i>1&&j>1&&a[i-1]===b[j-2]&&a[i-2]===b[j-1])d[i][j]=Math.min(d[i][j],d[i-2][j-2]+1);}return d[a.length][b.length];};
+const CONFIRM_WORDS=['pode','claro','confirmo','confirma','confirmado','beleza','certo','fechado','isso'];
+/** Erro de digitação em respostas curtas: "poed", "podee", "simm", "cnfirmo". Só vale para uma palavra (ou "pode sim"). */
+const typoConfirmation=(t:string)=>{
+ if(/^s+i+m+[.! ]*$/.test(t)||/^ss+[.! ]*$/.test(t))return true;
+ const words=t.replace(/[.!]+$/,'').split(/\s+/);
+ if(words.length>2||(words.length===2&&words[1]!=='sim'))return false;
+ const w=words[0];
+ return w.length>=4&&CONFIRM_WORDS.some(c=>typoDistance(w,c)<=1);
+};
+export const isConfirmation=(m:string)=>{const t=normalize(m.trim());return CONFIRM_RE.test(t)||typoConfirmation(t);};
 /** "só registre", "anota isso", "nada ainda, só registra por favor": pedido de registrar o que acabou de ser dito. */
 export const isRecordRequest=(m:string)=>/^(nada( ainda)?[,.! ]+)?(so |apenas |entao |pode )?(registra|registre|registrar|anota|anote|anotar|lanca|lance|lancar)( isso| ai| a compra| esse gasto| por favor| pf| pfv)*[.! ]*$/.test(normalize(m.trim()));
-export const isCancellation=(m:string)=>/^(nao|n|cancela|cancelar|cancelado|deixa|deixa pra la|deixa quieto|melhor nao|nao quero|esquece|nao,? deixa como estava|nao,? cancela)[.!, ]*$/.test(normalize(m.trim()));
+export const isCancellation=(m:string)=>/^(n+a+o+|noa|nao|n|cancela|cancelar|cancelado|deixa|deixa pra la|deixa quieto|melhor nao|nao quero|esquece|nao,? deixa como estava|nao,? cancela)[.!, ]*$/.test(normalize(m.trim()));
 export const isClear=(m:string)=>/^(limpa|limpar|apaga|apagar) (nossa |a )?conversa[.!]*$/.test(normalize(m.trim()));
 type Shown=NonNullable<PendingOperation['before']>|NonNullable<PendingOperation['items']>[number];
 const display=(v:Shown)=>'type' in v?`${v.description} · ${brl(Math.round(v.amount*100))} · ${v.date} · ${v.category||'sem categoria'}`:`${v.description} · ${brl(Math.round(v.amount*100))}${v.targetDate?' · '+v.targetDate:''}`;
