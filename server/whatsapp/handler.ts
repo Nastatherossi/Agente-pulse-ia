@@ -80,7 +80,12 @@ async function runAgent(deps: Deps, phone: string, message: string, messageId: s
     if (ws && deps.ledger && before && !out.trace.errorCode) {
       await deps.ledger.apply(ws, diffEntries(before.transactions, out.session.state.transactions), `wa:${messageId}`);
     }
-    if (await deps.store.saveSession(phone, out.session, version)) return out;
+    if (await deps.store.saveSession(phone, out.session, version)) {
+      // Melhor esforço: falha ao registrar consumo nunca atrapalha a resposta ao usuário.
+      const u = out.trace.usage;
+      await deps.store.recordUsage({ phone, messageId, source, model: out.trace.model, modelCalls: out.trace.modelCalls ?? 0, inputTokens: u?.inputTokens ?? 0, outputTokens: u?.outputTokens ?? 0, status: out.trace.status ?? 'unknown', errorCode: out.trace.errorCode }).catch(() => undefined);
+      return out;
+    }
     // Outra mensagem do mesmo número gravou primeiro: relê e refaz.
   }
   throw new Error('SESSION_CONFLICT');

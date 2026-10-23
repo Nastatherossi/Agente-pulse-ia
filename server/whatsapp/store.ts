@@ -1,5 +1,7 @@
 import type { Contact, ContactStatus } from '../../shared/whatsapp/access.js';
 
+export type UsageRow = { phone: string; messageId: string; source: 'text' | 'audio'; model?: string; modelCalls: number; inputTokens: number; outputTokens: number; status: string; errorCode?: string };
+
 export type StoredSession = { session: unknown; version: number };
 
 /** Tudo que o canal precisa guardar. Duas implementações: Supabase (produção) e memória (testes). */
@@ -14,6 +16,8 @@ export interface Store {
   /** true se a mensagem é nova; false se já tinha sido recebida (Z-API pode reenviar o mesmo webhook). */
   claimMessage(messageId: string, phone: string, kind: 'text' | 'audio' | 'command' | 'other'): Promise<boolean>;
   recentMessageCount(phone: string, sinceMs: number): Promise<number>;
+  /** Consumo de IA por mensagem (tokens, modelo, erro). Nunca guarda o texto nem valores financeiros. */
+  recordUsage(row: UsageRow): Promise<void>;
   getSession(phone: string): Promise<StoredSession | null>;
   /** Grava só se a versão ainda for a lida (concorrência otimista). false = outra mensagem gravou antes. */
   saveSession(phone: string, session: unknown, expectedVersion: number | null): Promise<boolean>;
@@ -104,6 +108,10 @@ export class SupabaseStore implements Store {
     return rows.length;
   }
 
+  async recordUsage(r: UsageRow) {
+    await this.rest('whatsapp_usage', { method: 'POST', body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null }), prefer: 'resolution=ignore-duplicates,return=minimal' });
+  }
+
   async getSession(phone: string) {
     const rows = await this.rest<{ session: unknown; version: number }[]>(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&select=session,version&limit=1`);
     return rows[0] ?? null;
@@ -130,6 +138,8 @@ export class MemoryStore implements Store {
   sessions = new Map<string, { session: unknown; version: number }>();
   private tick = 0;
 
+  usage: UsageRow[] = [];
+  async recordUsage(r: UsageRow) { this.usage.push(r); }
   async getContact(phone: string) { return this.contacts.get(phone) ?? null; }
   async upsertContact(c: { phone: string; name?: string | null; status?: ContactStatus }) {
     const cur = this.contacts.get(c.phone);

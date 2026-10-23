@@ -1595,6 +1595,9 @@ var SupabaseStore = class {
     const rows = await this.rest(`whatsapp_messages?phone=eq.${encodeURIComponent(phone)}&received_at=gte.${encodeURIComponent(since)}&select=message_id&limit=500`);
     return rows.length;
   }
+  async recordUsage(r) {
+    await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
+  }
   async getSession(phone) {
     const rows = await this.rest(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&select=session,version&limit=1`);
     return rows[0] ?? null;
@@ -1822,7 +1825,11 @@ async function runAgent(deps, phone, message, messageId, source, name) {
     if (ws && deps.ledger && before && !out.trace.errorCode) {
       await deps.ledger.apply(ws, diffEntries(before.transactions, out.session.state.transactions), `wa:${messageId}`);
     }
-    if (await deps.store.saveSession(phone, out.session, version)) return out;
+    if (await deps.store.saveSession(phone, out.session, version)) {
+      const u = out.trace.usage;
+      await deps.store.recordUsage({ phone, messageId, source, model: out.trace.model, modelCalls: out.trace.modelCalls ?? 0, inputTokens: u?.inputTokens ?? 0, outputTokens: u?.outputTokens ?? 0, status: out.trace.status ?? "unknown", errorCode: out.trace.errorCode }).catch(() => void 0);
+      return out;
+    }
   }
   throw new Error("SESSION_CONFLICT");
 }
