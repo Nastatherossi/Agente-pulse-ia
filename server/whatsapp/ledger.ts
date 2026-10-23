@@ -21,7 +21,8 @@ export type CardUpsert = { name: string; closingDay: number; dueDay: number };
 export type ApplyResult = { waitingCard: number; placed: { count: number; total: number; dueDates: string[]; cardName: string } | null };
 /** Aviso de fatura: "fechou" (uma vez) ou "vence" (até 3 vezes, com pergunta se já pagou). */
 export type InvoiceNotice = { invoiceId: string; kind: 'closed' | 'due'; cardName: string; amount: number; closingDate: string; dueDate: string };
-export type Snapshot = { cards?: CardRow[]; initialBalanceCents: number; transactions: Entry[]; /** Categorias do usuário além das padrão do agente. */ customCategories: string[]; /** Lançamento criado mais recentemente (a que "isso" se refere). */ lastRecordId?: string };
+export type InvoiceRow = { card: string; competence: string; closingDate: string; dueDate: string; amount: number; status: 'planned' | 'overdue' | 'paid' };
+export type Snapshot = { invoices?: InvoiceRow[]; cards?: CardRow[]; initialBalanceCents: number; transactions: Entry[]; /** Categorias do usuário além das padrão do agente. */ customCategories: string[]; /** Lançamento criado mais recentemente (a que "isso" se refere). */ lastRecordId?: string };
 export type Changes = { create: Entry[]; update: Entry[]; remove: string[]; cardUpserts?: CardUpsert[]; cardPurchases?: CardPurchase[] };
 
 export interface Ledger {
@@ -177,6 +178,16 @@ export class SupabaseLedger implements Ledger {
     return rows.map(r => ({ id: r.id, name: r.name, closingDay: r.closing_day, dueDay: r.due_day }));
   }
 
+  private async invoiceRows(workspaceId: string): Promise<InvoiceRow[]> {
+    const from = new Date(Date.now() - 45 * 86_400_000).toISOString().slice(0, 10);
+    const [rows, cards] = await Promise.all([
+      this.rest<{ card_id: string; competence: string; closing_date: string; due_date: string; amount: number | string; status: 'planned' | 'overdue' | 'paid' }[]>(`finance_invoices?workspace_id=eq.${workspaceId}&due_date=gte.${from}&select=card_id,competence,closing_date,due_date,amount,status&order=due_date.asc&limit=40`),
+      this.cardRows(workspaceId),
+    ]);
+    const names = new Map(cards.map(c => [c.id, c.name]));
+    return rows.map(r => ({ card: (names.get(r.card_id) ?? 'cartão').slice(0, 30), competence: r.competence, closingDate: r.closing_date, dueDate: r.due_date, amount: Number(r.amount), status: r.status }));
+  }
+
   async invoiceNotices(ws: Workspace, today: string): Promise<InvoiceNotice[]> {
     const back = (n: number) => new Date(Date.parse(`${today}T12:00:00Z`) - n * 86_400_000).toISOString().slice(0, 10);
     const cols = 'id,card_id,amount,status,closing_date,due_date';
@@ -240,13 +251,14 @@ export class SupabaseLedger implements Ledger {
   }
 
   async load(ws: Workspace): Promise<Snapshot> {
-    const [summary, rows, cats, cardRows] = await Promise.all([
+    const [summary, rows, cats, cardRows, invoiceRows] = await Promise.all([
       this.rpc<{ opening_cents: number | string; net_cents: number | string }[]>('whatsapp_ledger_summary', { p_workspace: ws.workspaceId }),
       this.rest<{ id: string; type: 'income' | 'expense'; amount: number | string; description: string; effective_date: string | null; category_id: string | null; created_at: string }[]>(
         `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id,created_at&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
       ),
  this.categoryMap(ws.workspaceId),
       this.cardRows(ws.workspaceId),
+      this.invoiceRows(ws.workspaceId),
     ]);
     // Sem "embed" do PostgREST: finance_transactions tem duas chaves para finance_categories e a junção automática é ambígua (HTTP 300).
     const nameOf = new Map([...cats].map(([name, id]) => [id, name]));
@@ -264,7 +276,7 @@ export class SupabaseLedger implements Ledger {
     visible.reverse(); // do mais antigo para o mais novo
     const builtIn = new Set<string>(CATEGORIES);
     const customCategories = [...cats.keys()].filter(name => !builtIn.has(name) && name.length <= 30).slice(0, 40);
-    return { cards: cardRows, initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...(newest ? { lastRecordId: newest } : {}) };
+    return { invoices: invoiceRows, cards: cardRows, initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...(newest ? { lastRecordId: newest } : {}) };
   }
 
   async apply(ws: Workspace, changes: Changes, key: string) {

@@ -53,6 +53,10 @@ export class FinancialCoreV2 {
     if(transaction.card){if((this.state.cardPurchases?.length??0)>=20)throw new Error('SESSION_FULL');this.state.cardPurchases=[...(this.state.cardPurchases??[]),transaction];}
     else {if(this.state.transactions.length>=300)throw new Error('SESSION_FULL');this.state.transactions.push(transaction);}
     result={transaction,balanceCents:balanceCents(this.state)};break;}
+   case 'consultar_fatura':{
+    const key=a.card?cardKey(String(a.card)):'';
+    const list=(this.state.invoices??[]).filter(i=>(!a.month||i.dueDate.startsWith(String(a.month)))&&(!key||cardKey(i.card)===key)&&(a.month||i.status!=='paid')).sort((x,y)=>x.dueDate.localeCompare(y.dueDate));
+    result={invoices:list,month:a.month,card:a.card,totalCents:list.reduce((n,i)=>n+cents(i.amount),0)};break;}
    case 'cadastrar_cartao':{const card=a as unknown as NonNullable<State['cards']>[number];const key=cardKey(card.name);const rest=(this.state.cards??[]).filter(c=>cardKey(c.name)!==key);if(rest.length>=10)throw new Error('SESSION_FULL');this.state.cards=[...rest,card];result={card};break;}
    case 'listar_transacoes':{const p=a.period as Period|undefined;const items=this.state.transactions.filter(t=>(!a.type||t.type===a.type)&&(!p||(t.date>=p.start&&t.date<=p.end)));result={transactions:items.slice(-(a.limit as number)).reverse(),totalCount:items.length,returnedCount:Math.min(items.length,a.limit as number)};break;}
    case 'resumir_financas':result=summary(this.state,a.period as Period,a.type as 'receita'|'despesa'|undefined);break;

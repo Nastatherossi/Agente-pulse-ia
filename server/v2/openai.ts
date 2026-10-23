@@ -16,6 +16,7 @@ const descriptions:Record<keyof typeof toolSchemas,string>={
  consultar_gastos_categoria:'Total e registros de despesas de uma categoria no período.',
  projetar_despesas:'Estimativa calculada pelo core: média diária até asOf projetada até o fim do período.',
  atualizar_preferencias:'Altera apenas preferências de comunicação pedidas explicitamente; envie só os campos alterados (ou redefinir=true) e a evidencia literal. Não inferir personalidade.',
+ consultar_fatura:'Faturas dos cartões de crédito do usuário: valor, fechamento e vencimento. month = mês de VENCIMENTO da fatura (YYYY-MM); sem month, lista as faturas em aberto. card = nome do cartão, se ele disse.',
  cadastrar_cartao:'Cadastra (ou atualiza) um cartão de crédito quando o usuário diz o nome, o dia que a fatura fecha e o dia que vence. Só com os três dados ditos por ele; evidencia = trecho literal da mensagem.',
  definir_objetivo:'Cria uma meta financeira pedida explicitamente, com valor dito pelo usuário. Substituir meta existente gera pedido de confirmação.'
 };
