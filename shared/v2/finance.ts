@@ -36,6 +36,12 @@ export class FinancialCoreV2 {
    if(cardItems.length)this.state.cardPurchases=[...(this.state.cardPurchases??[]),...cardItems];
    const result={operationId:op.id,created:items,balanceCents:balanceCents(this.state)};this.completed.set(op.id,{payload:JSON.stringify(op),result});return structuredClone(result);
   }
+  if(op.kind==='debt'){
+   if((this.state.newDebts?.length??0)>=3)throw new Error('SESSION_FULL');
+   const debt={...op.debt!,id:op.id};
+   this.state.newDebts=[...(this.state.newDebts??[]),debt];
+   const result={operationId:op.id,debt,balanceCents:balanceCents(this.state)};this.completed.set(op.id,{payload:JSON.stringify(op),result});return structuredClone(result);
+  }
   if(op.kind==='goal'){if(JSON.stringify(this.state.goal)!==JSON.stringify(op.before)||!op.after)throw new Error('STALE_CONFIRMATION');this.state.goal=goal.parse(op.after);}
   else {const index=this.state.transactions.findIndex(t=>t.id===op.targetId);if(index<0||JSON.stringify(this.state.transactions[index])!==JSON.stringify(op.before))throw new Error('STALE_CONFIRMATION');if(op.kind==='delete')this.state.transactions.splice(index,1);else {if(!op.after||!('id' in op.after)||op.after.id!==op.targetId)throw new Error('STALE_CONFIRMATION');this.state.transactions[index]=storedTransaction.parse(op.after);}}
   const result={operationId:op.id,before:op.before,after:op.after,balanceCents:balanceCents(this.state)};this.completed.set(op.id,{payload:JSON.stringify(op),result});return structuredClone(result);

@@ -81,6 +81,7 @@ async function runAgent(deps: Deps, phone: string, message: string, messageId: s
       session.state.cards = before.cards?.map(c => ({ name: c.name, closingDay: c.closingDay, dueDay: c.dueDay })) ?? [];
     }
     session.state.cardPurchases = []; // compras no cartão valem só para a mensagem atual
+    session.state.newDebts = [];
     const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws), userName: name?.trim().split(/\s+/)[0] || undefined });
     out.session.expiresAt = now + DAY; // a sessão de WhatsApp não expira como a do laboratório
     // Grava no banco ANTES de responder e de salvar a sessão: se falhar, o usuário não recebe um "registrado" que não aconteceu.
@@ -89,6 +90,7 @@ async function runAgent(deps: Deps, phone: string, message: string, messageId: s
       const changes = diffEntries(before.transactions, after.transactions);
       changes.cardUpserts = diffCards(before.cards ?? [], after.cards ?? []);
       changes.cardPurchases = (after.cardPurchases ?? []).map(t => ({ id: t.id, amount: t.amount, description: t.description, date: t.date, category: t.category, installments: t.card?.installments ?? 1, cardName: t.card?.name }));
+      changes.debts = after.newDebts ?? [];
       const applied = (await deps.ledger.apply(ws, changes, `wa:${messageId}`)) as ApplyResult | undefined;
       if (applied?.placed) {
         const p = applied.placed;
@@ -100,6 +102,7 @@ async function runAgent(deps: Deps, phone: string, message: string, messageId: s
       }
     }
     out.session.state.cardPurchases = [];
+    out.session.state.newDebts = [];
     if (await deps.store.saveSession(phone, out.session, version)) return out;
     // Outra mensagem do mesmo número gravou primeiro: relê e refaz.
   }

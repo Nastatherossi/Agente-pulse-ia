@@ -11,6 +11,8 @@ export type UsageRecord = { phone: string; model: string | null; input_tokens: n
 export type NoticeKind = 'closed' | 'due';
 /** Aviso de fatura já enviado (um por fatura e tipo). */
 export type NoticeState = { invoice_id: string; kind: NoticeKind; workspace_id: string; phone: string; sent_count: number; last_sent_at: string | null; answered_at: string | null };
+/** Aviso de parcela de financiamento já enviado (um por dívida e vencimento). */
+export type DebtNoticeState = { debt_id: string; due_date: string; workspace_id: string; phone: string; sent_count: number; last_sent_at: string | null; answered_at: string | null };
 export type ReminderState = { transaction_id: string; workspace_id: string; phone: string; sent_count: number; last_sent_at: string | null; answered_at: string | null };
 
 export type StoredSession = { session: unknown; version: number };
@@ -32,6 +34,10 @@ export interface Store {
   usageSince(iso: string): Promise<UsageRecord[]>;
   reminderStates(ids: string[]): Promise<ReminderState[]>;
   noticeStates(ids: string[]): Promise<NoticeState[]>;
+  debtNoticeStates(ids: string[]): Promise<DebtNoticeState[]>;
+  markDebtNoticed(items: { debtId: string; dueDate: string; workspaceId: string }[], phone: string, atIso: string): Promise<void>;
+  awaitingDebtNotices(phone: string, sinceIso: string): Promise<DebtNoticeState[]>;
+  markDebtNoticeAnswered(items: { debtId: string; dueDate: string }[], atIso: string): Promise<void>;
   markNoticed(items: { invoiceId: string; kind: NoticeKind; workspaceId: string }[], phone: string, atIso: string): Promise<void>;
   awaitingNotices(phone: string, sinceIso: string): Promise<NoticeState[]>;
   markNoticeAnswered(items: { invoiceId: string; kind: NoticeKind }[], atIso: string): Promise<void>;
@@ -188,6 +194,28 @@ export class SupabaseStore implements Store {
     });
   }
 
+  async debtNoticeStates(ids: string[]) {
+    if (!ids.length) return [];
+    return this.rest<DebtNoticeState[]>(`whatsapp_debt_notices?debt_id=in.(${ids.map(encodeURIComponent).join(',')})&select=*`);
+  }
+
+  async markDebtNoticed(items: { debtId: string; dueDate: string; workspaceId: string }[], phone: string, atIso: string) {
+    const have = new Map((await this.debtNoticeStates(items.map(i => i.debtId))).map(r => [`${r.debt_id}:${r.due_date}`, r.sent_count]));
+    await this.rest('whatsapp_debt_notices?on_conflict=debt_id,due_date', {
+      method: 'POST',
+      body: JSON.stringify(items.map(i => ({ debt_id: i.debtId, due_date: i.dueDate, workspace_id: i.workspaceId, phone, sent_count: (have.get(`${i.debtId}:${i.dueDate}`) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
+      prefer: 'resolution=merge-duplicates,return=minimal',
+    });
+  }
+
+  awaitingDebtNotices(phone: string, sinceIso: string) {
+    return this.rest<DebtNoticeState[]>(`whatsapp_debt_notices?phone=eq.${encodeURIComponent(phone)}&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
+  }
+
+  async markDebtNoticeAnswered(items: { debtId: string; dueDate: string }[], atIso: string) {
+    for (const i of items) await this.rest(`whatsapp_debt_notices?debt_id=eq.${encodeURIComponent(i.debtId)}&due_date=eq.${i.dueDate}`, { method: 'PATCH', body: JSON.stringify({ answered_at: atIso }), prefer: 'return=minimal' });
+  }
+
   async noticeStates(ids: string[]) {
     if (!ids.length) return [];
     return this.rest<NoticeState[]>(`whatsapp_invoice_notices?invoice_id=in.(${ids.map(encodeURIComponent).join(',')})&select=*`);
@@ -221,8 +249,8 @@ export class SupabaseStore implements Store {
 
   async lastReminderAt(phone: string) {
     const q = (table: string) => this.rest<{ last_sent_at: string }[]>(`${table}?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
-    const [a, b] = await Promise.all([q('whatsapp_reminders'), q('whatsapp_invoice_notices')]);
-    return [a[0]?.last_sent_at, b[0]?.last_sent_at].filter((x): x is string => Boolean(x)).sort().at(-1) ?? null;
+    const [a, b, c] = await Promise.all([q('whatsapp_reminders'), q('whatsapp_invoice_notices'), q('whatsapp_debt_notices')]);
+    return [a[0]?.last_sent_at, b[0]?.last_sent_at, c[0]?.last_sent_at].filter((x): x is string => Boolean(x)).sort().at(-1) ?? null;
   }
 
   async setRemindersEnabled(phone: string, enabled: boolean) {
@@ -263,6 +291,13 @@ export class MemoryStore implements Store {
   async markReminded(items: { id: string; workspaceId: string }[], phone: string, atIso: string) {
     for (const i of items) { const cur = this.reminders.get(i.id); this.reminders.set(i.id, { transaction_id: i.id, workspace_id: i.workspaceId, phone, sent_count: (cur?.sent_count ?? 0) + 1, last_sent_at: atIso, answered_at: null }); }
   }
+  debtNotices = new Map<string, DebtNoticeState>();
+  async debtNoticeStates(ids: string[]) { return [...this.debtNotices.values()].filter(n => ids.includes(n.debt_id)); }
+  async markDebtNoticed(items: { debtId: string; dueDate: string; workspaceId: string }[], phone: string, atIso: string) {
+    for (const i of items) { const k = `${i.debtId}:${i.dueDate}`; const cur = this.debtNotices.get(k); this.debtNotices.set(k, { debt_id: i.debtId, due_date: i.dueDate, workspace_id: i.workspaceId, phone, sent_count: (cur?.sent_count ?? 0) + 1, last_sent_at: atIso, answered_at: null }); }
+  }
+  async awaitingDebtNotices(phone: string, sinceIso: string) { return [...this.debtNotices.values()].filter(n => n.phone === phone && !n.answered_at && (n.last_sent_at ?? '') >= sinceIso); }
+  async markDebtNoticeAnswered(items: { debtId: string; dueDate: string }[], atIso: string) { for (const i of items) { const n = this.debtNotices.get(`${i.debtId}:${i.dueDate}`); if (n) n.answered_at = atIso; } }
   notices = new Map<string, NoticeState>();
   async noticeStates(ids: string[]) { return [...this.notices.values()].filter(n => ids.includes(n.invoice_id)); }
   async markNoticed(items: { invoiceId: string; kind: NoticeKind; workspaceId: string }[], phone: string, atIso: string) {
@@ -272,7 +307,7 @@ export class MemoryStore implements Store {
   async markNoticeAnswered(items: { invoiceId: string; kind: NoticeKind }[], atIso: string) { for (const i of items) { const n = this.notices.get(`${i.invoiceId}:${i.kind}`); if (n) n.answered_at = atIso; } }
   async awaitingReminders(phone: string, sinceIso: string) { return [...this.reminders.values()].filter(r => r.phone === phone && !r.answered_at && (r.last_sent_at ?? '') >= sinceIso); }
   async markAnswered(ids: string[], atIso: string) { for (const i of ids) { const r = this.reminders.get(i); if (r) r.answered_at = atIso; } }
-  async lastReminderAt(phone: string) { return [...this.reminders.values(), ...this.notices.values()].filter(r => r.phone === phone).map(r => r.last_sent_at ?? '').sort().at(-1) || null; }
+  async lastReminderAt(phone: string) { return [...this.reminders.values(), ...this.notices.values(), ...this.debtNotices.values()].filter(r => r.phone === phone).map(r => r.last_sent_at ?? '').sort().at(-1) || null; }
   async setRemindersEnabled(phone: string, enabled: boolean) { const c = this.contacts.get(phone); if (c) (c as Contact).reminders_enabled = enabled; }
   async getContact(phone: string) { return this.contacts.get(phone) ?? null; }
   async upsertContact(c: { phone: string; name?: string | null; status?: ContactStatus }) {

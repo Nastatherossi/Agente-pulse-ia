@@ -1,7 +1,8 @@
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { brl, sessionSchema, todayBR } from '../../shared/v2/contracts.js';
 import { type Contact } from '../../shared/whatsapp/access.js';
-import { SupabaseLedger, type DueItem, type InvoiceNotice, type Ledger } from './ledger.js';
+import { amountsIn } from '../../shared/v2/policy.js';
+import { SupabaseLedger, type DebtDue, type DueItem, type InvoiceNotice, type Ledger } from './ledger.js';
 import { SupabaseStore, type Store } from './store.js';
 import { ZApiClient, type Messenger } from './zapi.js';
 
@@ -70,6 +71,18 @@ export function composeNotices(notices: InvoiceNotice[], name: string | undefine
   return `${lines.join('\n\n')} 💜`;
 }
 
+/** Parcela de financiamento que venceu: pergunta se já pagou e qual foi o valor. */
+export function composeDebtNotices(items: DebtDue[], name: string | undefined, today: string): string {
+  const line = (d: DebtDue) => {
+    const v = brl(Math.round(d.installment * 100));
+    return d.dueDate === today
+      ? `hoje vence a parcela do ${d.description} (${v}). Já pagou? Me conta o valor que você pagou que eu dou baixa pra você.`
+      : `a parcela do ${d.description} (${v}) venceu dia ${dm(d.dueDate)}. Já pagou? Me conta o valor que você pagou que eu dou baixa pra você.`;
+  };
+  const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+  return `${items.slice(0, MAX_NOTICES_PER_MESSAGE).map(d => (name ? `${name}, ${line(d)}` : cap(line(d)))).join('\n\n')} 💜`;
+}
+
 export type RunResult = { sent: number; skipped: number; failed: number; messages: { phone: string; text: string }[] };
 
 /** Roda uma vez por dia. `dry` só calcula o que enviaria. */
@@ -95,10 +108,13 @@ export async function runReminders(deps: ReminderDeps, opts: { dry?: boolean } =
         const sent = noticeStates.find(s => s.invoice_id === n.invoiceId && s.kind === n.kind)?.sent_count ?? 0;
         return sent < (n.kind === 'closed' ? 1 : MAX_ASKS_PER_ITEM);
       });
-      if (!items.length && !notices.length) { out.skipped++; continue; }
+      const allDebts = await deps.ledger.debtsDue(ws, today);
+      const debtStates = await deps.store.debtNoticeStates(allDebts.map(d => d.debtId));
+      const debts = allDebts.filter(d => (debtStates.find(s => s.debt_id === d.debtId && s.due_date === d.dueDate)?.sent_count ?? 0) < MAX_ASKS_PER_ITEM);
+      if (!items.length && !notices.length && !debts.length) { out.skipped++; continue; }
       const firstEver = !last;
       const nm = first(c.name);
-      const parts = [items.length ? composeReminder(items, nm, today, false) : '', notices.length ? composeNotices(notices, nm, today) : ''].filter(Boolean);
+      const parts = [items.length ? composeReminder(items, nm, today, false) : '', notices.length ? composeNotices(notices, nm, today) : '', debts.length ? composeDebtNotices(debts, nm, today) : ''].filter(Boolean);
       const text = parts.join('\n\n') + (firstEver ? `\n\n${optOutNote}` : '');
       out.messages.push({ phone: c.phone, text });
       if (opts.dry) continue;
@@ -108,6 +124,8 @@ export async function runReminders(deps: ReminderDeps, opts: { dry?: boolean } =
       if (asked.length) await deps.store.markReminded(asked, c.phone, at);
       const told = notices.slice(0, MAX_NOTICES_PER_MESSAGE).map(n => ({ invoiceId: n.invoiceId, kind: n.kind, workspaceId: ws.workspaceId }));
       if (told.length) await deps.store.markNoticed(told, c.phone, at);
+      const toldDebts = debts.slice(0, MAX_NOTICES_PER_MESSAGE).map(d => ({ debtId: d.debtId, dueDate: d.dueDate, workspaceId: ws.workspaceId }));
+      if (toldDebts.length) await deps.store.markDebtNoticed(toldDebts, c.phone, at);
       await rememberInSession(deps.store, c.phone, text, nowMs).catch(() => undefined);
       out.sent++;
       await sleep(2500 + Math.floor(Math.random() * 2500));
@@ -131,7 +149,7 @@ async function rememberInSession(store: Store, phone: string, text: string, nowM
   await store.saveSession(phone, s, stored.version);
 }
 
-const YES = /^(sim|s|caiu|ja caiu|caiu sim|ja foi|foi|foi sim|recebi|recebi sim|ja recebi|paguei|ja paguei|pago|ja ta pago|ta na conta|ja ta na conta|entrou|ja entrou|pode dar baixa|da baixa|dar baixa|pode dar|confirmo|isso|isso mesmo|ok|certo|beleza)[.! ]*$/;
+const YES = /^(sim|s|caiu|ja caiu|caiu sim|ja foi|foi|foi sim|recebi|recebi sim|ja recebi|paguei|ja paguei|pago|ja ta pago|ta na conta|ja ta na conta|entrou|ja entrou|pode dar baixa|da baixa|dar baixa|pode dar|confirmo|isso|isso mesmo|ok|certo|beleza)(\s+(pago\s+)?(r\$\s*)?\d[\d.,]*(\s*(reais|conto|pila))?)?[.! ]*$/;
 const NO = /^(nao|n|ainda nao|ainda n|nao caiu|ainda nao caiu|nao foi|ainda nao foi|nao recebi|ainda nao recebi|nao paguei|ainda nao paguei|amanha|depois|mais tarde)[.! ]*$/;
 const OFF = /^(parar|pare|para|desativar|desligar|cancelar)( os| as)? lembretes?( por favor)?[.! ]*$/;
 const ON = /^(ativar|voltar|religar|ligar|retomar)( os| as)? lembretes?[.! ]*$/;
@@ -153,12 +171,13 @@ export async function handleReminderReply(deps: ReminderDeps, phone: string, nam
   if (!yes && !no) return undefined;
   const nowMs = deps.now?.() ?? Date.now();
   const since = new Date(nowMs - REPLY_WINDOW_MS).toISOString();
-  const [waitingTx, waitingInv] = await Promise.all([deps.store.awaitingReminders(phone, since), deps.store.awaitingNotices(phone, since)]);
-  if (!waitingTx.length && !waitingInv.length) return undefined;
+  const [waitingTx, waitingInv, waitingDebt] = await Promise.all([deps.store.awaitingReminders(phone, since), deps.store.awaitingNotices(phone, since), deps.store.awaitingDebtNotices(phone, since)]);
+  if (!waitingTx.length && !waitingInv.length && !waitingDebt.length) return undefined;
   // Só o último lote perguntado (lançamentos e faturas mandados na mesma mensagem têm o mesmo horário).
-  const latest = [...waitingTx.map(w => w.last_sent_at ?? ''), ...waitingInv.map(w => w.last_sent_at ?? '')].sort().at(-1);
+  const latest = [...waitingTx.map(w => w.last_sent_at ?? ''), ...waitingInv.map(w => w.last_sent_at ?? ''), ...waitingDebt.map(w => w.last_sent_at ?? '')].sort().at(-1);
   const batch = waitingTx.filter(w => w.last_sent_at === latest);
   const batchInv = waitingInv.filter(w => w.last_sent_at === latest);
+  const batchDebt = waitingDebt.filter(w => w.last_sent_at === latest);
   if (no) return `Tranquilo${nm ? `, ${nm}` : ''}! Amanhã eu te pergunto de novo. 😉`;
   const today = deps.today?.() ?? todayBR();
   const ws = await deps.ledger.resolve(phone, name ?? undefined);
@@ -194,9 +213,28 @@ export async function handleReminderReply(deps: ReminderDeps, phone: string, nam
       }
     }
   }
-  if (!done.length && !paid.length && failed) return 'Não consegui dar baixa agora. Tenta de novo daqui a pouco, ou dá uma olhada no dashboard. 🙏';
-  if (!done.length && !paid.length) return `Já estava tudo certo por aqui${nm ? `, ${nm}` : ''}! 😉`;
-  const list = [...done.map(d => `${d.description} (${brl(Math.round(d.amount * 100))})`), ...paid.map(p => `fatura do ${p.cardName} (${brl(Math.round(p.amount * 100))})`)].join(', ');
+  const settled: { d: DebtDue; amount: number }[] = [];
+  if (batchDebt.length) {
+    const open = new Map((await deps.ledger.debtsDue(ws, today)).map(d => [`${d.debtId}:${d.dueDate}`, d]));
+    // "paguei 780": se a pessoa disse um único valor, é o valor pago; senão vale o da parcela.
+    const said = amountsIn(text);
+    for (const w of batchDebt) {
+      const d = open.get(`${w.debt_id}:${w.due_date}`);
+      if (!d) { await deps.store.markDebtNoticeAnswered([{ debtId: w.debt_id, dueDate: w.due_date }], at); continue; }
+      const amount = said.length === 1 && said[0] > 0 ? said[0] : d.installment;
+      try {
+        await deps.ledger.payDebt(ws, d, amount, today);
+        await deps.store.markDebtNoticeAnswered([{ debtId: d.debtId, dueDate: d.dueDate }], at);
+        settled.push({ d, amount });
+      } catch (e) {
+        failed++;
+        deps.log?.({ event: 'debt_pay_failed', message: e instanceof Error ? e.message : 'unknown' });
+      }
+    }
+  }
+  if (!done.length && !paid.length && !settled.length && failed) return 'Não consegui dar baixa agora. Tenta de novo daqui a pouco, ou dá uma olhada no dashboard. 🙏';
+  if (!done.length && !paid.length && !settled.length) return `Já estava tudo certo por aqui${nm ? `, ${nm}` : ''}! 😉`;
+  const list = [...done.map(d => `${d.description} (${brl(Math.round(d.amount * 100))})`), ...paid.map(p => `fatura do ${p.cardName} (${brl(Math.round(p.amount * 100))})`), ...settled.map(x => `parcela do ${x.d.description} (${brl(Math.round(x.amount * 100))})`)].join(', ');
   return `Boa${nm ? `, ${nm}` : ''}! Dei baixa em ${list}. 🎉${failed ? ' Um deles não consegui agora, tenta de novo daqui a pouco.' : ''}`;
 }
 

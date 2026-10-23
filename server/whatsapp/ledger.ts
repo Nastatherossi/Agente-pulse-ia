@@ -1,4 +1,5 @@
-import { CATEGORIES } from '../../shared/v2/contracts.js';
+import { CATEGORIES, todayBR, type DebtSpec } from '../../shared/v2/contracts.js';
+import { addMonths } from '../../shared/v2/debts.js';
 import { cardKey, findCard, invoiceFor } from '../../shared/v2/cards.js';
 
 /**
@@ -22,8 +23,12 @@ export type ApplyResult = { waitingCard: number; placed: { count: number; total:
 /** Aviso de fatura: "fechou" (uma vez) ou "vence" (até 3 vezes, com pergunta se já pagou). */
 export type InvoiceNotice = { invoiceId: string; kind: 'closed' | 'due'; cardName: string; amount: number; closingDate: string; dueDate: string };
 export type InvoiceRow = { card: string; competence: string; closingDate: string; dueDate: string; amount: number; status: 'planned' | 'overdue' | 'paid' };
+/** Financiamento confirmado nesta mensagem (id estável: gravar de novo não duplica). */
+export type NewDebt = DebtSpec & { id: string };
+/** Parcela de financiamento/empréstimo que venceu e ainda não foi paga. */
+export type DebtDue = { debtId: string; description: string; installment: number; dueDate: string };
 export type Snapshot = { invoices?: InvoiceRow[]; cards?: CardRow[]; initialBalanceCents: number; transactions: Entry[]; /** Categorias do usuário além das padrão do agente. */ customCategories: string[]; /** Lançamento criado mais recentemente (a que "isso" se refere). */ lastRecordId?: string };
-export type Changes = { create: Entry[]; update: Entry[]; remove: string[]; cardUpserts?: CardUpsert[]; cardPurchases?: CardPurchase[] };
+export type Changes = { create: Entry[]; update: Entry[]; remove: string[]; cardUpserts?: CardUpsert[]; cardPurchases?: CardPurchase[]; debts?: NewDebt[] };
 
 export interface Ledger {
   /** Acha (ou cria) a conta do número. Cada número tem seu workspace; criar a conta é o que o faz aparecer no login do dashboard. */
@@ -32,6 +37,10 @@ export interface Ledger {
   apply(ws: Workspace, changes: Changes, key: string): Promise<ApplyResult | void>;
   /** Faturas que fecharam ou venceram e ainda não foram pagas. */
   invoiceNotices(ws: Workspace, today: string): Promise<InvoiceNotice[]>;
+  /** Parcelas de financiamento vencidas (hoje ou até 30 dias atrás) e não pagas. */
+  debtsDue(ws: Workspace, today: string): Promise<DebtDue[]>;
+  /** Registra o pagamento da parcela (amortização + juros) e avança o próximo vencimento. */
+  payDebt(ws: Workspace, due: DebtDue, amount: number, date: string): Promise<void>;
   /** Paga a fatura (sai da conta principal) na data informada. */
   payInvoice(ws: Workspace, invoiceId: string, date: string): Promise<void>;
   /** Lançamentos previstos que já deveriam ter acontecido (data prevista até hoje, últimos 30 dias), ainda sem baixa. */
@@ -188,6 +197,42 @@ export class SupabaseLedger implements Ledger {
     return rows.map(r => ({ card: (names.get(r.card_id) ?? 'cartão').slice(0, 30), competence: r.competence, closingDate: r.closing_date, dueDate: r.due_date, amount: Number(r.amount), status: r.status }));
   }
 
+  async debtsDue(ws: Workspace, today: string): Promise<DebtDue[]> {
+    const from = new Date(Date.parse(`${today}T12:00:00Z`) - 30 * 86_400_000).toISOString().slice(0, 10);
+    const rows = await this.rest<{ id: string; description: string; installment_amount: number | string; next_due_date: string }[]>(
+      `finance_debts?workspace_id=eq.${ws.workspaceId}&status=eq.active&installment_amount=not.is.null&next_due_date=lte.${today}&next_due_date=gte.${from}&select=id,description,installment_amount,next_due_date&order=next_due_date.asc&limit=10`
+    );
+    return rows.map(r => ({ debtId: r.id, description: r.description, installment: Number(r.installment_amount), dueDate: r.next_due_date }));
+  }
+
+  async payDebt(ws: Workspace, due: DebtDue, amount: number, date: string) {
+    await this.rpc('finance_record_debt_payment', { target_debt_id: due.debtId, target_workspace_id: ws.workspaceId, target_account_id: ws.accountId, payment_amount: amount, target_payment_type: 'principal_interest', target_payment_method: null, target_paid_at: date, target_note: 'Parcela paga, confirmada pelo WhatsApp', target_idempotency_key: `wa-debt:${due.debtId}:${due.dueDate}` });
+    const [debt] = await this.rest<{ due_day: number | null; status: string }[]>(`finance_debts?id=eq.${due.debtId}&workspace_id=eq.${ws.workspaceId}&select=due_day,status`);
+    if (debt && debt.status !== 'paid') await this.rest(`finance_debts?id=eq.${due.debtId}&workspace_id=eq.${ws.workspaceId}`, { method: 'PATCH', body: JSON.stringify({ next_due_date: addMonths(due.dueDate, 1, debt.due_day ?? undefined) }), prefer: 'return=minimal' });
+  }
+
+  /** Financiamento: cria a dívida (id estável) e, se o dinheiro entrou, lança a entrada na conta. */
+  private async applyDebts(ws: Workspace, debts: NewDebt[], key: string) {
+    const today = todayBR();
+    let i = 0;
+    for (const d of debts) {
+      await this.rest('finance_debts?on_conflict=id', {
+        method: 'POST',
+        body: JSON.stringify({ id: d.id, workspace_id: ws.workspaceId, creditor: d.description, description: d.description, principal_original: d.principal, principal_balance: d.principal, rate: d.rate, rate_period: d.ratePeriod === 'annual' ? 'annual' : 'monthly', interest_type: 'compound', start_date: today, last_interest_date: today, next_due_date: d.firstDue, status: 'active', installment_amount: d.installment, installments_total: d.termMonths, due_day: Number(d.firstDue.slice(8, 10)) }),
+        prefer: 'resolution=ignore-duplicates,return=minimal',
+      });
+      if (d.receivedInAccount) {
+        let cats = await this.categoryMap(ws.workspaceId);
+        if (!cats.has('Financiamento')) {
+          await this.rest('finance_categories?on_conflict=workspace_id,name', { method: 'POST', body: JSON.stringify([{ workspace_id: ws.workspaceId, name: 'Financiamento', kind: 'income' }]), prefer: 'resolution=ignore-duplicates,return=minimal' });
+          cats = await this.categoryMap(ws.workspaceId);
+        }
+        await this.rpc('finance_create_transaction', { target_workspace_id: ws.workspaceId, target_account_id: ws.accountId, target_category_id: cats.get('Financiamento') ?? null, target_description: `${d.description} (valor recebido)`, target_amount: d.principal, target_type: 'income', target_status: 'confirmed', target_competence_date: today, target_expected_date: today, target_effective_date: today, target_origin: 'ai', target_payment_method: null, target_note: 'Registrado pelo Pulse no WhatsApp', target_idempotency_key: `${key}:debt${i}` });
+      }
+      i++;
+    }
+  }
+
   async invoiceNotices(ws: Workspace, today: string): Promise<InvoiceNotice[]> {
     const back = (n: number) => new Date(Date.parse(`${today}T12:00:00Z`) - n * 86_400_000).toISOString().slice(0, 10);
     const cols = 'id,card_id,amount,status,closing_date,due_date';
@@ -281,7 +326,8 @@ export class SupabaseLedger implements Ledger {
 
   async apply(ws: Workspace, changes: Changes, key: string) {
     const hasCards = Boolean(changes.cardUpserts?.length || changes.cardPurchases?.length);
-    if (!changes.create.length && !changes.update.length && !changes.remove.length && !hasCards) return;
+    const hasDebts = Boolean(changes.debts?.length);
+    if (!changes.create.length && !changes.update.length && !changes.remove.length && !hasCards && !hasDebts) return;
     let cats = await this.categoryMap(ws.workspaceId);
     // Categoria nova pedida pelo usuário: cria no workspace (aparece também no dashboard).
     const wanted = [...new Set([...changes.create, ...changes.update, ...(changes.cardPurchases ?? [])].map(e => e.category).filter((c): c is string => Boolean(c) && !cats.has(c as string)))];
@@ -330,6 +376,7 @@ export class SupabaseLedger implements Ledger {
     for (const id of changes.remove) {
       await this.rest(`finance_transactions?id=eq.${id}&workspace_id=eq.${ws.workspaceId}`, { method: 'DELETE' });
     }
+    if (hasDebts) await this.applyDebts(ws, changes.debts ?? [], key);
     if (hasCards) return this.applyCards(ws, changes, key, catId);
   }
 }
@@ -347,6 +394,12 @@ export class MemoryLedger implements Ledger {
   cardPlaced: { workspaceId: string; cardName: string; purchase: CardPurchase }[] = [];
   cardWaiting: { workspaceId: string; purchase: CardPurchase }[] = [];
   invoices = new Map<string, InvoiceNotice[]>();
+  /** Dívidas de teste: criadas por apply e/ou colocadas direto. */
+  debts: { workspaceId: string; debt: NewDebt }[] = [];
+  debtDue = new Map<string, DebtDue[]>();
+  debtPayments: { debtId: string; amount: number; date: string }[] = [];
+  async debtsDue(ws: Workspace, today: string) { return (this.debtDue.get(ws.workspaceId) ?? []).filter(d => d.dueDate <= today && !this.debtPayments.some(p => p.debtId === d.debtId && p.date >= d.dueDate)); }
+  async payDebt(_ws: Workspace, due: DebtDue, amount: number, date: string) { this.debtPayments.push({ debtId: due.debtId, amount, date }); }
   paidInvoices: { id: string; date: string }[] = [];
   async invoiceNotices(ws: Workspace, today: string) { return (this.invoices.get(ws.workspaceId) ?? []).filter(n => !this.paidInvoices.some(p => p.id === n.invoiceId) && (n.kind === 'closed' ? n.closingDate <= today : n.dueDate <= today)); }
   async payInvoice(_ws: Workspace, id: string, date: string) { this.paidInvoices.push({ id, date }); }
@@ -394,6 +447,7 @@ export class MemoryLedger implements Ledger {
       if (at >= 0) w.entries[at] = { ...w.entries[at], ...e };
     }
     w.entries = w.entries.filter(x => !changes.remove.includes(x.id));
+    for (const d of changes.debts ?? []) this.debts.push({ workspaceId: ws.workspaceId, debt: structuredClone(d) });
     if (!changes.cardUpserts?.length && !changes.cardPurchases?.length) return;
     const list = this.cards.get(ws.workspaceId) ?? [];
     for (const u of changes.cardUpserts ?? []) {

@@ -1,5 +1,6 @@
 import {installmentsIn,findCard} from './cards.js';
-import {CATEGORIES,storedTransaction,goal,normalize,defaultPreferences,type Session,type Period,type ModelCall,type PendingOperation,type State} from './contracts.js';
+import {pmt,type RatePeriod} from './debts.js';
+import {CATEGORIES,type DebtSpec,storedTransaction,goal,normalize,defaultPreferences,type Session,type Period,type ModelCall,type PendingOperation,type State} from './contracts.js';
 export const dateOffset=(date:string,days:number)=>new Date(Date.parse(date+'T12:00:00Z')+days*86400000).toISOString().slice(0,10);
 export const monthPeriod=(today:string,offset=0):Period=>{const d=new Date(today+'T12:00:00Z');const start=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+offset,1)),end=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+offset+1,0));return {start:start.toISOString().slice(0,10),end:end.toISOString().slice(0,10)};};
 /** Deterministic keyword categorization, applied only when the model leaves the category empty. Obvious cases only; anything ambiguous stays uncategorized and the user is asked. */
@@ -216,6 +217,32 @@ export function decideCard(call:ModelCall,ctx:PolicyContext):WriteDecision&{card
  if(!key||!recent.includes(key))return {decision:'block',reason:'CARD_NAME_NOT_IN_MESSAGE'};
  return {decision:'execute',card:{name,closingDay,dueDay}};
 }
+/**
+ * registrar_financiamento: nunca grava direto. Os números (valor, prazo, juros, parcela) precisam estar no que o usuário
+ * disse nas últimas mensagens; a parcela é calculada aqui (tabela Price) quando ele não diz. Falta o primeiro vencimento: pergunta.
+ */
+export function decideDebt(call:ModelCall,ctx:PolicyContext):{decision:'confirm'|'block'|'ask';reason?:string;debt?:DebtSpec;installment?:number}{
+ const a=call.arguments;
+ if(ctx.risk)return {decision:'block',reason:'RISK_CONTEXT'};
+ if(a.natureza!=='fato_ocorrido')return {decision:'block',reason:'NOT_A_FACT'};
+ const recent=[...ctx.session.history.filter(h=>h.role==='user').slice(-3).map(h=>h.content),ctx.message].join(' \n ');
+ if(!contains(recent,String(a.evidencia)))return {decision:'block',reason:'EVIDENCE_NOT_IN_MESSAGE'};
+ const principal=a.valor as number,term=a.prazo_meses as number,rate=a.juros_percentual as number;
+ const nums=amountsIn(recent),raw=normalize(recent);
+ if(!nums.some(v=>cents(v)===cents(principal)))return {decision:'block',reason:'AMOUNT_NOT_IN_MESSAGE'};
+ if(!new RegExp(`(^|[^0-9])${term}([^0-9]|$)`).test(raw)&&!(term%12===0&&new RegExp(`(^|[^0-9])${term/12}\\s*anos?\\b`).test(raw)))return {decision:'block',reason:'TERM_NOT_IN_MESSAGE'};
+ if(rate>0&&!new RegExp(`(^|[^0-9])${String(rate).replace('.','[.,]')}\\s*(%|por cento|a\\.?\\s?a\\b|a\\.?\\s?m\\b|ao\\s+(ano|mes))`).test(raw))return {decision:'block',reason:'RATE_NOT_IN_MESSAGE'};
+ const period:RatePeriod=a.periodo_juros==='mensal'?'monthly':'annual';
+ let installment=a.parcela as number|undefined;
+ if(installment!==undefined&&!nums.some(v=>cents(v)===cents(installment!)))installment=undefined; // parcela que o usuário não disse: o código calcula
+ const calc=pmt(principal,rate,period,term);
+ const final=installment??calc;
+ const first=a.primeiro_vencimento as string|undefined;
+ const day=first?Number(first.slice(8,10)):0;
+ if(!first||first<ctx.today||first>dateOffset(ctx.today,400)||!(new RegExp(`(^|[^0-9])0?${day}([^0-9]|$)`).test(ctx.message)||ctx.message.includes(first)))return {decision:'ask',reason:'DEBT_FIRST_DUE_MISSING',installment:final};
+ const description=String(a.descricao).trim();
+ return {decision:'confirm',installment:final,debt:{description,principal,rate,ratePeriod:period,termMonths:term,installment:final,firstDue:first,receivedInAccount:a.entrou_na_conta===true}};
+}
 /** Resolves the record an edit/deletion refers to. Exactly one match, or nothing is prepared. */
 /** The record the user most likely means by "isso", "esse valor", "o último": the one registered most recently. */
 export function lastRecord(state:State):State['transactions'][number]|undefined{
@@ -264,6 +291,9 @@ export function prepareChange(call:ModelCall,ctx:PolicyContext,now=Date.now()):{
 export function goalOperation(next:NonNullable<State['goal']>,state:State,now=Date.now()):PendingOperation{
  return {id:crypto.randomUUID(),kind:'goal',...(state.goal?{before:state.goal}:{}),after:next,createdAt:now,expiresAt:now+5*60000};
 }
+export function debtOperation(debt:DebtSpec,now=Date.now()):PendingOperation{
+ return {id:crypto.randomUUID(),kind:'debt',debt,createdAt:now,expiresAt:now+5*60000};
+}
 export function createOperation(entries:NewEntry[],now=Date.now()):PendingOperation{
  return {id:crypto.randomUUID(),kind:'create',items:entries.map(e=>({...e})),createdAt:now,expiresAt:now+5*60000};
 }
@@ -276,6 +306,8 @@ export function blockedMessage(reason:string|undefined):string{
   case 'CHANGE_NOT_IN_MESSAGE':return 'Não entendi a correção com segurança, então não alterei nada. Me diz qual lançamento e o valor ou dado certo?';
   case 'TARGET_AMBIGUOUS':return 'Há mais de um lançamento possível. Informe a descrição e a data ou o valor original para identificar um único registro.';
   case 'TARGET_NOT_FOUND':return 'Não encontrei esse lançamento. Pode me dizer a descrição e a data ou o valor original?';
+  case 'TERM_NOT_IN_MESSAGE':return 'Não peguei o prazo com certeza. Em quantos meses (ou anos) é o financiamento?';
+  case 'RATE_NOT_IN_MESSAGE':return 'Não peguei a taxa de juros com certeza. Qual é a taxa e se é ao mês ou ao ano?';
   case 'INSTALLMENTS_NOT_IN_MESSAGE':return 'Não ficou claro em quantas parcelas foi. Me diz o valor total e quantas vezes?';
   case 'CARD_DAYS_NOT_IN_MESSAGE':return 'Não peguei os dias com certeza. Me diz de novo: que dia a fatura fecha e que dia vence?';
   case 'CARD_NAME_NOT_IN_MESSAGE':return 'Qual é o nome desse cartão?';
@@ -293,7 +325,7 @@ export function confirmLead(reason:string|undefined):string{
   case 'TENTATIVE_LANGUAGE':return 'Só pra ter certeza de que isso já aconteceu:';
   case 'MULTIPLE_AMOUNTS':return 'Vi mais de um valor na sua mensagem, então quero ter certeza:';
   case 'INSTALLMENTS':return 'Compra parcelada, então confirmo com você:';
-  case 'HIGH_VALUE':return 'É um valor alto, então confirmo com você:';
+  case 'HIGH_VALUE':return 'Só confirmando o valor:';
   case 'RELATIVE_DATE':return 'Só confirmando a data:';
   default:return '';
  }
