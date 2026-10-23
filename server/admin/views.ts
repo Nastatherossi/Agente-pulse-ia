@@ -1,13 +1,14 @@
 import type { Contact } from '../../shared/whatsapp/access.js';
 import type { TurnDetail, ReminderState } from '../whatsapp/store.js';
-import type { Summary, AdminDeps, ReminderPreview } from './panel.js';
+import type { Summary, ReminderPreview, PriceInfo } from './panel.js';
+import { priceFor } from './prices.js';
 import { TRACKING_SINCE, esc, fmtDate, fmtFull, fmtTime, fmtInt, fmtUsd, fmtShort, fmtPhone, maskPhone, relTime, dayLabel, weekday, STATUS, ERROR_HELP, problemKind } from './format.js';
 import { icon, mark } from './icons.js';
 
 /* Telas do painel. Regras: nada de estilo inline (a CSP bloqueia), todo texto vindo do banco passa por esc(),
    e ausência de dado aparece como "sem registro" ou "—", nunca como zero. */
 
-export type ViewCtx = { now: number; contacts: Contact[]; problems: number; pending: number; flash?: string; price?: AdminDeps['price']; can?: { resolve: boolean; reminders: boolean } };
+export type ViewCtx = { now: number; contacts: Contact[]; problems: number; pending: number; flash?: string; prices?: PriceInfo; can?: { resolve: boolean; reminders: boolean } };
 
 const trackingLabel = dayLabel(TRACKING_SINCE);
 const plural = (n: number, one: string, many: string) => `${fmtInt(n)} ${n === 1 ? one : many}`;
@@ -332,21 +333,57 @@ export function aiPage(s: Summary, ctx: ViewCtx) {
       return `<li>${avatar(p.contact.name, p.contact.phone)}<div class="rank-body"><div class="rank-line"><span class="rank-name">${esc(p.contact.name || maskPhone(p.contact.phone))}</span><span class="figure-sm">${fmtInt(t)}<small>${share}%</small></span></div><meter min="0" max="${max}" value="${t}" aria-label="Tokens">${t}</meter><span class="rank-sub">${plural(p.messages30d, 'mensagem', 'mensagens')}, média ${fmtInt(Math.round(t / p.messages30d))} por mensagem${p.cost !== undefined ? `, ${esc(fmtUsd(p.cost))}` : ''}</span></div></li>`;
     })
     .join('');
-  const models = s.models.map(m => `<li><span class="model-name">${icon('cpu')}<code>${esc(m.model)}</code></span><span>${plural(m.messages, 'mensagem', 'mensagens')}</span><span class="figure-sm">${fmtShort(m.tokens)} tokens</span></li>`).join('');
+  const pricesBlock = priceEditor(s, ctx);
 
   return shell(
     'ia',
     ctx,
     { title: 'IA e custos', lead: 'Consumo da OpenAI pelo agente do WhatsApp nos últimos 30 dias' },
     `<section class="stats" aria-label="Resumo de consumo">${stats}</section>
-${priced ? '' : `<div class="notice">${icon('info')}<p><strong>Custo indisponível — preços não configurados.</strong> Defina <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> (dólares por 1 milhão de tokens) na Vercel para o painel estimar o custo.</p></div>`}
+${priced ? (s.unpriced.length ? `<div class="notice warn">${icon('info')}<p><strong>Custo parcial.</strong> Sem preço para ${s.unpriced.map(u => `<code>${esc(u.model)}</code> (${plural(u.messages, 'mensagem', 'mensagens')})`).join(', ')}. Preencha abaixo ou defina um preço padrão.</p></div>` : '') : `<div class="notice">${icon('info')}<p><strong>Custo indisponível — preços não configurados.</strong> Preencha o preço por modelo em <a href="#precos">Preços da OpenAI</a>, logo abaixo.</p></div>`}
 <section class="block"><div class="block-head"><h2>Tokens por dia</h2></div>${ranged('tok', (d, id) => tokenChart(d, id, priced), s.daily, `<p class="legend"><span class="key in"></span>entrada<span class="key out"></span>saída<span class="key off"></span>sem registro</p>`)}</section>
-<div class="split wide-left">
- <section class="block"><div class="block-head"><h2>Consumo por pessoa</h2></div>${rows ? `<ol class="rank">${rows}</ol>` : emptyState('users', 'Sem consumo', 'Ninguém usou o Pulse nos últimos 30 dias.')}</section>
- <section class="block"><div class="block-head"><h2>Modelos usados</h2></div>${models ? `<ul class="models">${models}</ul>` : emptyState('cpu', 'Sem registros', 'Nenhuma chamada à OpenAI nos últimos 30 dias.')}</section>
-</div>
+${pricesBlock}
+<section class="block"><div class="block-head"><h2>Consumo por pessoa</h2></div>${rows ? `<ol class="rank">${rows}</ol>` : emptyState('users', 'Sem consumo', 'Ninguém usou o Pulse nos últimos 30 dias.')}</section>
 <p class="foot">Consumo registrado desde ${trackingLabel}/2026. Valores de custo são estimativas; a fatura oficial está no painel da OpenAI.</p>`
   );
+}
+
+/* ------------------------------------------------------------------ preços por modelo */
+
+const fmtPrice = (n?: number) => (n === undefined ? '' : n.toLocaleString('pt-BR', { maximumFractionDigits: 4 }));
+
+function priceEditor(s: Summary, ctx: ViewCtx) {
+  const info = ctx.prices;
+  const table = info?.table;
+  const editable = Boolean(info?.editable);
+  const from = info?.from ?? 'nenhum';
+  const badge = from === 'painel' ? '<span class="status authorized"><i aria-hidden="true"></i>Definidos aqui no painel</span>' : from === 'vercel' ? '<span class="status neutral"><i aria-hidden="true"></i>Vindos da Vercel</span>' : '<span class="status pending"><i aria-hidden="true"></i>Sem preço</span>';
+  const used = s.models.filter(m => m.model !== 'não informado');
+  const inp = (name: string, value: string, label: string, placeholder = '') =>
+    `<label class="price-in"><span class="sr-only">${esc(label)}</span><span class="cur" aria-hidden="true">US$</span><input name="${name}" value="${esc(value)}" inputmode="decimal" autocomplete="off" placeholder="${esc(placeholder)}" pattern="\\s*\\d+([.,]\\d+)?\\s*"${editable ? '' : ' disabled'}></label>`;
+  const def = table?.default;
+  const rows = used
+    .map((m, n) => {
+      const own = table?.models[m.model];
+      const eff = priceFor(table, m.model);
+      return `<tr><td class="who-cell"><input type="hidden" name="model_${n}" value="${esc(m.model)}"><span class="model-name">${icon('cpu')}<code>${esc(m.model)}</code></span><span class="phone">${plural(m.messages, 'mensagem', 'mensagens')}, ${fmtShort(m.tokens)} tokens</span></td>
+<td data-l="Entrada (1M tokens)">${inp(`in_${n}`, fmtPrice(own?.inputPerMTok), `Preço de entrada de ${m.model}`, def ? `padrão ${fmtPrice(def.inputPerMTok)}` : '')}</td>
+<td data-l="Saída (1M tokens)">${inp(`out_${n}`, fmtPrice(own?.outputPerMTok), `Preço de saída de ${m.model}`, def ? `padrão ${fmtPrice(def.outputPerMTok)}` : '')}</td>
+<td data-l="Custo em 30 dias" class="num">${eff ? esc(fmtUsd(m.cost)) : '<span class="na">sem preço</span>'}${eff && !own ? '<small class="hint">pelo padrão</small>' : ''}</td></tr>`;
+    })
+    .join('');
+  const defRow = `<tr class="default-row"><td class="who-cell"><span class="pname">Padrão</span><span class="phone">qualquer modelo sem preço próprio</span></td>
+<td data-l="Entrada (1M tokens)">${inp('default_in', fmtPrice(def?.inputPerMTok), 'Preço padrão de entrada')}</td>
+<td data-l="Saída (1M tokens)">${inp('default_out', fmtPrice(def?.outputPerMTok), 'Preço padrão de saída')}</td><td></td></tr>`;
+  const note = info?.storeMissing
+    ? `<div class="notice warn">${icon('info')}<p><strong>Edição desligada:</strong> a tabela de configurações (<code>admin_settings</code>) ainda não existe no banco. Enquanto isso, valem as variáveis <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> da Vercel.</p></div>`
+    : '';
+  return `<section class="block flush" id="precos"><div class="block-head pad"><h2>Preços da OpenAI</h2>${badge}</div>
+<p class="block-lead">Dólares por 1 milhão de tokens, como na tabela de preços da OpenAI. Pode usar vírgula ou ponto. Em branco, o modelo usa o preço padrão.</p>
+${note}<form method="post" action="/admin?v=ia" class="price-form" data-busy="Salvando…"><input type="hidden" name="action" value="prices">
+<div class="table-wrap"><table class="data prices"><caption class="sr-only">Preço por modelo</caption><thead><tr><th scope="col">Modelo</th><th scope="col">Entrada</th><th scope="col">Saída</th><th scope="col" class="num">Custo em 30 dias</th></tr></thead><tbody>${rows}${defRow}</tbody></table></div>
+${editable ? `<div class="form-foot"><p class="note">${from === 'vercel' ? 'Ao salvar, os preços do painel passam a valer no lugar dos da Vercel.' : 'Apague tudo e salve para voltar a usar os valores da Vercel.'}</p><button type="submit" class="btn primary">Salvar preços</button></div>` : ''}
+</form></section>`;
 }
 
 /* ------------------------------------------------------------------ problemas */
@@ -413,14 +450,15 @@ export function turnPage(t: TurnDetail | null, ctx: ViewCtx) {
 
 export function configPage(ctx: ViewCtx) {
   const row = (ic: string, title: string, state: string, tone: string, text: string) => `<li class="setting">${icon(ic)}<div><div class="setting-head"><strong>${esc(title)}</strong><span class="status ${tone}"><i aria-hidden="true"></i>${esc(state)}</span></div><p>${text}</p></div></li>`;
-  const p = ctx.price;
+  const info = ctx.prices;
+  const from = info?.from ?? 'nenhum';
   return shell(
     'config',
     ctx,
     { title: 'Configuração', lead: 'O que está ligado no painel. Para mudar, edite as variáveis na Vercel e faça um novo deploy.' },
     `<section class="block"><ul class="settings">
 ${row('lock', 'Acesso ao painel', 'Ativo', 'authorized', 'Senha com 16 ou mais caracteres em <code>ADMIN_PASSWORD</code>. A sessão vale 30 dias neste navegador; o botão Sair encerra.')}
-${row('coin', 'Preço do modelo', p ? 'Configurado' : 'Não configurado', p ? 'authorized' : 'pending', p ? `US$ ${esc(p.inputPerMTok)} por 1 milhão de tokens de entrada e US$ ${esc(p.outputPerMTok)} de saída (<code>OPENAI_PRICE_IN_PER_MTOK</code>, <code>OPENAI_PRICE_OUT_PER_MTOK</code>).` : 'Sem preço, o painel mostra tokens mas não custo. Defina <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> em dólares por 1 milhão de tokens.')}
+${row('coin', 'Preço do modelo', from === 'painel' ? 'Definido no painel' : from === 'vercel' ? 'Da Vercel' : 'Não configurado', from === 'nenhum' ? 'pending' : 'authorized', `Editável em <a href="/admin?v=ia#precos">IA e custos</a>, por modelo e com um preço padrão. ${from === 'vercel' ? 'Hoje vale o das variáveis <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> da Vercel.' : from === 'painel' ? 'Os valores do painel valem por cima dos da Vercel.' : 'Sem preço, o painel mostra tokens, mas não custo.'}`)}
 ${row('pulse', 'Registro de consumo', 'Ativo', 'authorized', `Cada mensagem do WhatsApp grava tokens, modelo e status desde ${trackingLabel}/2026. O painel lê os últimos 30 dias.`)}
 ${row('message', 'Texto das conversas', 'Só em problemas', 'neutral', 'O texto da mensagem e da resposta só é guardado quando o agente erra, não entende ou recusa, para você depurar.')}
 ${row('bell', 'Lembretes proativos', 'Todo dia às 9h', 'authorized', 'Agendados no <code>vercel.json</code> (cron da Vercel). Ligue ou desligue por pessoa em <a href="/admin?v=lembretes">Lembretes</a>. As regras (1 mensagem por dia, até 3 perguntas por lançamento) ficam no código.')}
