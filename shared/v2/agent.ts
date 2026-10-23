@@ -5,7 +5,7 @@ import {FinancialCoreV2} from './finance.js';
 import {isConfirmation,isRecordRequest,isCancellation,isClear,clearContext,describeOperation,type Intent} from './personality.js';
 import {findCard,type Card} from './cards.js';
 import {cardPhrase} from './personality.js';
-import {categoryInReply,amountsIn,riskSignal,decideCreate,decideCard,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
+import {cleanCategoryName,categoryInReply,amountsIn,riskSignal,decideCreate,decideCard,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
 import {groundedText,withoutNumbers,asksToConfirmInText} from './grounding.js';
 /** Tool errors the model can fix by itself: the error (with the schema message) goes back to it for another try. */
 const RETRYABLE=new Set(['VALIDATION_FAILED','UNKNOWN_TOOL']);
@@ -87,7 +87,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  // Auxiliary signal only: in a turn that shows emotional risk no financial machinery runs, and the model answers.
  const risk=riskSignal(message);
  const interpretationSource:Trace['interpretationSource']=provider.mode==='real'?'model':undefined;
- let confirmation:Trace['confirmation']='none',directAnswer:string|undefined,pendingAnswer:string|undefined,blockedAnswer:string|undefined,kind:Intent|undefined;
+ let createdCategory:string|undefined,confirmation:Trace['confirmation']='none',directAnswer:string|undefined,pendingAnswer:string|undefined,blockedAnswer:string|undefined,kind:Intent|undefined;
  const repeatedMessage=session.lastRequests.some(r=>r.messageHash===hash&&(r.trace as Trace)?.steps?.some(s=>(s.name==='registrar_transacao'||s.name==='registrar_confirmado')&&s.status==='success'));
  const priorHistory=session.history.length;const command=memoryCommand(session,message);const contextInvalidated=command!==undefined&&priorHistory>0&&session.history.length===0;
  if(command===undefined&&!risk)observeMemory(session,message);
@@ -167,8 +167,12 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
   const pickedCategory=op&&live&&op.kind==='create'&&!risk&&!no?categoryInReply(message,session.state.categories??[]):undefined;
   const confirmsWithCategory=Boolean(pickedCategory)&&/^\s*(sim|confirmo|confirma|confirmado|pode|ok|isso|claro|beleza|fechado|certo|manda ver)\b/.test(normalize(message));
   if(pickedCategory)for(const item of op!.items!)item.category=pickedCategory;
-  // "sim, em despesas da casa": confirma mesmo quando o complemento não é uma categoria que eu conheça (o registro fica sem categoria e eu aviso).
-  const yesWithPhrase=Boolean(op&&live&&op.kind==='create'&&!risk&&!no&&!pickedCategory&&/^\s*(sim|confirmo|confirma|pode|ok|isso|claro|beleza|fechado|certo)\b[,.! ]+(em|na|no|como|de|pra|para|categoria)\b(\s+\S+){1,4}\s*[.!]*$/.test(normalize(message)));
+  // "sim, em despesas da casa" / "sim, na categoria casa": o usuário já escolheu a categoria. Se ela não existe, é criada.
+  const phrase=op&&live&&op.kind==='create'&&!risk&&!no&&!pickedCategory?message.match(/^\s*(?:sim|confirmo|confirma|pode|ok|isso|claro|beleza|fechado|certo)\b[,.! ]+(?:em|na|no|como|de|pra|para|categoria)\b\s+(.+?)\s*[.!]*$/i):null;
+  const asked=phrase&&phrase[1].split(/\s+/).length<=5?cleanCategoryName(phrase[1].replace(/^(?:(?:a|o|as|os)\s+)?(?:categoria\s+)?(?:(?:a|o|as|os)\s+)?/i,'')):undefined;
+  const newCategory=asked&&(session.state.categories??[]).length<40?asked:undefined;
+  if(newCategory)for(const item of op!.items!)item.category=newCategory;
+  const yesWithPhrase=Boolean(newCategory);
   const yes=!risk&&(isConfirmation(message)||confirmsWithCategory||yesWithPhrase);
   // Only the category was given ("lança como lazer"): update the pending record and ask again, never write silently.
   const onlyCategory=Boolean(pickedCategory)&&!yes&&message.length<=80;
@@ -182,6 +186,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
    const result=core.confirm(op!);
    steps.push({order:1,id:op!.id,name:op!.kind==='create'?'registrar_confirmado':op!.kind==='goal'?'alterar_objetivo':op!.kind==='delete'?'excluir_transacao':'editar_transacao',arguments:{operationId:op!.id},status:'success',result,durationMs:0});
    confirmation='confirmed';
+   if(newCategory)createdCategory=newCategory;
   }
   else {
    // No pending operation (or an unrelated reply): yes/no, questions and everything else are interpreted by the model.
@@ -218,6 +223,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  const success=steps.filter(s=>s.status==='success');
  if(command===undefined&&!risk&&!steps.length&&!pendingAnswer&&!directAnswer)observeStyle(session,message);
  let answer=directAnswer||pendingAnswer||blockedAnswer||renderAnswer(steps,draft,session,{message,history:session.history.filter(h=>h.role==='user').map(h=>h.content),live:options.realData,name:options.userName});
+ if(createdCategory&&confirmation==='confirmed'&&!(session.state.categories??[]).some(c=>normalize(c)===normalize(createdCategory!)))answer+=`\n\nCriei a categoria ${createdCategory} e já coloquei ${success[0]?.name==='registrar_confirmado'&&(success[0].result as any)?.created?.length>1?'esses lançamentos':'esse lançamento'} lá. 💜`;
  if(status==='error'){answer=[success.map(s=>readable(s,session.state.preferences.detail,options.realData,options.userName,session.state.cards)).join('\n\n'),errorMessage(errorCode||'EXECUTION_FAILED')].filter(Boolean).join('\n\n');if(session.memory.operation&&!pendingAnswer)session.memory.operation=undefined;}
  // Trace label derived from what actually happened in the turn (no keyword classifier decides anything).
  const analytic=success.some(s=>['resumir_financas','comparar_periodos','projetar_despesas','simular_compra'].includes(s.name));

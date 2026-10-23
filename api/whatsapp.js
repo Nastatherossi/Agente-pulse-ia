@@ -518,7 +518,6 @@ function categoryInReply(message, custom = []) {
   const hits = /* @__PURE__ */ new Set();
   for (const c of [...CATEGORIES, ...custom]) if (new RegExp(`\\b${normalize(c).replace(/ /g, "\\s+")}\\b`).test(t)) hits.add(c);
   if (/\b(comida|alimento|alimentos)\b/.test(t)) hits.add("Alimenta\xE7\xE3o");
-  if (/\b(casa|lar|despesas? da casa|apartamento)\b/.test(t)) hits.add("Moradia");
   return hits.size === 1 ? [...hits][0] : void 0;
 }
 function backing(ctx) {
@@ -913,7 +912,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
   }
   const risk = riskSignal(message);
   const interpretationSource = provider.mode === "real" ? "model" : void 0;
-  let confirmation = "none", directAnswer, pendingAnswer, blockedAnswer, kind;
+  let createdCategory, confirmation = "none", directAnswer, pendingAnswer, blockedAnswer, kind;
   const repeatedMessage = session.lastRequests.some((r) => r.messageHash === hash && r.trace?.steps?.some((s) => (s.name === "registrar_transacao" || s.name === "registrar_confirmado") && s.status === "success"));
   const priorHistory = session.history.length;
   const command = memoryCommand(session, message);
@@ -1048,7 +1047,11 @@ async function runConversation(provider, sessionInput, message, requestId, today
     const pickedCategory = op && live && op.kind === "create" && !risk && !no ? categoryInReply(message, session.state.categories ?? []) : void 0;
     const confirmsWithCategory = Boolean(pickedCategory) && /^\s*(sim|confirmo|confirma|confirmado|pode|ok|isso|claro|beleza|fechado|certo|manda ver)\b/.test(normalize(message));
     if (pickedCategory) for (const item of op.items) item.category = pickedCategory;
-    const yesWithPhrase = Boolean(op && live && op.kind === "create" && !risk && !no && !pickedCategory && /^\s*(sim|confirmo|confirma|pode|ok|isso|claro|beleza|fechado|certo)\b[,.! ]+(em|na|no|como|de|pra|para|categoria)\b(\s+\S+){1,4}\s*[.!]*$/.test(normalize(message)));
+    const phrase = op && live && op.kind === "create" && !risk && !no && !pickedCategory ? message.match(/^\s*(?:sim|confirmo|confirma|pode|ok|isso|claro|beleza|fechado|certo)\b[,.! ]+(?:em|na|no|como|de|pra|para|categoria)\b\s+(.+?)\s*[.!]*$/i) : null;
+    const asked = phrase && phrase[1].split(/\s+/).length <= 5 ? cleanCategoryName(phrase[1].replace(/^(?:(?:a|o|as|os)\s+)?(?:categoria\s+)?(?:(?:a|o|as|os)\s+)?/i, "")) : void 0;
+    const newCategory = asked && (session.state.categories ?? []).length < 40 ? asked : void 0;
+    if (newCategory) for (const item of op.items) item.category = newCategory;
+    const yesWithPhrase = Boolean(newCategory);
     const yes = !risk && (isConfirmation(message) || confirmsWithCategory || yesWithPhrase);
     const onlyCategory = Boolean(pickedCategory) && !yes && message.length <= 80;
     if (command !== void 0) {
@@ -1073,6 +1076,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       const result = core.confirm(op);
       steps.push({ order: 1, id: op.id, name: op.kind === "create" ? "registrar_confirmado" : op.kind === "goal" ? "alterar_objetivo" : op.kind === "delete" ? "excluir_transacao" : "editar_transacao", arguments: { operationId: op.id }, status: "success", result, durationMs: 0 });
       confirmation = "confirmed";
+      if (newCategory) createdCategory = newCategory;
     } else {
       if (op && !live) confirmation = "expired";
       for (let i = 0; i < limits.steps; i++) {
@@ -1133,6 +1137,9 @@ async function runConversation(provider, sessionInput, message, requestId, today
   const success = steps.filter((s) => s.status === "success");
   if (command === void 0 && !risk && !steps.length && !pendingAnswer && !directAnswer) observeStyle(session, message);
   let answer = directAnswer || pendingAnswer || blockedAnswer || renderAnswer(steps, draft, session, { message, history: session.history.filter((h) => h.role === "user").map((h) => h.content), live: options.realData, name: options.userName });
+  if (createdCategory && confirmation === "confirmed" && !(session.state.categories ?? []).some((c) => normalize(c) === normalize(createdCategory))) answer += `
+
+Criei a categoria ${createdCategory} e j\xE1 coloquei ${success[0]?.name === "registrar_confirmado" && success[0].result?.created?.length > 1 ? "esses lan\xE7amentos" : "esse lan\xE7amento"} l\xE1. \u{1F49C}`;
   if (status === "error") {
     answer = [success.map((s) => readable(s, session.state.preferences.detail, options.realData, options.userName, session.state.cards)).join("\n\n"), errorMessage(errorCode || "EXECUTION_FAILED")].filter(Boolean).join("\n\n");
     if (session.memory.operation && !pendingAnswer) session.memory.operation = void 0;

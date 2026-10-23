@@ -24,7 +24,6 @@ export function categoryInReply(message:string,custom:readonly string[]=[]):stri
  const hits=new Set<string>();
  for(const c of [...CATEGORIES,...custom])if(new RegExp(`\\b${normalize(c).replace(/ /g,'\\s+')}\\b`).test(t))hits.add(c);
  if(/\b(comida|alimento|alimentos)\b/.test(t))hits.add('Alimentação');
- if(/\b(casa|lar|despesas? da casa|apartamento)\b/.test(t))hits.add('Moradia');
  return hits.size===1?[...hits][0]:undefined;
 }
 

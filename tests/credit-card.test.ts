@@ -101,17 +101,25 @@ describe('compra no cartão pelo agente',()=>{
 describe('"sim" com complemento na confirmação (caso real)',()=>{
  const m1='comprei um ar-condicionado de 2,4k em 5 parcelas no crédito';
  const first=()=>send(model({calls:[tc('registrar_transacao',buy(2400,'ar-condicionado','2,4k em 5 parcelas',{nome:null,parcelas:5},'Compras'))]}),undefined,m1);
- it('"sim, em despesas da casa" confirma e usa Moradia',async()=>{
+ it('"sim, em despesas da casa" cria a categoria e coloca a compra lá',async()=>{
   const a=await first();
   const b=await send(model({content:'x'}),a.session,'sim, em despesas da casa');
   expect(b.session.state.cardPurchases).toHaveLength(1);
-  expect(b.session.state.cardPurchases![0].category).toBe('Moradia');
+  expect(b.session.state.cardPurchases![0].category).toBe('Despesas da casa');
   expect(b.session.state.cardPurchases![0].card?.installments).toBe(5);
+  expect(b.trace.message).toContain('Criei a categoria Despesas da casa');
  });
- it('"sim, na categoria xyz" confirma sem categoria conhecida',async()=>{
+ it('"sim, na categoria casa" cria "Casa"',async()=>{
   const a=await first();
-  const b=await send(model({content:'x'}),a.session,'sim, na parte do escritório');
-  expect(b.session.state.cardPurchases).toHaveLength(1);
+  const b=await send(model({content:'x'}),a.session,'sim, na categoria casa');
+  expect(b.session.state.cardPurchases![0].category).toBe('Casa');
+  expect(b.trace.message).toContain('Criei a categoria Casa');
+ });
+ it('categoria que já existe é só usada, sem anunciar criação',async()=>{
+  const a=await first();
+  const b=await send(model({content:'x'}),a.session,'sim, em lazer');
+  expect(b.session.state.cardPurchases![0].category).toBe('Lazer');
+  expect(b.trace.message).not.toContain('Criei a categoria');
  });
  it('"sim, mas o valor era 300" não confirma',async()=>{
   const a=await first();
