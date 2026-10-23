@@ -105,25 +105,45 @@ var isConfirmation = (m) => /^(sim|s|isso|isso mesmo|pode|pode sim|pode registra
 var isCancellation = (m) => /^(nao|n|cancela|cancelar|cancelado|deixa|deixa pra la|deixa quieto|melhor nao|nao quero|esquece|nao,? deixa como estava|nao,? cancela)[.!, ]*$/.test(normalize(m.trim()));
 var isClear = (m) => /^(limpa|limpar|apaga|apagar) (nossa |a )?conversa[.!]*$/.test(normalize(m.trim()));
 var display = (v) => "type" in v ? `${v.description} \xB7 ${brl(Math.round(v.amount * 100))} \xB7 ${v.date} \xB7 ${v.category || "sem categoria"}` : `${v.description} \xB7 ${brl(Math.round(v.amount * 100))}${v.targetDate ? " \xB7 " + v.targetDate : ""}`;
-var closing = "Confirma? Responda \u201Csim\u201D ou \u201Ccancelar\u201D. Expira em 5 minutos.";
-function describeOperation(op, lead) {
-  if (op.kind === "create") {
-    const items = op.items.map((i) => `\u2022 ${i.type === "receita" ? "Receita" : "Despesa"} \xB7 ${display(i)}`).join("\n");
-    const hint = op.items.some((i) => i.type === "despesa" && !i.category) ? '\nQual categoria? Pode dizer junto com o sim (ex.: "sim, em Lazer").' : "";
-    return `${lead || "Confirma antes de registrar?"}
-${items}${hint}
-${closing}`;
+var cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+var addressed = (name, sentence) => name ? `${name}, ${sentence}` : cap(sentence);
+var dayOf = (date, today) => {
+  if (today && date === today) return "hoje";
+  if (today) {
+    const y = new Date(Date.parse(today + "T12:00:00Z") - 864e5).toISOString().slice(0, 10);
+    if (date === y) return "ontem";
   }
-  if (op.kind === "goal" && !op.before) return `Criar meta?
-Meta: ${display(op.after)}.
-${closing}`;
+  return `${date.slice(8, 10)}/${date.slice(5, 7)}`;
+};
+var when = (date, today) => {
+  const d = dayOf(date, today);
+  return d === "hoje" ? "" : `, ${d === "ontem" ? "ontem" : "dia " + d}`;
+};
+var bullet = (i, today) => `\u2022 ${i.type === "receita" ? "Receita" : "Despesa"} \xB7 ${i.description} \xB7 ${brl(Math.round(i.amount * 100))} \xB7 ${dayOf(i.date, today)} \xB7 ${i.category || "sem categoria"}`;
+var showRecord = (v, today) => "type" in v ? `${v.description} (${brl(Math.round(v.amount * 100))}${when(v.date, today)})` : `${v.description} (${brl(Math.round(v.amount * 100))})`;
+function describeOperation(op, lead, say = {}) {
+  const { name, today } = say;
+  if (op.kind === "create") {
+    const items = op.items;
+    const needsCategory = items.some((i) => i.type === "despesa" && !i.category);
+    const hint = needsCategory ? ' Se quiser, j\xE1 me diz a categoria junto com o sim (ex.: "sim, em Lazer").' : "";
+    if (items.length === 1) {
+      const i = items[0], value = brl(Math.round(i.amount * 100)), cat = i.category ? ` na categoria ${i.category}` : "";
+      const body = addressed(name, i.type === "receita" ? `${lead ? "" : "confirma pra mim: "}vou registrar a receita "${i.description}" de ${value}${cat}${when(i.date, today)}. Pode ser?` : `${lead ? "" : "confirma pra mim: "}vou lan\xE7ar "${i.description}" no valor de ${value}${cat}${when(i.date, today)}. Pode ser?`);
+      const joined = lead && lead.endsWith(":") && !name ? body.charAt(0).toLowerCase() + body.slice(1) : body;
+      return `${lead ? lead + " " : ""}${joined}${hint}`;
+    }
+    return `${lead ? lead + " " : ""}${addressed(name, `vou lan\xE7ar estes ${items.length} aqui, pode ser?`)}
+${items.map((i) => bullet(i, today)).join("\n")}${hint ? "\n" + hint.trim() : ""}`;
+  }
+  if (op.kind === "goal" && !op.before) return addressed(name, `vou criar a meta "${op.after.description}" de ${brl(Math.round(op.after.amount * 100))}${"targetDate" in op.after && op.after.targetDate ? " para " + op.after.targetDate : ""}. Pode ser?`);
   if (op.kind === "edit" && op.before && op.after && "type" in op.before && "type" in op.after && op.after.category && op.before.category !== op.after.category && op.before.amount === op.after.amount && op.before.description === op.after.description && op.before.date === op.after.date)
-    return `${lead || "Perfeito!"} Quer que eu coloque este lan\xE7amento na categoria ${op.after.category}?
-\u2022 ${op.before.type === "receita" ? "Receita" : "Despesa"} \xB7 ${op.before.description} \xB7 ${brl(Math.round(op.before.amount * 100))} \xB7 ${op.before.date}
-${closing}`;
-  return `${op.kind === "delete" ? "Excluir" : "Alterar"} ${op.kind === "goal" ? "meta" : "lan\xE7amento"}?
-Antes: ${display(op.before)}${op.after ? "\nDepois: " + display(op.after) : "\nDepois: lan\xE7amento exclu\xEDdo"}.
-${closing}`;
+    return `${lead ? lead + " " : ""}${addressed(name, `quer que eu coloque ${showRecord(op.before, today)} na categoria ${op.after.category}?`)}`;
+  if (op.kind === "delete") return addressed(name, `confirma que \xE9 pra apagar ${showRecord(op.before, today)}?`);
+  const what = op.kind === "goal" ? "a meta" : "esse lan\xE7amento";
+  return `${addressed(name, `quer que eu altere ${what}?`)}
+Antes: ${display(op.before)}
+Depois: ${op.after ? display(op.after) : "lan\xE7amento exclu\xEDdo"}`;
 }
 function clearContext(session) {
   session.history = [];
@@ -423,7 +443,7 @@ function knownCategory(description) {
   if (/\b(farmacia|remedio|medico|consulta|dentista|exame|plano de saude|hospital|psicologo|terapia|academia)\b/.test(text)) return "Sa\xFAde";
   if (/\b(curso|faculdade|escola|livro|matricula|apostila|mensalidade escolar)\b/.test(text)) return "Educa\xE7\xE3o";
   if (/\b(transporte|gasolina|combustivel|uber|99|taxi|onibus|metro|passagem|estacionamento|pedagio|oficina|etanol|diesel)\b/.test(text)) return "Transporte";
-  if (/\b(supermercado|mercado|restaurante|almoco|jantar|cafe|padaria|lanche|pizza|hamburguer|ifood|acougue|feira|hortifruti|sorvete|marmita|churrasco|refrigerante|suco|agua|cerveja|comida|sobremesa|bolo|pao|doce|salgado)\b/.test(text)) return "Alimenta\xE7\xE3o";
+  if (/\b(supermercado|mercado|restaurante|almoco|jantar|cafe|padaria|lanche|pizza|hamburguer|ifood|acougue|feira|hortifruti|sorvete|marmita|churrasco|refrigerante|suco|agua|cerveja|comida|sobremesa|bolo|pao|doce|salgado|tempero|temperos|condimento|condimentos|especiaria|especiarias)\b/.test(text)) return "Alimenta\xE7\xE3o";
   if (/\b(bar|cinema|lazer|show|ingresso|balada|viagem|festa|jogo|parque|teatro)\b/.test(text)) return "Lazer";
   if (/\b(roupa|camisa|calca|tenis|sapato|notebook|fone|eletronico|shopping)\b/.test(text)) return "Compras";
   if (/\b(salario|freela|freelance|pix recebido|dividendo|rendimento|comissao)\b/.test(text)) return "Renda";
@@ -445,7 +465,7 @@ var OLDEST_DAYS = 366;
 var cents2 = (n) => Math.round(n * 100);
 var squash = (s) => normalize(s).replace(/[^a-z0-9]+/g, " ").trim();
 function amountsIn(text) {
-  const t = text.replace(/\d{4}-\d{2}-\d{2}/g, " ").replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, " ");
+  const t = text.replace(/\d{4}-\d{2}-\d{2}/g, " ").replace(/\b(?:dia|no dia|até o dia|ate o dia)\s+(?:[12]?\d|3[01])\b(?!\s*(?:reais|real|r\$|,\d))/gi, " ").replace(/\b\d{1,2}\s*(?:x|vezes)\b/gi, " ").replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, " ");
   const out = [];
   for (const m of t.matchAll(/(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)(\s*(?:mil\b|k\b))?/gi)) {
     const raw = m[1];
@@ -628,23 +648,23 @@ function blockedMessage(reason) {
 function confirmLead(reason) {
   switch (reason) {
     case "REPEATED_MESSAGE":
-      return "Esta mensagem j\xE1 foi registrada nesta sess\xE3o. Quer registrar uma segunda despesa/receita igual?";
+      return "Essa mensagem \xE9 igual a uma que voc\xEA j\xE1 mandou, ent\xE3o vou confirmar antes de registrar de novo.";
     case "FROM_AUDIO":
-      return "Entendi pelo \xE1udio. Confirma antes de registrar?";
+      return "Entendi pelo \xE1udio.";
     case "MULTIPLE_ENTRIES":
-      return "Vou registrar estes lan\xE7amentos juntos:";
+      return "";
     case "CONFIRM_FROM_PREVIOUS_MESSAGE":
-      return "Confirma o registro do que voc\xEA me contou?";
+      return "Entendi!";
     case "TENTATIVE_LANGUAGE":
-      return "S\xF3 para confirmar: isso j\xE1 aconteceu e devo registrar?";
+      return "S\xF3 pra ter certeza de que isso j\xE1 aconteceu:";
     case "MULTIPLE_AMOUNTS":
-      return "Sua mensagem tem mais de um valor. Confirma este registro?";
+      return "Vi mais de um valor na sua mensagem, ent\xE3o quero ter certeza:";
     case "HIGH_VALUE":
-      return "\xC9 um valor alto, ent\xE3o confirmo antes de registrar:";
+      return "\xC9 um valor alto, ent\xE3o confirmo com voc\xEA:";
     case "RELATIVE_DATE":
-      return "Confirma a data antes de registrar?";
+      return "S\xF3 confirmando a data:";
     default:
-      return "Confirma antes de registrar?";
+      return "";
   }
 }
 
@@ -702,7 +722,9 @@ var RETRYABLE = /* @__PURE__ */ new Set(["VALIDATION_FAILED", "UNKNOWN_TOOL"]);
 var LIMITS = { steps: 4, tools: 8, timeoutMs: 35e3, tokens: 3e4 };
 var messageHash = async (text) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))).map((n) => n.toString(16).padStart(2, "0")).join("");
 var errorMessage = (code) => ({ OPENAI_AUTH_FAILED: "A chave OpenAI n\xE3o foi aceita. Verifique a configura\xE7\xE3o do laborat\xF3rio.", OPENAI_QUOTA_EXCEEDED: "A OpenAI informou falta de cr\xE9ditos ou limite de uso.", OPENAI_RATE_LIMITED: "A OpenAI est\xE1 limitando requisi\xE7\xF5es. Aguarde antes de tentar de novo.", MODEL_INCOMPATIBLE: "O modelo n\xE3o aceitou o contrato de ferramentas.", OPENAI_TIMEOUT: "A OpenAI n\xE3o respondeu no prazo.", REAL_AI_LOCKED: "IA real bloqueada na configura\xE7\xE3o do laborat\xF3rio.", INVALID_SESSION: "Esta sess\xE3o perdeu a validade. Inicie uma nova sess\xE3o.", STEP_LIMIT: "Parei no limite de etapas. Tente uma pergunta mais espec\xEDfica.", TOKEN_LIMIT: "Parei no limite de consumo desta intera\xE7\xE3o.", LOOP_DETECTED: "A consulta se repetiu. Parei para evitar um loop." })[code] || "N\xE3o consegui concluir esta intera\xE7\xE3o. Nenhum sucesso de ferramenta foi inventado.";
-function readable(step, detail, live = false) {
+function readable(step, detail, live = false, name) {
+  const hi = name ? `Pronto, ${name}!` : "Pronto!";
+  const noted = (t) => `${t.description} (${brl(Math.round(t.amount * 100))}${t.category ? `, ${t.category}` : ""})`;
   if (step.status !== "success") return step.error?.message || "Ferramenta n\xE3o executada.";
   const r = step.result;
   switch (step.name) {
@@ -711,15 +733,15 @@ function readable(step, detail, live = false) {
     case "simular_compra":
       return `Simula\xE7\xE3o: ${brl(r.availableCents)} dispon\xEDveis (${r.basis}) \u2212 ${brl(r.purchaseCents)} da compra = ${brl(r.remainingCents)} restantes. Nenhuma despesa registrada.`;
     case "editar_transacao":
-      return "Pronto. Lan\xE7amento corrigido conforme confirmado.";
+      return `${hi} J\xE1 corrigi o lan\xE7amento.`;
     case "excluir_transacao":
-      return "Pronto. Lan\xE7amento exclu\xEDdo conforme confirmado.";
+      return `${hi} Apaguei o lan\xE7amento.`;
     case "alterar_objetivo":
-      return "Pronto. Meta alterada conforme confirmado.";
+      return `${hi} Meta atualizada.`;
     case "registrar_confirmado":
-      return `${detail === "curto" ? "Registrado" : "Registro conclu\xEDdo"}: ${r.created.map((t) => `${t.description}, ${brl(Math.round(t.amount * 100))}`).join("; ")}.`;
+      return `${hi} Anotei ${r.created.map(noted).join("; ")}.`;
     case "registrar_transacao":
-      return `${detail === "curto" ? "Registrado" : "Registro conclu\xEDdo"}: ${r.transaction.description}, ${brl(Math.round(r.transaction.amount * 100))}.`;
+      return `${hi} Anotei ${noted(r.transaction)}.`;
     case "listar_transacoes":
       return r.totalCount ? `${r.totalCount} transa\xE7\xF5es no filtro.
 ` + r.transactions.map((t) => `${t.date} \xB7 ${t.description} \xB7 ${t.type === "receita" ? "+" : "\u2212"} ${brl(Math.round(t.amount * 100))} \xB7 ${t.category || "sem categoria"}`).join("\n") : "Nenhuma transa\xE7\xE3o neste filtro.";
@@ -743,7 +765,7 @@ var DATA_WRITES = /* @__PURE__ */ new Set(["registrar_transacao", "registrar_con
 var LOOKUPS = /* @__PURE__ */ new Set(["consultar_saldo", "listar_transacoes", "consultar_gastos_categoria"]);
 function renderAnswer(steps, draft, session, context = {}) {
   const success = steps.filter((s) => s.status === "success");
-  const facts = success.map((s) => readable(s, session.state.preferences.detail, context.live)).join("\n\n");
+  const facts = success.map((s) => readable(s, session.state.preferences.detail, context.live, context.name)).join("\n\n");
   const wroteData = success.some((s) => DATA_WRITES.has(s.name));
   const lookupOnly = success.length > 0 && success.every((s) => LOOKUPS.has(s.name));
   const grounding = { message: context.message || "", history: context.history ?? session.history.filter((h) => h.role === "user").map((h) => h.content), steps, wroteData };
@@ -770,7 +792,7 @@ function mergeCreates(calls) {
   return [merged, ...calls.filter((c) => !creates.includes(c))];
 }
 async function runConversation(provider, sessionInput, message, requestId, today, options = {}) {
-  const session = structuredClone(sessionSchema.parse(sessionInput || createSession())), limits = { ...LIMITS, ...options.limits }, started = performance.now(), steps = [];
+  const say = { name: options.userName, today }, session = structuredClone(sessionSchema.parse(sessionInput || createSession())), limits = { ...LIMITS, ...options.limits }, started = performance.now(), steps = [];
   const base = { requestId, mode: provider.mode, durationMs: 0 };
   const hash = await messageHash(message), previous = session.lastRequests.find((r) => r.id === requestId);
   if (previous) {
@@ -830,7 +852,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       }
       if (d.decision === "confirm") {
         const op = createOperation(d.entries);
-        hold(op, describeOperation(op, confirmLead(d.reason)), "execucao");
+        hold(op, describeOperation(op, confirmLead(d.reason), say), "execucao");
         step.status = "blocked";
         step.error = { code: "CONFIRMATION_REQUIRED", reason: d.reason, message: "Aguardando confirma\xE7\xE3o expl\xEDcita; nada foi registrado." };
         return;
@@ -840,7 +862,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
     if (call.name === "propor_edicao_transacao" || call.name === "propor_exclusao_transacao") {
       const r = prepareChange(call, ctx);
       if (r.operation) {
-        hold(r.operation, describeOperation(r.operation), "alteracao");
+        hold(r.operation, describeOperation(r.operation, void 0, say), "alteracao");
         step.status = "blocked";
         step.error = { code: "CONFIRMATION_REQUIRED", reason: "CHANGE_EXISTING_RECORD", message: "Aguardando confirma\xE7\xE3o expl\xEDcita; nada foi alterado." };
         return;
@@ -864,7 +886,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       }
       if (d.decision === "confirm") {
         const op = goalOperation(d.goal, core.snapshot());
-        hold(op, describeOperation(op), "alteracao");
+        hold(op, describeOperation(op, void 0, say), "alteracao");
         step.status = "blocked";
         step.error = { code: "CONFIRMATION_REQUIRED", reason: d.reason, message: "Aguardando confirma\xE7\xE3o expl\xEDcita; nada foi alterado." };
         return;
@@ -919,7 +941,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       directAnswer = yes ? "A confirma\xE7\xE3o expirou. Solicite a altera\xE7\xE3o novamente." : "Tudo bem. Nada foi alterado.";
     } else if (op && live && onlyCategory) {
       op.expiresAt = Date.now() + 5 * 6e4;
-      hold(op, describeOperation(op, `Certo, categoria ${pickedCategory}. Confirma o registro?`), "execucao");
+      hold(op, describeOperation(op, `Certo, categoria ${pickedCategory}!`, say), "execucao");
     } else if (op && live && no) {
       confirmation = "cancelled";
       kind = "confirmacao";
@@ -989,9 +1011,9 @@ async function runConversation(provider, sessionInput, message, requestId, today
   status = status;
   const success = steps.filter((s) => s.status === "success");
   if (command === void 0 && !risk && !steps.length && !pendingAnswer && !directAnswer) observeStyle(session, message);
-  let answer = directAnswer || pendingAnswer || blockedAnswer || renderAnswer(steps, draft, session, { message, history: session.history.filter((h) => h.role === "user").map((h) => h.content), live: options.realData });
+  let answer = directAnswer || pendingAnswer || blockedAnswer || renderAnswer(steps, draft, session, { message, history: session.history.filter((h) => h.role === "user").map((h) => h.content), live: options.realData, name: options.userName });
   if (status === "error") {
-    answer = [success.map((s) => readable(s, session.state.preferences.detail, options.realData)).join("\n\n"), errorMessage(errorCode || "EXECUTION_FAILED")].filter(Boolean).join("\n\n");
+    answer = [success.map((s) => readable(s, session.state.preferences.detail, options.realData, options.userName)).join("\n\n"), errorMessage(errorCode || "EXECUTION_FAILED")].filter(Boolean).join("\n\n");
     if (session.memory.operation && !pendingAnswer) session.memory.operation = void 0;
   }
   const analytic = success.some((s) => ["resumir_financas", "comparar_periodos", "projetar_despesas", "simular_compra"].includes(s.name));
@@ -1202,11 +1224,14 @@ Responda *autorizar* para liberar (ou *autorizar ${phone}*) ou *bloquear* para n
   ownerBadPhone: "N\xE3o entendi o n\xFAmero. Use o formato *autorizar 5511999999999* ou s\xF3 *autorizar* para liberar o \xFAltimo que pediu.",
   ownerEmptyList: "Ainda n\xE3o h\xE1 nenhum contato.",
   ownerHelp: "*Comandos do dono*\n\u2022 *autorizar* \u2014 libera o \xFAltimo n\xFAmero que pediu acesso\n\u2022 *autorizar 5511999999999 Nome* \u2014 libera um n\xFAmero\n\u2022 *bloquear* ou *bloquear 5511\u2026* \u2014 nega\n\u2022 *remover 5511\u2026* \u2014 apaga o contato e a conversa\n\u2022 *listar* \u2014 mostra todos os contatos",
-  welcome: (name) => `Oi${name ? `, ${name.split(/\s+/)[0]}` : ""}! Voc\xEA foi liberado para testar o *Pulse*, um assistente de finan\xE7as pelo WhatsApp.
+  welcome: (name) => `${name ? `Ei, ${name.split(/\s+/)[0]}!` : "Ei!"} Seja muito bem-vindo! \u{1F49C}
+Eu sou o Pulse, seu assistente pessoal de intelig\xEAncia artificial!
 
-Conte um gasto (ex.: "gastei 32 no almo\xE7o"), pergunte seu saldo ou mande um \xE1udio. Antes de gravar algo, eu confirmo com voc\xEA.
+T\xF4 aqui pra facilitar sua vida: posso te ajudar a organizar suas finan\xE7as, registrar seus gastos, acompanhar seu dinheiro, planejar seus objetivos e muito mais.
 
-\xC9 uma vers\xE3o de teste, ent\xE3o me avise se algo n\xE3o funcionar bem. \u{1F642}`,
+E o melhor: voc\xEA n\xE3o precisa decorar comandos nem preencher formul\xE1rios. \xC9 s\xF3 conversar comigo normalmente, por texto ou \xE1udio, como faria com qualquer pessoa. \u{1F399}\uFE0F
+
+Pra come\xE7ar, que tal me contar um pouquinho sobre voc\xEA? \u{1F604}`,
   loginCode: (code) => `Seu c\xF3digo de acesso ao Pulse \xE9 *${code}*.
 
 Digite na tela de login. Ele vale por poucos minutos e n\xE3o deve ser compartilhado. Se n\xE3o foi voc\xEA, \xE9 s\xF3 ignorar esta mensagem.`,
@@ -1444,78 +1469,181 @@ var OpenAITranscriptionProvider = class {
   }
 };
 
-// server/whatsapp/zapi.ts
-function parseInbound(body, expectedInstanceId) {
-  const b = body && typeof body === "object" ? body : {};
-  if (b.type !== "ReceivedCallback") return { kind: "ignore", reason: "not_received_callback" };
-  if (expectedInstanceId && String(b.instanceId ?? "") !== expectedInstanceId) return { kind: "ignore", reason: "wrong_instance" };
-  if (b.fromMe === true) return { kind: "ignore", reason: "from_me" };
-  if (b.isGroup === true || b.participantPhone || b.participantLid) return { kind: "ignore", reason: "group" };
-  if (b.isNewsletter === true || b.broadcast === true || b.isStatusReply === true) return { kind: "ignore", reason: "not_direct" };
-  if (b.isEdit === true || b.waitingMessage === true) return { kind: "ignore", reason: "edit_or_waiting" };
-  if (b.reaction && typeof b.reaction === "object") return { kind: "ignore", reason: "reaction" };
-  const messageId = typeof b.messageId === "string" ? b.messageId.slice(0, 120) : "";
-  const phone = normalizePhone(typeof b.phone === "string" ? b.phone : void 0);
-  if (!messageId || !phone) return { kind: "ignore", reason: "missing_id_or_phone" };
-  const name = typeof b.senderName === "string" && b.senderName.trim() ? b.senderName.trim().slice(0, 80) : void 0;
-  const text = typeof b.text?.message === "string" ? b.text.message.trim() : "";
-  if (text && isEmojiOnly(text)) return { kind: "ignore", reason: "emoji_only" };
-  if (text) return { kind: "text", messageId, phone, name, text };
-  const audio = b.audio;
-  if (audio && typeof audio.audioUrl === "string") {
-    const seconds = Number(audio.seconds);
-    return { kind: "audio", messageId, phone, name, audioUrl: audio.audioUrl, mimeType: String(audio.mimeType || "audio/ogg; codecs=opus"), seconds: Number.isFinite(seconds) ? seconds : void 0 };
+// server/whatsapp/ledger.ts
+var MAX_STATE_TRANSACTIONS = 300;
+var MAX_INITIAL_CENTS = 1e8;
+function agentCanSee(e) {
+  if (!e.date || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) return false;
+  if (!Number.isFinite(e.amount) || e.amount <= 0 || e.amount > 1e6) return false;
+  if (Math.abs(e.amount * 100 - Math.round(e.amount * 100)) > 1e-5) return false;
+  return e.description.trim().length > 0;
+}
+var cents4 = (n) => Math.round(n * 100);
+var signed = (e) => (e.type === "receita" ? 1 : -1) * cents4(e.amount);
+function initialBalanceFor(openingCents, netAllCents, visible) {
+  const raw = openingCents + netAllCents - visible.reduce((s, e) => s + signed(e), 0);
+  return Math.min(MAX_INITIAL_CENTS, Math.max(0, raw));
+}
+var same = (a, b) => a.type === b.type && a.amount === b.amount && a.description === b.description && a.date === b.date && (a.category ?? "") === (b.category ?? "");
+function diffEntries(before, after) {
+  const old = new Map(before.map((e) => [e.id, e]));
+  const seen = /* @__PURE__ */ new Set();
+  const changes = { create: [], update: [], remove: [] };
+  for (const e of after) {
+    seen.add(e.id);
+    const prev = old.get(e.id);
+    if (!prev) changes.create.push(e);
+    else if (!same(prev, e)) changes.update.push(e);
   }
-  return { kind: "unsupported", messageId, phone, name };
+  for (const e of before) if (!seen.has(e.id)) changes.remove.push(e.id);
+  return changes;
 }
-function isEmojiOnly(text) {
-  const t = text.trim();
-  if (!t || /[\p{L}\p{N}]/u.test(t.replace(/[\u20e3]/g, ""))) return false;
-  return /^[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\ufe0f\u20e3\s]+$/u.test(t) && /[\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(t);
-}
-function isSafeMediaUrl(raw) {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== "https:" || u.username || u.password) return false;
-    const h = u.hostname.toLowerCase();
-    if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".internal") || h.endsWith(".local")) return false;
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(":")) return false;
-    return h.includes(".");
-  } catch {
-    return false;
-  }
-}
-var ZApiClient = class {
-  constructor(instanceId, token, clientToken, fetchImpl = fetch) {
-    this.instanceId = instanceId;
-    this.token = token;
-    this.clientToken = clientToken;
+var SupabaseLedger = class {
+  constructor(url, serviceKey, fetchImpl = fetch) {
+    this.serviceKey = serviceKey;
     this.fetchImpl = fetchImpl;
-    if (!instanceId || !token || !clientToken) throw new Error("ZAPI_NOT_CONFIGURED");
+    if (!url || !serviceKey) throw new Error("SUPABASE_NOT_CONFIGURED");
+    this.base = url.replace(/\/$/, "");
   }
-  instanceId;
-  token;
-  clientToken;
+  serviceKey;
   fetchImpl;
-  async sendText(phone, message) {
-    const res = await this.fetchImpl(`https://api.z-api.io/instances/${encodeURIComponent(this.instanceId)}/token/${encodeURIComponent(this.token)}/send-text`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Client-Token": this.clientToken },
-      // delayTyping: mostra "digitando…" por 2s, mais natural e mais seguro contra detecção de robô.
-      body: JSON.stringify({ phone, message: message.slice(0, 3800), delayTyping: 2 }),
-      signal: AbortSignal.timeout(15e3)
+  base;
+  async call(path, init = {}) {
+    const { prefer, ...rest } = init;
+    const res = await this.fetchImpl(`${this.base}${path}`, {
+      ...rest,
+      headers: { apikey: this.serviceKey, ...this.serviceKey.startsWith("eyJ") ? { Authorization: `Bearer ${this.serviceKey}` } : {}, "Content-Type": "application/json", ...prefer ? { Prefer: prefer } : {} },
+      signal: AbortSignal.timeout(1e4)
     });
-    if (!res.ok) throw new Error(`ZAPI_SEND_${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(`SUPABASE_${res.status}`), { status: res.status });
+    const text = await res.text();
+    return text ? JSON.parse(text) : [];
   }
-  async downloadAudio(url, maxBytes) {
-    if (!isSafeMediaUrl(url)) throw new Error("AUDIO_URL_NOT_ALLOWED");
-    const res = await this.fetchImpl(url, { signal: AbortSignal.timeout(2e4), redirect: "error" });
-    if (!res.ok) throw new Error(`AUDIO_DOWNLOAD_${res.status}`);
-    const declared = Number(res.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > maxBytes) throw new Error("AUDIO_TOO_LARGE");
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    if (bytes.byteLength > maxBytes) throw new Error("AUDIO_TOO_LARGE");
-    return bytes;
+  rest(path, init) {
+    return this.call(`/rest/v1/${path}`, init);
+  }
+  rpc(name, args) {
+    return this.rest(`rpc/${name}`, { method: "POST", body: JSON.stringify(args) });
+  }
+  async find(phone) {
+    const rows = await this.rpc("whatsapp_workspace_for_phone", { p_phone: phone });
+    const r = rows[0];
+    return r ? { userId: r.user_id, workspaceId: r.workspace_id, accountId: r.account_id } : null;
+  }
+  async resolve(phone, name) {
+    let ws = await this.find(phone);
+    if (!ws) {
+      try {
+        await this.call("/auth/v1/admin/users", { method: "POST", body: JSON.stringify({ phone, phone_confirm: true, user_metadata: name ? { name } : {} }) });
+      } catch (e) {
+        if (e.status !== 422) throw e;
+      }
+      ws = await this.find(phone);
+    }
+    if (!ws) throw new Error("LEDGER_PROVISION_FAILED");
+    await this.ensureCategories(ws.workspaceId);
+    return ws;
+  }
+  async categoryMap(workspaceId) {
+    const rows = await this.rest(`finance_categories?workspace_id=eq.${workspaceId}&select=id,name&limit=200`);
+    return new Map(rows.map((r) => [r.name, r.id]));
+  }
+  async ensureCategories(workspaceId) {
+    const have = await this.categoryMap(workspaceId);
+    const missing = CATEGORIES.filter((c) => !have.has(c));
+    if (!missing.length) return;
+    await this.rest(`finance_categories?on_conflict=workspace_id,name`, {
+      method: "POST",
+      body: JSON.stringify(missing.map((name) => ({ workspace_id: workspaceId, name, kind: name === "Renda" ? "income" : "expense" }))),
+      prefer: "resolution=ignore-duplicates,return=minimal"
+    });
+  }
+  async due(ws, today) {
+    const from = new Date(Date.parse(`${today}T12:00:00Z`) - 30 * 864e5).toISOString().slice(0, 10);
+    const rows = await this.rest(
+      `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=in.(planned,overdue)&settled_at=is.null&origin=neq.card&expected_date=lte.${today}&expected_date=gte.${from}&select=id,type,amount,description,expected_date,category_id&order=expected_date.asc&limit=20`
+    );
+    if (!rows.length) return [];
+    const names = new Map([...await this.categoryMap(ws.workspaceId)].map(([name, id]) => [id, name]));
+    return rows.map((r) => ({ id: r.id, type: r.type === "income" ? "receita" : "despesa", amount: Number(r.amount), description: r.description, expectedDate: r.expected_date, category: r.category_id ? names.get(r.category_id) : void 0 }));
+  }
+  async confirm(ws, transactionId, effectiveDate) {
+    await this.rpc("finance_confirm_transaction", { target_transaction_id: transactionId, target_workspace_id: ws.workspaceId, target_effective_date: effectiveDate });
+  }
+  async load(ws) {
+    const [summary2, rows, cats] = await Promise.all([
+      this.rpc("whatsapp_ledger_summary", { p_workspace: ws.workspaceId }),
+      this.rest(
+        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id,created_at&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
+      ),
+      this.categoryMap(ws.workspaceId)
+    ]);
+    const nameOf = new Map([...cats].map(([name, id]) => [id, name]));
+    const opening = Number(summary2[0]?.opening_cents ?? 0);
+    const net = Number(summary2[0]?.net_cents ?? 0);
+    const visible = [];
+    for (const r of rows) {
+      if (visible.length >= MAX_STATE_TRANSACTIONS) break;
+      const amount = Number(r.amount);
+      const description = String(r.description ?? "").trim().slice(0, 120);
+      if (!agentCanSee({ amount, date: r.effective_date, description })) continue;
+      visible.push({ id: r.id, type: r.type === "income" ? "receita" : "despesa", amount, description, date: r.effective_date, ...r.category_id && nameOf.get(r.category_id) ? { category: nameOf.get(r.category_id).slice(0, 50) } : {} });
+    }
+    const newest = visible.length ? rows.filter((r) => visible.some((v) => v.id === r.id)).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0]?.id : void 0;
+    visible.reverse();
+    const builtIn = new Set(CATEGORIES);
+    const customCategories = [...cats.keys()].filter((name) => !builtIn.has(name) && name.length <= 30).slice(0, 40);
+    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...newest ? { lastRecordId: newest } : {} };
+  }
+  async apply(ws, changes, key) {
+    if (!changes.create.length && !changes.update.length && !changes.remove.length) return;
+    let cats = await this.categoryMap(ws.workspaceId);
+    const wanted = [...new Set([...changes.create, ...changes.update].map((e) => e.category).filter((c) => Boolean(c) && !cats.has(c)))];
+    if (wanted.length) {
+      await this.rest(`finance_categories?on_conflict=workspace_id,name`, {
+        method: "POST",
+        body: JSON.stringify(wanted.map((name) => ({ workspace_id: ws.workspaceId, name, kind: "both" }))),
+        prefer: "resolution=ignore-duplicates,return=minimal"
+      });
+      cats = await this.categoryMap(ws.workspaceId);
+    }
+    const catId = (name) => name ? cats.get(name) ?? null : null;
+    let i = 0;
+    for (const e of changes.create) {
+      await this.rpc("finance_create_transaction", {
+        target_workspace_id: ws.workspaceId,
+        target_account_id: ws.accountId,
+        target_category_id: catId(e.category),
+        target_description: e.description,
+        target_amount: e.amount,
+        target_type: e.type === "receita" ? "income" : "expense",
+        target_status: "confirmed",
+        target_competence_date: e.date,
+        target_expected_date: e.date,
+        target_effective_date: e.date,
+        target_origin: "ai",
+        target_payment_method: null,
+        target_note: "Registrado pelo Pulse no WhatsApp",
+        // Mesma mensagem reprocessada = mesma chave = nenhum lançamento duplicado.
+        target_idempotency_key: `${key}:${i++}`
+      });
+    }
+    for (const e of changes.update) {
+      await this.rest(`finance_transactions?id=eq.${e.id}&workspace_id=eq.${ws.workspaceId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          description: e.description,
+          amount: e.amount,
+          type: e.type === "receita" ? "income" : "expense",
+          competence_date: e.date,
+          effective_date: e.date,
+          category_id: catId(e.category)
+        })
+      });
+    }
+    for (const id of changes.remove) {
+      await this.rest(`finance_transactions?id=eq.${id}&workspace_id=eq.${ws.workspaceId}`, { method: "DELETE" });
+    }
   }
 };
 
@@ -1608,6 +1736,32 @@ var SupabaseStore = class {
   async usageSince(iso) {
     return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
   }
+  async reminderStates(ids) {
+    if (!ids.length) return [];
+    return this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(",")})&select=*`);
+  }
+  async markReminded(items, phone, atIso) {
+    const have = new Map((await this.reminderStates(items.map((i) => i.id))).map((r) => [r.transaction_id, r.sent_count]));
+    await this.rest("whatsapp_reminders?on_conflict=transaction_id", {
+      method: "POST",
+      body: JSON.stringify(items.map((i) => ({ transaction_id: i.id, workspace_id: i.workspaceId, phone, sent_count: (have.get(i.id) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
+      prefer: "resolution=merge-duplicates,return=minimal"
+    });
+  }
+  awaitingReminders(phone, sinceIso) {
+    return this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
+  }
+  async markAnswered(ids, atIso) {
+    if (!ids.length) return;
+    await this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(",")})`, { method: "PATCH", body: JSON.stringify({ answered_at: atIso }), prefer: "return=minimal" });
+  }
+  async lastReminderAt(phone) {
+    const rows = await this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
+    return rows[0]?.last_sent_at ?? null;
+  }
+  async setRemindersEnabled(phone, enabled) {
+    await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify({ reminders_enabled: enabled }), prefer: "return=minimal" });
+  }
   async getSession(phone) {
     const rows = await this.rest(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&select=session,version&limit=1`);
     return rows[0] ?? null;
@@ -1626,171 +1780,132 @@ var SupabaseStore = class {
   }
 };
 
-// server/whatsapp/ledger.ts
-var MAX_STATE_TRANSACTIONS = 300;
-var MAX_INITIAL_CENTS = 1e8;
-function agentCanSee(e) {
-  if (!e.date || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) return false;
-  if (!Number.isFinite(e.amount) || e.amount <= 0 || e.amount > 1e6) return false;
-  if (Math.abs(e.amount * 100 - Math.round(e.amount * 100)) > 1e-5) return false;
-  return e.description.trim().length > 0;
-}
-var cents4 = (n) => Math.round(n * 100);
-var signed = (e) => (e.type === "receita" ? 1 : -1) * cents4(e.amount);
-function initialBalanceFor(openingCents, netAllCents, visible) {
-  const raw = openingCents + netAllCents - visible.reduce((s, e) => s + signed(e), 0);
-  return Math.min(MAX_INITIAL_CENTS, Math.max(0, raw));
-}
-var same = (a, b) => a.type === b.type && a.amount === b.amount && a.description === b.description && a.date === b.date && (a.category ?? "") === (b.category ?? "");
-function diffEntries(before, after) {
-  const old = new Map(before.map((e) => [e.id, e]));
-  const seen = /* @__PURE__ */ new Set();
-  const changes = { create: [], update: [], remove: [] };
-  for (const e of after) {
-    seen.add(e.id);
-    const prev = old.get(e.id);
-    if (!prev) changes.create.push(e);
-    else if (!same(prev, e)) changes.update.push(e);
+// server/whatsapp/zapi.ts
+function parseInbound(body, expectedInstanceId) {
+  const b = body && typeof body === "object" ? body : {};
+  if (b.type !== "ReceivedCallback") return { kind: "ignore", reason: "not_received_callback" };
+  if (expectedInstanceId && String(b.instanceId ?? "") !== expectedInstanceId) return { kind: "ignore", reason: "wrong_instance" };
+  if (b.fromMe === true) return { kind: "ignore", reason: "from_me" };
+  if (b.isGroup === true || b.participantPhone || b.participantLid) return { kind: "ignore", reason: "group" };
+  if (b.isNewsletter === true || b.broadcast === true || b.isStatusReply === true) return { kind: "ignore", reason: "not_direct" };
+  if (b.isEdit === true || b.waitingMessage === true) return { kind: "ignore", reason: "edit_or_waiting" };
+  if (b.reaction && typeof b.reaction === "object") return { kind: "ignore", reason: "reaction" };
+  const messageId = typeof b.messageId === "string" ? b.messageId.slice(0, 120) : "";
+  const phone = normalizePhone(typeof b.phone === "string" ? b.phone : void 0);
+  if (!messageId || !phone) return { kind: "ignore", reason: "missing_id_or_phone" };
+  const name = typeof b.senderName === "string" && b.senderName.trim() ? b.senderName.trim().slice(0, 80) : void 0;
+  const text = typeof b.text?.message === "string" ? b.text.message.trim() : "";
+  if (text && isEmojiOnly(text)) return { kind: "ignore", reason: "emoji_only" };
+  if (text) return { kind: "text", messageId, phone, name, text };
+  const audio = b.audio;
+  if (audio && typeof audio.audioUrl === "string") {
+    const seconds = Number(audio.seconds);
+    return { kind: "audio", messageId, phone, name, audioUrl: audio.audioUrl, mimeType: String(audio.mimeType || "audio/ogg; codecs=opus"), seconds: Number.isFinite(seconds) ? seconds : void 0 };
   }
-  for (const e of before) if (!seen.has(e.id)) changes.remove.push(e.id);
-  return changes;
+  return { kind: "unsupported", messageId, phone, name };
 }
-var SupabaseLedger = class {
-  constructor(url, serviceKey, fetchImpl = fetch) {
-    this.serviceKey = serviceKey;
+function isEmojiOnly(text) {
+  const t = text.trim();
+  if (!t || /[\p{L}\p{N}]/u.test(t.replace(/[\u20e3]/g, ""))) return false;
+  return /^[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\ufe0f\u20e3\s]+$/u.test(t) && /[\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(t);
+}
+function isSafeMediaUrl(raw) {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" || u.username || u.password) return false;
+    const h = u.hostname.toLowerCase();
+    if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".internal") || h.endsWith(".local")) return false;
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(":")) return false;
+    return h.includes(".");
+  } catch {
+    return false;
+  }
+}
+var ZApiClient = class {
+  constructor(instanceId, token, clientToken, fetchImpl = fetch) {
+    this.instanceId = instanceId;
+    this.token = token;
+    this.clientToken = clientToken;
     this.fetchImpl = fetchImpl;
-    if (!url || !serviceKey) throw new Error("SUPABASE_NOT_CONFIGURED");
-    this.base = url.replace(/\/$/, "");
+    if (!instanceId || !token || !clientToken) throw new Error("ZAPI_NOT_CONFIGURED");
   }
-  serviceKey;
+  instanceId;
+  token;
+  clientToken;
   fetchImpl;
-  base;
-  async call(path, init = {}) {
-    const { prefer, ...rest } = init;
-    const res = await this.fetchImpl(`${this.base}${path}`, {
-      ...rest,
-      headers: { apikey: this.serviceKey, ...this.serviceKey.startsWith("eyJ") ? { Authorization: `Bearer ${this.serviceKey}` } : {}, "Content-Type": "application/json", ...prefer ? { Prefer: prefer } : {} },
-      signal: AbortSignal.timeout(1e4)
-    });
-    if (!res.ok) throw Object.assign(new Error(`SUPABASE_${res.status}`), { status: res.status });
-    const text = await res.text();
-    return text ? JSON.parse(text) : [];
-  }
-  rest(path, init) {
-    return this.call(`/rest/v1/${path}`, init);
-  }
-  rpc(name, args) {
-    return this.rest(`rpc/${name}`, { method: "POST", body: JSON.stringify(args) });
-  }
-  async find(phone) {
-    const rows = await this.rpc("whatsapp_workspace_for_phone", { p_phone: phone });
-    const r = rows[0];
-    return r ? { userId: r.user_id, workspaceId: r.workspace_id, accountId: r.account_id } : null;
-  }
-  async resolve(phone, name) {
-    let ws = await this.find(phone);
-    if (!ws) {
-      try {
-        await this.call("/auth/v1/admin/users", { method: "POST", body: JSON.stringify({ phone, phone_confirm: true, user_metadata: name ? { name } : {} }) });
-      } catch (e) {
-        if (e.status !== 422) throw e;
-      }
-      ws = await this.find(phone);
-    }
-    if (!ws) throw new Error("LEDGER_PROVISION_FAILED");
-    await this.ensureCategories(ws.workspaceId);
-    return ws;
-  }
-  async categoryMap(workspaceId) {
-    const rows = await this.rest(`finance_categories?workspace_id=eq.${workspaceId}&select=id,name&limit=200`);
-    return new Map(rows.map((r) => [r.name, r.id]));
-  }
-  async ensureCategories(workspaceId) {
-    const have = await this.categoryMap(workspaceId);
-    const missing = CATEGORIES.filter((c) => !have.has(c));
-    if (!missing.length) return;
-    await this.rest(`finance_categories?on_conflict=workspace_id,name`, {
+  async sendText(phone, message) {
+    const res = await this.fetchImpl(`https://api.z-api.io/instances/${encodeURIComponent(this.instanceId)}/token/${encodeURIComponent(this.token)}/send-text`, {
       method: "POST",
-      body: JSON.stringify(missing.map((name) => ({ workspace_id: workspaceId, name, kind: name === "Renda" ? "income" : "expense" }))),
-      prefer: "resolution=ignore-duplicates,return=minimal"
+      headers: { "Content-Type": "application/json", "Client-Token": this.clientToken },
+      // delayTyping: mostra "digitando…" por 2s, mais natural e mais seguro contra detecção de robô.
+      body: JSON.stringify({ phone, message: message.slice(0, 3800), delayTyping: 2 }),
+      signal: AbortSignal.timeout(15e3)
     });
+    if (!res.ok) throw new Error(`ZAPI_SEND_${res.status}`);
   }
-  async load(ws) {
-    const [summary2, rows, cats] = await Promise.all([
-      this.rpc("whatsapp_ledger_summary", { p_workspace: ws.workspaceId }),
-      this.rest(
-        `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id,created_at&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
-      ),
-      this.categoryMap(ws.workspaceId)
-    ]);
-    const nameOf = new Map([...cats].map(([name, id]) => [id, name]));
-    const opening = Number(summary2[0]?.opening_cents ?? 0);
-    const net = Number(summary2[0]?.net_cents ?? 0);
-    const visible = [];
-    for (const r of rows) {
-      if (visible.length >= MAX_STATE_TRANSACTIONS) break;
-      const amount = Number(r.amount);
-      const description = String(r.description ?? "").trim().slice(0, 120);
-      if (!agentCanSee({ amount, date: r.effective_date, description })) continue;
-      visible.push({ id: r.id, type: r.type === "income" ? "receita" : "despesa", amount, description, date: r.effective_date, ...r.category_id && nameOf.get(r.category_id) ? { category: nameOf.get(r.category_id).slice(0, 50) } : {} });
-    }
-    const newest = visible.length ? rows.filter((r) => visible.some((v) => v.id === r.id)).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0]?.id : void 0;
-    visible.reverse();
-    const builtIn = new Set(CATEGORIES);
-    const customCategories = [...cats.keys()].filter((name) => !builtIn.has(name) && name.length <= 30).slice(0, 40);
-    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...newest ? { lastRecordId: newest } : {} };
-  }
-  async apply(ws, changes, key) {
-    if (!changes.create.length && !changes.update.length && !changes.remove.length) return;
-    let cats = await this.categoryMap(ws.workspaceId);
-    const wanted = [...new Set([...changes.create, ...changes.update].map((e) => e.category).filter((c) => Boolean(c) && !cats.has(c)))];
-    if (wanted.length) {
-      await this.rest(`finance_categories?on_conflict=workspace_id,name`, {
-        method: "POST",
-        body: JSON.stringify(wanted.map((name) => ({ workspace_id: ws.workspaceId, name, kind: "both" }))),
-        prefer: "resolution=ignore-duplicates,return=minimal"
-      });
-      cats = await this.categoryMap(ws.workspaceId);
-    }
-    const catId = (name) => name ? cats.get(name) ?? null : null;
-    let i = 0;
-    for (const e of changes.create) {
-      await this.rpc("finance_create_transaction", {
-        target_workspace_id: ws.workspaceId,
-        target_account_id: ws.accountId,
-        target_category_id: catId(e.category),
-        target_description: e.description,
-        target_amount: e.amount,
-        target_type: e.type === "receita" ? "income" : "expense",
-        target_status: "confirmed",
-        target_competence_date: e.date,
-        target_expected_date: e.date,
-        target_effective_date: e.date,
-        target_origin: "ai",
-        target_payment_method: null,
-        target_note: "Registrado pelo Pulse no WhatsApp",
-        // Mesma mensagem reprocessada = mesma chave = nenhum lançamento duplicado.
-        target_idempotency_key: `${key}:${i++}`
-      });
-    }
-    for (const e of changes.update) {
-      await this.rest(`finance_transactions?id=eq.${e.id}&workspace_id=eq.${ws.workspaceId}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          description: e.description,
-          amount: e.amount,
-          type: e.type === "receita" ? "income" : "expense",
-          competence_date: e.date,
-          effective_date: e.date,
-          category_id: catId(e.category)
-        })
-      });
-    }
-    for (const id of changes.remove) {
-      await this.rest(`finance_transactions?id=eq.${id}&workspace_id=eq.${ws.workspaceId}`, { method: "DELETE" });
-    }
+  async downloadAudio(url, maxBytes) {
+    if (!isSafeMediaUrl(url)) throw new Error("AUDIO_URL_NOT_ALLOWED");
+    const res = await this.fetchImpl(url, { signal: AbortSignal.timeout(2e4), redirect: "error" });
+    if (!res.ok) throw new Error(`AUDIO_DOWNLOAD_${res.status}`);
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) throw new Error("AUDIO_TOO_LARGE");
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.byteLength > maxBytes) throw new Error("AUDIO_TOO_LARGE");
+    return bytes;
   }
 };
+
+// server/whatsapp/reminders.ts
+var REPLY_WINDOW_MS = 48 * 36e5;
+var first = (name) => name?.trim().split(/\s+/)[0] || void 0;
+var YES = /^(sim|s|caiu|ja caiu|caiu sim|ja foi|foi|foi sim|recebi|recebi sim|ja recebi|paguei|ja paguei|pago|ja ta pago|ta na conta|ja ta na conta|entrou|ja entrou|pode dar baixa|da baixa|dar baixa|pode dar|confirmo|isso|isso mesmo|ok|certo|beleza)[.! ]*$/;
+var NO = /^(nao|n|ainda nao|ainda n|nao caiu|ainda nao caiu|nao foi|ainda nao foi|nao recebi|ainda nao recebi|nao paguei|ainda nao paguei|amanha|depois|mais tarde)[.! ]*$/;
+var OFF = /^(parar|pare|para|desativar|desligar|cancelar)( os| as)? lembretes?( por favor)?[.! ]*$/;
+var ON = /^(ativar|voltar|religar|ligar|retomar)( os| as)? lembretes?[.! ]*$/;
+var plain = (t) => t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+async function handleReminderReply(deps, phone, name, text) {
+  const t = plain(text);
+  const nm = first(name);
+  if (OFF.test(t)) {
+    await deps.store.setRemindersEnabled(phone, false);
+    return `Combinado${nm ? `, ${nm}` : ""}! N\xE3o te mando mais lembretes. Se quiser de volta, \xE9 s\xF3 dizer "ativar lembretes". \u{1F609}`;
+  }
+  if (ON.test(t)) {
+    await deps.store.setRemindersEnabled(phone, true);
+    return `Fechado${nm ? `, ${nm}` : ""}! Os lembretes voltaram. \u{1F49C}`;
+  }
+  const yes = YES.test(t), no = NO.test(t);
+  if (!yes && !no) return void 0;
+  const nowMs = deps.now?.() ?? Date.now();
+  const waiting = await deps.store.awaitingReminders(phone, new Date(nowMs - REPLY_WINDOW_MS).toISOString());
+  if (!waiting.length) return void 0;
+  const batch = waiting.filter((w) => w.last_sent_at === waiting[0].last_sent_at);
+  if (no) return `Tranquilo${nm ? `, ${nm}` : ""}! Amanh\xE3 eu te pergunto de novo. \u{1F609}`;
+  const today = deps.today?.() ?? todayBR();
+  const ws = await deps.ledger.resolve(phone, name ?? void 0);
+  const due = new Map((await deps.ledger.due(ws, today)).map((d) => [d.id, d]));
+  const done = [];
+  let failed = 0;
+  for (const w of batch) {
+    const item = due.get(w.transaction_id);
+    if (!item) {
+      await deps.store.markAnswered([w.transaction_id], new Date(nowMs).toISOString());
+      continue;
+    }
+    try {
+      await deps.ledger.confirm(ws, item.id, today);
+      done.push(item);
+    } catch (e) {
+      failed++;
+      deps.log?.({ event: "reminder_confirm_failed", message: e instanceof Error ? e.message : "unknown" });
+    }
+  }
+  await deps.store.markAnswered(done.map((d) => d.id), new Date(nowMs).toISOString());
+  if (!done.length && failed) return "N\xE3o consegui dar baixa agora. Tenta de novo daqui a pouco, ou d\xE1 uma olhada no dashboard. \u{1F64F}";
+  if (!done.length) return `J\xE1 estava tudo certo por aqui${nm ? `, ${nm}` : ""}! \u{1F609}`;
+  const list = done.map((d) => `${d.description} (${brl(Math.round(d.amount * 100))})`).join(", ");
+  return `Boa${nm ? `, ${nm}` : ""}! Dei baixa em ${list}. \u{1F389}${failed ? " Um deles n\xE3o consegui agora, tenta de novo daqui a pouco." : ""}`;
+}
 
 // server/whatsapp/handler.ts
 var DAY = 365 * 24 * 60 * 60 * 1e3;
@@ -1830,7 +1945,7 @@ async function runAgent(deps, phone, message, messageId, source, name) {
       session.state.categories = before.customCategories;
       session.state.lastRecordId = before.lastRecordId;
     }
-    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws) });
+    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws), userName: name?.trim().split(/\s+/)[0] || void 0 });
     out.session.expiresAt = now + DAY;
     if (ws && deps.ledger && before && !out.trace.errorCode) {
       await deps.ledger.apply(ws, diffEntries(before.transactions, out.session.state.transactions), `wa:${messageId}`);
@@ -1954,9 +2069,16 @@ async function handleInbound(deps, input) {
       text = t.text;
       heard = t.text;
     } else text = input.text.slice(0, 2e3);
+    if (deps.ledger) {
+      const reminderReply = await handleReminderReply({ store: deps.store, ledger: deps.ledger, messenger: deps.messenger, today: deps.today, now: deps.now, log: deps.log }, phone, contact?.name || input.name, text).catch(() => void 0);
+      if (reminderReply) {
+        await deps.messenger.sendText(phone, reminderReply);
+        return;
+      }
+    }
     const source = input.kind === "audio" ? "audio" : "text";
     userText = text;
-    const out = await runAgent(deps, phone, text, messageId, source, input.name);
+    const out = await runAgent(deps, phone, text, messageId, source, contact?.name || input.name);
     if (out.trace.errorCode) {
       deps.log?.({ event: "whatsapp_agent_error", code: out.trace.errorCode });
       await recordTurn(deps, { phone, messageId, source, userText: text, replyText: messages.technicalProblem, trace: out.trace });

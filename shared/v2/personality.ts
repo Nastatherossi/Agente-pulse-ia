@@ -10,16 +10,38 @@ export const isCancellation=(m:string)=>/^(nao|n|cancela|cancelar|cancelado|deix
 export const isClear=(m:string)=>/^(limpa|limpar|apaga|apagar) (nossa |a )?conversa[.!]*$/.test(normalize(m.trim()));
 type Shown=NonNullable<PendingOperation['before']>|NonNullable<PendingOperation['items']>[number];
 const display=(v:Shown)=>'type' in v?`${v.description} · ${brl(Math.round(v.amount*100))} · ${v.date} · ${v.category||'sem categoria'}`:`${v.description} · ${brl(Math.round(v.amount*100))}${v.targetDate?' · '+v.targetDate:''}`;
-const closing='Confirma? Responda “sim” ou “cancelar”. Expira em 5 minutos.';
-export function describeOperation(op:PendingOperation,lead?:string){
+type Say={name?:string;today?:string};
+const cap=(t:string)=>t.charAt(0).toUpperCase()+t.slice(1);
+/** "Matheus, confirma pra mim…" when the name is known; otherwise the same sentence starting with a capital letter. */
+const addressed=(name:string|undefined,sentence:string)=>name?`${name}, ${sentence}`:cap(sentence);
+const dayOf=(date:string,today?:string)=>{
+ if(today&&date===today)return 'hoje';
+ if(today){const y=new Date(Date.parse(today+'T12:00:00Z')-86400000).toISOString().slice(0,10);if(date===y)return 'ontem';}
+ return `${date.slice(8,10)}/${date.slice(5,7)}`;
+};
+const when=(date:string,today?:string)=>{const d=dayOf(date,today);return d==='hoje'?'':`, ${d==='ontem'?'ontem':'dia '+d}`;};
+const bullet=(i:NonNullable<PendingOperation['items']>[number],today?:string)=>`• ${i.type==='receita'?'Receita':'Despesa'} · ${i.description} · ${brl(Math.round(i.amount*100))} · ${dayOf(i.date,today)} · ${i.category||'sem categoria'}`;
+const showRecord=(v:Shown,today?:string)=>'type' in v?`${v.description} (${brl(Math.round(v.amount*100))}${when(v.date,today)})`:`${v.description} (${brl(Math.round(v.amount*100))})`;
+/** Confirmation message. Conversational, calls the user by name, never shows internal formatting or timers. */
+export function describeOperation(op:PendingOperation,lead?:string,say:Say={}){
+ const {name,today}=say;
  if(op.kind==='create'){
-  const items=op.items!.map(i=>`• ${i.type==='receita'?'Receita':'Despesa'} · ${display(i)}`).join('\n');
-  const hint=op.items!.some(i=>i.type==='despesa'&&!i.category)?'\nQual categoria? Pode dizer junto com o sim (ex.: "sim, em Lazer").':'';
-  return `${lead||'Confirma antes de registrar?'}\n${items}${hint}\n${closing}`;
+  const items=op.items!;
+  const needsCategory=items.some(i=>i.type==='despesa'&&!i.category);
+  const hint=needsCategory?' Se quiser, já me diz a categoria junto com o sim (ex.: "sim, em Lazer").':'';
+  if(items.length===1){
+   const i=items[0],value=brl(Math.round(i.amount*100)),cat=i.category?` na categoria ${i.category}`:'';
+   const body=addressed(name,i.type==='receita'?`${lead?'':'confirma pra mim: '}vou registrar a receita "${i.description}" de ${value}${cat}${when(i.date,today)}. Pode ser?`:`${lead?'':'confirma pra mim: '}vou lançar "${i.description}" no valor de ${value}${cat}${when(i.date,today)}. Pode ser?`);
+   const joined=lead&&lead.endsWith(':')&&!name?body.charAt(0).toLowerCase()+body.slice(1):body;
+   return `${lead?lead+' ':''}${joined}${hint}`;
+  }
+  return `${lead?lead+' ':''}${addressed(name,`vou lançar estes ${items.length} aqui, pode ser?`)}\n${items.map(i=>bullet(i,today)).join('\n')}${hint?'\n'+hint.trim():''}`;
  }
- if(op.kind==='goal'&&!op.before)return `Criar meta?\nMeta: ${display(op.after!)}.\n${closing}`;
+ if(op.kind==='goal'&&!op.before)return addressed(name,`vou criar a meta "${op.after!.description}" de ${brl(Math.round(op.after!.amount*100))}${'targetDate' in op.after!&&op.after!.targetDate?' para '+op.after!.targetDate:''}. Pode ser?`);
  if(op.kind==='edit'&&op.before&&op.after&&'type' in op.before&&'type' in op.after&&op.after.category&&op.before.category!==op.after.category&&op.before.amount===op.after.amount&&op.before.description===op.after.description&&op.before.date===op.after.date)
-  return `${lead||'Perfeito!'} Quer que eu coloque este lançamento na categoria ${op.after.category}?\n• ${op.before.type==='receita'?'Receita':'Despesa'} · ${op.before.description} · ${brl(Math.round(op.before.amount*100))} · ${op.before.date}\n${closing}`;
- return `${op.kind==='delete'?'Excluir':'Alterar'} ${op.kind==='goal'?'meta':'lançamento'}?\nAntes: ${display(op.before!)}${op.after?'\nDepois: '+display(op.after):'\nDepois: lançamento excluído'}.\n${closing}`;
+  return `${lead?lead+' ':''}${addressed(name,`quer que eu coloque ${showRecord(op.before,today)} na categoria ${op.after.category}?`)}`;
+ if(op.kind==='delete')return addressed(name,`confirma que é pra apagar ${showRecord(op.before!,today)}?`);
+ const what=op.kind==='goal'?'a meta':'esse lançamento';
+ return `${addressed(name,`quer que eu altere ${what}?`)}\nAntes: ${display(op.before!)}\nDepois: ${op.after?display(op.after):'lançamento excluído'}`;
 }
 export function clearContext(session:Session){session.history=[];session.memory={periods:[]};session.lastRequests=[];}

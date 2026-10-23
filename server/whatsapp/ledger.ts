@@ -20,7 +20,13 @@ export interface Ledger {
   resolve(phone: string, name?: string): Promise<Workspace>;
   load(ws: Workspace): Promise<Snapshot>;
   apply(ws: Workspace, changes: Changes, key: string): Promise<void>;
+  /** Lançamentos previstos que já deveriam ter acontecido (data prevista até hoje, últimos 30 dias), ainda sem baixa. */
+  due(ws: Workspace, today: string): Promise<DueItem[]>;
+  /** "Dar baixa": marca o lançamento previsto como realizado na data informada. */
+  confirm(ws: Workspace, transactionId: string, effectiveDate: string): Promise<void>;
 }
+
+export type DueItem = { id: string; type: 'receita' | 'despesa'; amount: number; description: string; expectedDate: string; category?: string };
 
 export const MAX_STATE_TRANSACTIONS = 300;
 const MAX_INITIAL_CENTS = 100_000_000;
@@ -128,6 +134,20 @@ export class SupabaseLedger implements Ledger {
     });
   }
 
+  async due(ws: Workspace, today: string): Promise<DueItem[]> {
+    const from = new Date(Date.parse(`${today}T12:00:00Z`) - 30 * 86_400_000).toISOString().slice(0, 10);
+    const rows = await this.rest<{ id: string; type: 'income' | 'expense'; amount: number | string; description: string; expected_date: string; category_id: string | null }[]>(
+      `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=in.(planned,overdue)&settled_at=is.null&origin=neq.card&expected_date=lte.${today}&expected_date=gte.${from}&select=id,type,amount,description,expected_date,category_id&order=expected_date.asc&limit=20`
+    );
+    if (!rows.length) return [];
+    const names = new Map([...(await this.categoryMap(ws.workspaceId))].map(([name, id]) => [id, name]));
+    return rows.map(r => ({ id: r.id, type: r.type === 'income' ? 'receita' : 'despesa', amount: Number(r.amount), description: r.description, expectedDate: r.expected_date, category: r.category_id ? names.get(r.category_id) : undefined }));
+  }
+
+  async confirm(ws: Workspace, transactionId: string, effectiveDate: string) {
+    await this.rpc('finance_confirm_transaction', { target_transaction_id: transactionId, target_workspace_id: ws.workspaceId, target_effective_date: effectiveDate });
+  }
+
   async load(ws: Workspace): Promise<Snapshot> {
     const [summary, rows, cats] = await Promise.all([
       this.rpc<{ opening_cents: number | string; net_cents: number | string }[]>('whatsapp_ledger_summary', { p_workspace: ws.workspaceId }),
@@ -213,6 +233,11 @@ export class MemoryLedger implements Ledger {
   workspaces = new Map<string, { ws: Workspace; opening: number; entries: Entry[]; categories?: Set<string> }>();
   applied: { key: string; changes: Changes }[] = [];
   failNextApply = false;
+  /** Previstos de teste por workspace. */
+  planned = new Map<string, DueItem[]>();
+  confirmed: { id: string; date: string }[] = [];
+  async due(ws: Workspace, today: string) { return (this.planned.get(ws.workspaceId) ?? []).filter(i => i.expectedDate <= today && !this.confirmed.some(c => c.id === i.id)); }
+  async confirm(_ws: Workspace, id: string, date: string) { this.confirmed.push({ id, date }); }
   private seq = 0;
 
   async resolve(phone: string, _name?: string) {

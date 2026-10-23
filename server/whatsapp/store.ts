@@ -8,6 +8,8 @@ export type TurnDetail = UsageRecord & { message_id: string; source?: string; mo
 
 export type UsageRecord = { phone: string; model: string | null; input_tokens: number; output_tokens: number; status: string; error_code: string | null; created_at: string };
 
+export type ReminderState = { transaction_id: string; workspace_id: string; phone: string; sent_count: number; last_sent_at: string | null; answered_at: string | null };
+
 export type StoredSession = { session: unknown; version: number };
 
 /** Tudo que o canal precisa guardar. Duas implementações: Supabase (produção) e memória (testes). */
@@ -25,6 +27,14 @@ export interface Store {
   /** Consumo de IA por mensagem (tokens, modelo, erro). Nunca guarda o texto nem valores financeiros. */
   recordUsage(row: UsageRow): Promise<void>;
   usageSince(iso: string): Promise<UsageRecord[]>;
+  reminderStates(ids: string[]): Promise<ReminderState[]>;
+  /** Registra que estes lançamentos foram perguntados agora (soma 1 ao contador de cada um). */
+  markReminded(items: { id: string; workspaceId: string }[], phone: string, atIso: string): Promise<void>;
+  /** Lembretes enviados a esse número depois de `sinceIso` e ainda sem resposta. */
+  awaitingReminders(phone: string, sinceIso: string): Promise<ReminderState[]>;
+  markAnswered(ids: string[], atIso: string): Promise<void>;
+  lastReminderAt(phone: string): Promise<string | null>;
+  setRemindersEnabled(phone: string, enabled: boolean): Promise<void>;
   getSession(phone: string): Promise<StoredSession | null>;
   /** Grava só se a versão ainda for a lida (concorrência otimista). false = outra mensagem gravou antes. */
   saveSession(phone: string, session: unknown, expectedVersion: number | null): Promise<boolean>;
@@ -132,6 +142,38 @@ export class SupabaseStore implements Store {
     return this.rest<UsageRecord[]>(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
   }
 
+  async reminderStates(ids: string[]) {
+    if (!ids.length) return [];
+    return this.rest<ReminderState[]>(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(',')})&select=*`);
+  }
+
+  async markReminded(items: { id: string; workspaceId: string }[], phone: string, atIso: string) {
+    const have = new Map((await this.reminderStates(items.map(i => i.id))).map(r => [r.transaction_id, r.sent_count]));
+    await this.rest('whatsapp_reminders?on_conflict=transaction_id', {
+      method: 'POST',
+      body: JSON.stringify(items.map(i => ({ transaction_id: i.id, workspace_id: i.workspaceId, phone, sent_count: (have.get(i.id) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
+      prefer: 'resolution=merge-duplicates,return=minimal',
+    });
+  }
+
+  awaitingReminders(phone: string, sinceIso: string) {
+    return this.rest<ReminderState[]>(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
+  }
+
+  async markAnswered(ids: string[], atIso: string) {
+    if (!ids.length) return;
+    await this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(',')})`, { method: 'PATCH', body: JSON.stringify({ answered_at: atIso }), prefer: 'return=minimal' });
+  }
+
+  async lastReminderAt(phone: string) {
+    const rows = await this.rest<{ last_sent_at: string }[]>(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
+    return rows[0]?.last_sent_at ?? null;
+  }
+
+  async setRemindersEnabled(phone: string, enabled: boolean) {
+    await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: 'PATCH', body: JSON.stringify({ reminders_enabled: enabled }), prefer: 'return=minimal' });
+  }
+
   async getSession(phone: string) {
     const rows = await this.rest<{ session: unknown; version: number }[]>(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&select=session,version&limit=1`);
     return rows[0] ?? null;
@@ -161,6 +203,15 @@ export class MemoryStore implements Store {
   usage: UsageRow[] = [];
   async usageSince(): Promise<UsageRecord[]> { return []; }
   async recordUsage(r: UsageRow) { this.usage.push(r); }
+  reminders = new Map<string, ReminderState>();
+  async reminderStates(ids: string[]) { return ids.map(i => this.reminders.get(i)).filter((x): x is ReminderState => Boolean(x)); }
+  async markReminded(items: { id: string; workspaceId: string }[], phone: string, atIso: string) {
+    for (const i of items) { const cur = this.reminders.get(i.id); this.reminders.set(i.id, { transaction_id: i.id, workspace_id: i.workspaceId, phone, sent_count: (cur?.sent_count ?? 0) + 1, last_sent_at: atIso, answered_at: null }); }
+  }
+  async awaitingReminders(phone: string, sinceIso: string) { return [...this.reminders.values()].filter(r => r.phone === phone && !r.answered_at && (r.last_sent_at ?? '') >= sinceIso); }
+  async markAnswered(ids: string[], atIso: string) { for (const i of ids) { const r = this.reminders.get(i); if (r) r.answered_at = atIso; } }
+  async lastReminderAt(phone: string) { return [...this.reminders.values()].filter(r => r.phone === phone).map(r => r.last_sent_at ?? '').sort().at(-1) || null; }
+  async setRemindersEnabled(phone: string, enabled: boolean) { const c = this.contacts.get(phone); if (c) (c as Contact).reminders_enabled = enabled; }
   async getContact(phone: string) { return this.contacts.get(phone) ?? null; }
   async upsertContact(c: { phone: string; name?: string | null; status?: ContactStatus }) {
     const cur = this.contacts.get(c.phone);

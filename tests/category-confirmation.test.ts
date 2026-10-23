@@ -37,7 +37,7 @@ describe('categoria dita na confirmação',()=>{
  it('item ambíguo pergunta a categoria',async()=>{
   const s=await pending();
   const r=await send(model({calls:[tc('registrar_transacao',expense(3.5,'presente','gastei R$ 3,50 em presente'))]}),undefined,'gastei R$ 3,50 em presente','audio');
-  expect(r.trace.message).toContain('Qual categoria?');
+  expect(r.trace.message).toContain('já me diz a categoria');
  });
  it('"confirmo! mas lança como alimentação" confirma e grava com a categoria',async()=>{
   const s=await pending();

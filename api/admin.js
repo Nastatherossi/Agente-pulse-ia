@@ -64,11 +64,14 @@ Responda *autorizar* para liberar (ou *autorizar ${phone}*) ou *bloquear* para n
   ownerBadPhone: "N\xE3o entendi o n\xFAmero. Use o formato *autorizar 5511999999999* ou s\xF3 *autorizar* para liberar o \xFAltimo que pediu.",
   ownerEmptyList: "Ainda n\xE3o h\xE1 nenhum contato.",
   ownerHelp: "*Comandos do dono*\n\u2022 *autorizar* \u2014 libera o \xFAltimo n\xFAmero que pediu acesso\n\u2022 *autorizar 5511999999999 Nome* \u2014 libera um n\xFAmero\n\u2022 *bloquear* ou *bloquear 5511\u2026* \u2014 nega\n\u2022 *remover 5511\u2026* \u2014 apaga o contato e a conversa\n\u2022 *listar* \u2014 mostra todos os contatos",
-  welcome: (name) => `Oi${name ? `, ${name.split(/\s+/)[0]}` : ""}! Voc\xEA foi liberado para testar o *Pulse*, um assistente de finan\xE7as pelo WhatsApp.
+  welcome: (name) => `${name ? `Ei, ${name.split(/\s+/)[0]}!` : "Ei!"} Seja muito bem-vindo! \u{1F49C}
+Eu sou o Pulse, seu assistente pessoal de intelig\xEAncia artificial!
 
-Conte um gasto (ex.: "gastei 32 no almo\xE7o"), pergunte seu saldo ou mande um \xE1udio. Antes de gravar algo, eu confirmo com voc\xEA.
+T\xF4 aqui pra facilitar sua vida: posso te ajudar a organizar suas finan\xE7as, registrar seus gastos, acompanhar seu dinheiro, planejar seus objetivos e muito mais.
 
-\xC9 uma vers\xE3o de teste, ent\xE3o me avise se algo n\xE3o funcionar bem. \u{1F642}`,
+E o melhor: voc\xEA n\xE3o precisa decorar comandos nem preencher formul\xE1rios. \xC9 s\xF3 conversar comigo normalmente, por texto ou \xE1udio, como faria com qualquer pessoa. \u{1F399}\uFE0F
+
+Pra come\xE7ar, que tal me contar um pouquinho sobre voc\xEA? \u{1F604}`,
   loginCode: (code) => `Seu c\xF3digo de acesso ao Pulse \xE9 *${code}*.
 
 Digite na tela de login. Ele vale por poucos minutos e n\xE3o deve ser compartilhado. Se n\xE3o foi voc\xEA, \xE9 s\xF3 ignorar esta mensagem.`,
@@ -170,6 +173,32 @@ var SupabaseStore = class {
   }
   async usageSince(iso) {
     return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
+  }
+  async reminderStates(ids) {
+    if (!ids.length) return [];
+    return this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(",")})&select=*`);
+  }
+  async markReminded(items, phone, atIso) {
+    const have = new Map((await this.reminderStates(items.map((i) => i.id))).map((r) => [r.transaction_id, r.sent_count]));
+    await this.rest("whatsapp_reminders?on_conflict=transaction_id", {
+      method: "POST",
+      body: JSON.stringify(items.map((i) => ({ transaction_id: i.id, workspace_id: i.workspaceId, phone, sent_count: (have.get(i.id) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
+      prefer: "resolution=merge-duplicates,return=minimal"
+    });
+  }
+  awaitingReminders(phone, sinceIso) {
+    return this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
+  }
+  async markAnswered(ids, atIso) {
+    if (!ids.length) return;
+    await this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(",")})`, { method: "PATCH", body: JSON.stringify({ answered_at: atIso }), prefer: "return=minimal" });
+  }
+  async lastReminderAt(phone) {
+    const rows = await this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
+    return rows[0]?.last_sent_at ?? null;
+  }
+  async setRemindersEnabled(phone, enabled) {
+    await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify({ reminders_enabled: enabled }), prefer: "return=minimal" });
   }
   async getSession(phone) {
     const rows = await this.rest(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&select=session,version&limit=1`);
@@ -345,6 +374,18 @@ var SupabaseLedger = class {
       body: JSON.stringify(missing.map((name) => ({ workspace_id: workspaceId, name, kind: name === "Renda" ? "income" : "expense" }))),
       prefer: "resolution=ignore-duplicates,return=minimal"
     });
+  }
+  async due(ws, today) {
+    const from = new Date(Date.parse(`${today}T12:00:00Z`) - 30 * 864e5).toISOString().slice(0, 10);
+    const rows = await this.rest(
+      `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=in.(planned,overdue)&settled_at=is.null&origin=neq.card&expected_date=lte.${today}&expected_date=gte.${from}&select=id,type,amount,description,expected_date,category_id&order=expected_date.asc&limit=20`
+    );
+    if (!rows.length) return [];
+    const names = new Map([...await this.categoryMap(ws.workspaceId)].map(([name, id]) => [id, name]));
+    return rows.map((r) => ({ id: r.id, type: r.type === "income" ? "receita" : "despesa", amount: Number(r.amount), description: r.description, expectedDate: r.expected_date, category: r.category_id ? names.get(r.category_id) : void 0 }));
+  }
+  async confirm(ws, transactionId, effectiveDate) {
+    await this.rpc("finance_confirm_transaction", { target_transaction_id: transactionId, target_workspace_id: ws.workspaceId, target_effective_date: effectiveDate });
   }
   async load(ws) {
     const [summary, rows, cats] = await Promise.all([
@@ -605,6 +646,9 @@ function strictSchema(schema) {
 }
 var toolDefinitions = Object.entries(toolSchemas).map(([name, schema]) => ({ type: "function", function: { name, description: descriptions[name], parameters: strictSchema(z4.toJSONSchema(schema, { unrepresentable: "any" })), strict: true } }));
 var resultSchema = z4.object({ model: z4.string().optional(), usage: z4.object({ prompt_tokens: z4.number().int().nonnegative(), completion_tokens: z4.number().int().nonnegative(), total_tokens: z4.number().int().nonnegative() }).optional(), choices: z4.array(z4.object({ finish_reason: z4.string().nullish(), message: z4.object({ content: z4.string().nullish(), refusal: z4.string().nullish(), tool_calls: z4.array(z4.object({ id: z4.string().min(1).max(100), type: z4.literal("function"), function: z4.object({ name: z4.string().min(1).max(80), arguments: z4.string().max(1e4) }) })).max(8).optional() }) })).min(1) });
+
+// server/whatsapp/reminders.ts
+var REPLY_WINDOW_MS = 48 * 36e5;
 
 // server/whatsapp/handler.ts
 var DAY = 365 * 24 * 60 * 60 * 1e3;
