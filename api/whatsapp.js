@@ -1525,6 +1525,10 @@ var SupabaseLedger = class {
   rpc(name, args) {
     return this.rest(`rpc/${name}`, { method: "POST", body: JSON.stringify(args) });
   }
+  /** Só procura a conta do número; nunca cria (usado pela prévia de lembretes do painel). */
+  lookup(phone) {
+    return this.find(phone);
+  }
   async find(phone) {
     const rows = await this.rpc("whatsapp_workspace_for_phone", { p_phone: phone });
     const r = rows[0];
@@ -1728,6 +1732,15 @@ var SupabaseStore = class {
   }
   async problemTurns(iso, limit = 100) {
     return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
+  }
+  /** Painel de gestão: marca (ou desmarca, com null) um problema como resolvido. */
+  async setResolved(messageId, atIso) {
+    await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}`, { method: "PATCH", body: JSON.stringify({ resolved_at: atIso }), prefer: "return=minimal" });
+  }
+  /** Painel de gestão: lembretes enviados ou criados desde `iso` (histórico, só leitura). */
+  remindersSince(iso) {
+    const t = encodeURIComponent(iso);
+    return this.rest(`whatsapp_reminders?or=(last_sent_at.gte.${t},created_at.gte.${t})&select=*&order=last_sent_at.desc.nullslast&limit=1000`);
   }
   async turn(messageId) {
     const rows = await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}&select=*&limit=1`);
