@@ -22,7 +22,9 @@ var isoDate = z2.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => {
 });
 var money = z2.number().finite().positive().max(1e6).refine((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-5);
 var category = z2.string().trim().min(1).max(50);
-var transaction = z2.object({ type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: category.optional() }).strict();
+var cardRef = z2.object({ name: z2.string().trim().min(1).max(30).optional(), installments: z2.number().int().min(1).max(48).optional() }).strict();
+var cardInfo = z2.object({ name: z2.string().trim().min(1).max(30), closingDay: z2.number().int().min(1).max(31), dueDay: z2.number().int().min(1).max(31) }).strict();
+var transaction = z2.object({ type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: category.optional(), card: cardRef.optional() }).strict();
 var storedTransaction = transaction.extend({ id: z2.string().uuid() });
 var period = z2.object({ start: isoDate, end: isoDate }).strict().refine((p) => p.start <= p.end, "Per\xEDodo invertido");
 var preferences = z2.object({ style: z2.enum(["direto", "descontraido", "neutro", "formal"]).default("neutro"), detail: z2.enum(["curto", "detalhado"]).default("curto"), proactivity: z2.enum(["discreto", "equilibrado", "proativo"]).default("discreto"), explanation: z2.enum(["minima", "completa"]).default("minima"), examples: z2.boolean().default(false), emojis: z2.boolean().default(false) }).strict();
@@ -38,7 +40,8 @@ var schemas = {
   projetar_despesas: z2.object({ period, asOf: isoDate }).strict(),
   atualizar_preferencias: preferences,
   simular_compra: z2.object({ amount: money, available: money.optional() }).strict(),
-  definir_objetivo: goal
+  definir_objetivo: goal,
+  cadastrar_cartao: cardInfo
 };
 var CATEGORIES = ["Alimenta\xE7\xE3o", "Transporte", "Lazer", "Moradia", "Sa\xFAde", "Educa\xE7\xE3o", "Compras", "Contas e servi\xE7os", "Assinaturas", "Renda"];
 var NATURE_ALIASES = { fato: "fato_ocorrido", ocorrido: "fato_ocorrido", fato_ocorrida: "fato_ocorrido", fato_realizado: "fato_ocorrido", realizado: "fato_ocorrido", hipotetico: "hipotese", hipotetica: "hipotese", planejamento: "plano", intencao: "desejo", vontade: "desejo", pergunta: "duvida" };
@@ -49,7 +52,8 @@ var nature = z2.preprocess((v) => {
 }, z2.enum(["fato_ocorrido", "hipotese", "plano", "desejo", "duvida"]));
 var evidence = z2.string().trim().min(1).max(300);
 var modelCategory = z2.string().trim().max(50).nullable().optional();
-var entryFields = { type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: modelCategory };
+var modelCard = z2.object({ nome: z2.string().trim().max(30).nullable().optional(), parcelas: z2.number().int().min(1).max(48).nullable().optional() }).nullable().optional();
+var entryFields = { type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: modelCategory, cartao: modelCard };
 var target = z2.object({ transacao_id: z2.string().uuid().optional(), descricao: z2.string().trim().min(1).max(120).optional(), valor: money.optional(), data: isoDate.optional() }).strict().refine((t) => Object.keys(t).length > 0, "TARGET_REQUIRED");
 var toolSchemas = {
   consultar_saldo: schemas.consultar_saldo,
@@ -64,9 +68,10 @@ var toolSchemas = {
   propor_edicao_transacao: z2.object({ alvo: target, novo: z2.object({ amount: money.optional(), description: z2.string().trim().min(1).max(120).optional(), category: z2.string().trim().min(1).max(50).optional(), date: isoDate.optional() }).strict().refine((n) => Object.keys(n).length > 0, "CHANGE_REQUIRED"), evidencia: evidence }).strict(),
   propor_exclusao_transacao: z2.object({ alvo: target, evidencia: evidence }).strict(),
   atualizar_preferencias: z2.object({ style: z2.enum(["direto", "descontraido", "neutro", "formal"]).optional(), detail: z2.enum(["curto", "detalhado"]).optional(), proactivity: z2.enum(["discreto", "equilibrado", "proativo"]).optional(), explanation: z2.enum(["minima", "completa"]).optional(), examples: z2.boolean().optional(), emojis: z2.boolean().optional(), redefinir: z2.boolean().optional(), evidencia: evidence }).strict(),
-  definir_objetivo: goal.extend({ evidencia: evidence }).strict()
+  definir_objetivo: goal.extend({ evidencia: evidence }).strict(),
+  cadastrar_cartao: z2.object({ nome: z2.string().trim().min(1).max(30), dia_fechamento: z2.number().int().min(1).max(31), dia_vencimento: z2.number().int().min(1).max(31), evidencia: evidence }).strict()
 };
-var WRITE_TOOLS = /* @__PURE__ */ new Set(["registrar_transacao", "registrar_varios", "propor_edicao_transacao", "propor_exclusao_transacao", "atualizar_preferencias", "definir_objetivo"]);
+var WRITE_TOOLS = /* @__PURE__ */ new Set(["registrar_transacao", "registrar_varios", "propor_edicao_transacao", "propor_exclusao_transacao", "atualizar_preferencias", "definir_objetivo", "cadastrar_cartao"]);
 var financialState = z2.object({
   initialBalanceCents: z2.number().int().min(0).max(1e8),
   transactions: z2.array(transaction.extend({ id: z2.string().uuid() })).max(300),
@@ -75,7 +80,11 @@ var financialState = z2.object({
   /** The user's own categories (beyond CATEGORIES). Loaded from the ledger; the user may create more by asking. */
   categories: z2.array(category.max(30)).max(40).optional(),
   /** The record registered most recently ("isso", "esse", "o último" refer to it). */
-  lastRecordId: z2.string().uuid().optional()
+  lastRecordId: z2.string().uuid().optional(),
+  /** Cartões cadastrados (vêm do banco a cada mensagem). */
+  cards: z2.array(cardInfo).max(10).optional(),
+  /** Compras no cartão registradas NESTA mensagem; o servidor grava na fatura e esvazia. Não entram no saldo. */
+  cardPurchases: z2.array(transaction.extend({ id: z2.string().uuid() })).max(20).optional()
 }).strict();
 var pendingOperation = z2.object({ id: z2.string().uuid(), kind: z2.enum(["edit", "delete", "goal", "create"]), targetId: z2.string().uuid().optional(), before: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), after: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), items: z2.array(transaction).min(1).max(5).optional(), createdAt: z2.number().int(), expiresAt: z2.number().int() }).strict().refine((op) => op.kind === "create" ? Boolean(op.items) && !op.before : op.kind === "goal" ? Boolean(op.after) && !op.items : Boolean(op.before) && !op.items, "OPERATION_SHAPE");
 var memory = z2.object({ topic: z2.enum(["saldo", "despesas", "receitas", "analise"]).optional(), periods: z2.array(period).max(2).default([]), transactionDate: isoDate.optional(), pending: transaction.optional(), operation: pendingOperation.optional() }).strict();
@@ -97,11 +106,50 @@ function validateModelCall(call) {
   return { id: call.id, name, arguments: toolSchemas[name].parse(dropNulls(call.arguments)) };
 }
 
+// shared/v2/cards.ts
+var cardKey = (name) => normalize(name).replace(/\bcartao\b/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+function findCard(cards, name) {
+  const list = cards ?? [];
+  if (!name || !cardKey(name)) return list.length === 1 ? list[0] : void 0;
+  const key = cardKey(name);
+  return list.find((c) => cardKey(c.name) === key);
+}
+var iso = (y, m, d) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+var lastDay = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+var addMonths = (y, m, n) => {
+  const t = y * 12 + (m - 1) + n;
+  return { y: Math.floor(t / 12), m: t % 12 + 1 };
+};
+function invoiceFor(card, purchaseDate, index = 0) {
+  const y0 = Number(purchaseDate.slice(0, 4)), m0 = Number(purchaseDate.slice(5, 7)), day = Number(purchaseDate.slice(8, 10));
+  const base = addMonths(y0, m0, day > card.closingDay ? 1 : 0), c = addMonths(base.y, base.m, index);
+  const closingDate = iso(c.y, c.m, Math.min(card.closingDay, lastDay(c.y, c.m)));
+  const d = card.dueDay > card.closingDay ? c : addMonths(c.y, c.m, 1);
+  const dueDate = iso(d.y, d.m, Math.min(card.dueDay, lastDay(d.y, d.m)));
+  return { competence: iso(c.y, c.m, 1), closingDate, dueDate };
+}
+function installmentsIn(text) {
+  const t = normalize(text);
+  const m = t.match(/\b(\d{1,2})\s*(?:x|vezes)\b/) || t.match(/\b(?:em|de)\s+(\d{1,2})\s+(?:parcelas?|vezes|x)\b/) || t.match(/\b(\d{1,2})\s+parcelas?\b/) || t.match(/\bparcel\w*\s+(?:em\s+)?(\d{1,2})\b/);
+  const n = m ? Number(m[1]) : void 0;
+  return n && n >= 1 && n <= 48 ? n : void 0;
+}
+var dm = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+
 // shared/v2/personality.ts
 var isConfirmation = (m) => /^(sim|s|isso|isso mesmo|pode|pode sim|pode registrar|pode confirmar|pode alterar|pode excluir|claro|confirmo|confirma|confirmar|confirmado|ok|beleza|certo|fechado|manda ver|confirmar registro ficticio)[.! ]*$/.test(normalize(m.trim()));
+var isRecordRequest = (m) => /^(nada( ainda)?[,.! ]+)?(so |apenas |entao |pode )?(registra|registre|registrar|anota|anote|anotar|lanca|lance|lancar)( isso| ai| a compra| esse gasto| por favor| pf| pfv)*[.! ]*$/.test(normalize(m.trim()));
 var isCancellation = (m) => /^(nao|n|cancela|cancelar|cancelado|deixa|deixa pra la|deixa quieto|melhor nao|nao quero|esquece|nao,? deixa como estava|nao,? cancela)[.!, ]*$/.test(normalize(m.trim()));
 var isClear = (m) => /^(limpa|limpar|apaga|apagar) (nossa |a )?conversa[.!]*$/.test(normalize(m.trim()));
 var display = (v) => "type" in v ? `${v.description} \xB7 ${brl(Math.round(v.amount * 100))} \xB7 ${v.date} \xB7 ${v.category || "sem categoria"}` : `${v.description} \xB7 ${brl(Math.round(v.amount * 100))}${v.targetDate ? " \xB7 " + v.targetDate : ""}`;
+function cardPhrase(i, cards) {
+  if (!i.card) return "";
+  const n = i.card.installments ?? 1, known = findCard(cards, i.card.name);
+  const where = `no cart\xE3o${i.card.name ? " " + i.card.name : ""}`;
+  const parts = n > 1 ? ` em ${n}x de ${brl(Math.round(i.amount / n * 100))}` : "";
+  const due = known ? ` (${n > 1 ? "a primeira parcela cai" : "cai"} na fatura que vence ${dm(invoiceFor(known, i.date).dueDate)})` : "";
+  return ` ${where}${parts}${due}`;
+}
 var cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
 var addressed = (name, sentence) => name ? `${name}, ${sentence}` : cap(sentence);
 var dayOf = (date, today) => {
@@ -116,7 +164,7 @@ var when = (date, today) => {
   const d = dayOf(date, today);
   return d === "hoje" ? "" : `, ${d === "ontem" ? "ontem" : "dia " + d}`;
 };
-var bullet = (i, today) => `\u2022 ${i.type === "receita" ? "Receita" : "Despesa"} \xB7 ${i.description} \xB7 ${brl(Math.round(i.amount * 100))} \xB7 ${dayOf(i.date, today)} \xB7 ${i.category || "sem categoria"}`;
+var bullet = (i, today, cards) => `\u2022 ${i.type === "receita" ? "Receita" : "Despesa"} \xB7 ${i.description} \xB7 ${brl(Math.round(i.amount * 100))} \xB7 ${dayOf(i.date, today)} \xB7 ${i.category || "sem categoria"}${cardPhrase(i, cards).replace(/^ no cartão/, " \xB7 cart\xE3o")}`;
 var showRecord = (v, today) => "type" in v ? `${v.description} (${brl(Math.round(v.amount * 100))}${when(v.date, today)})` : `${v.description} (${brl(Math.round(v.amount * 100))})`;
 function describeOperation(op, lead, say = {}) {
   const { name, today } = say;
@@ -125,13 +173,13 @@ function describeOperation(op, lead, say = {}) {
     const needsCategory = items.some((i) => i.type === "despesa" && !i.category);
     const hint = needsCategory ? ' Se quiser, j\xE1 me diz a categoria junto com o sim (ex.: "sim, em Lazer").' : "";
     if (items.length === 1) {
-      const i = items[0], value = brl(Math.round(i.amount * 100)), cat = i.category ? ` na categoria ${i.category}` : "";
+      const i = items[0], value = brl(Math.round(i.amount * 100)), cat = (i.category ? ` na categoria ${i.category}` : "") + cardPhrase(i, say.cards);
       const body = addressed(name, i.type === "receita" ? `${lead ? "" : "confirma pra mim: "}vou registrar a receita "${i.description}" de ${value}${cat}${when(i.date, today)}. Pode ser?` : `${lead ? "" : "confirma pra mim: "}vou lan\xE7ar "${i.description}" no valor de ${value}${cat}${when(i.date, today)}. Pode ser?`);
       const joined = lead && lead.endsWith(":") && !name ? body.charAt(0).toLowerCase() + body.slice(1) : body;
       return `${lead ? lead + " " : ""}${joined}${hint}`;
     }
     return `${lead ? lead + " " : ""}${addressed(name, `vou lan\xE7ar estes ${items.length} aqui, pode ser?`)}
-${items.map((i) => bullet(i, today)).join("\n")}${hint ? "\n" + hint.trim() : ""}`;
+${items.map((i) => bullet(i, today, say.cards)).join("\n")}${hint ? "\n" + hint.trim() : ""}`;
   }
   if (op.kind === "goal" && !op.before) return addressed(name, `vou criar a meta "${op.after.description}" de ${brl(Math.round(op.after.amount * 100))}${"targetDate" in op.after && op.after.targetDate ? " para " + op.after.targetDate : ""}. Pode ser?`);
   if (op.kind === "edit" && op.before && op.after && "type" in op.before && "type" in op.after && op.after.category && op.before.category !== op.after.category && op.before.amount === op.after.amount && op.before.description === op.after.description && op.before.date === op.after.date)
@@ -346,8 +394,10 @@ var FinancialCoreV2 = class {
     if (this.completed.has(op.id)) throw new Error("CONFIRMATION_USED");
     if (op.kind === "create") {
       const items = op.items.map((item) => storedTransaction.parse({ ...item, id: crypto.randomUUID() }));
-      if (this.state.transactions.length + items.length > 300) throw new Error("SESSION_FULL");
-      this.state.transactions.push(...items);
+      const cardItems = items.filter((i) => i.card), plain = items.filter((i) => !i.card);
+      if (this.state.transactions.length + plain.length > 300 || (this.state.cardPurchases?.length ?? 0) + cardItems.length > 20) throw new Error("SESSION_FULL");
+      this.state.transactions.push(...plain);
+      if (cardItems.length) this.state.cardPurchases = [...this.state.cardPurchases ?? [], ...cardItems];
       const result2 = { operationId: op.id, created: items, balanceCents: balanceCents(this.state) };
       this.completed.set(op.id, { payload: JSON.stringify(op), result: result2 });
       return structuredClone(result2);
@@ -384,10 +434,24 @@ var FinancialCoreV2 = class {
         result = { balanceCents: balanceCents(this.state), currency: "BRL" };
         break;
       case "registrar_transacao": {
-        if (this.state.transactions.length >= 300) throw new Error("SESSION_FULL");
         const transaction2 = { ...a, id: crypto.randomUUID() };
-        this.state.transactions.push(transaction2);
+        if (transaction2.card) {
+          if ((this.state.cardPurchases?.length ?? 0) >= 20) throw new Error("SESSION_FULL");
+          this.state.cardPurchases = [...this.state.cardPurchases ?? [], transaction2];
+        } else {
+          if (this.state.transactions.length >= 300) throw new Error("SESSION_FULL");
+          this.state.transactions.push(transaction2);
+        }
         result = { transaction: transaction2, balanceCents: balanceCents(this.state) };
+        break;
+      }
+      case "cadastrar_cartao": {
+        const card = a;
+        const key = cardKey(card.name);
+        const rest = (this.state.cards ?? []).filter((c) => cardKey(c.name) !== key);
+        if (rest.length >= 10) throw new Error("SESSION_FULL");
+        this.state.cards = [...rest, card];
+        result = { card };
         break;
       }
       case "listar_transacoes": {
@@ -462,7 +526,7 @@ var OLDEST_DAYS = 366;
 var cents2 = (n) => Math.round(n * 100);
 var squash = (s) => normalize(s).replace(/[^a-z0-9]+/g, " ").trim();
 function amountsIn(text) {
-  const t = text.replace(/\d{4}-\d{2}-\d{2}/g, " ").replace(/\b(?:dia|no dia|até o dia|ate o dia)\s+(?:[12]?\d|3[01])\b(?!\s*(?:reais|real|r\$|,\d))/gi, " ").replace(/\b\d{1,2}\s*(?:x|vezes)\b/gi, " ").replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, " ");
+  const t = text.replace(/\d{4}-\d{2}-\d{2}/g, " ").replace(/\b(?:dia|no dia|até o dia|ate o dia)\s+(?:[12]?\d|3[01])\b(?!\s*(?:reais|real|r\$|,\d))/gi, " ").replace(/\b\d{1,2}\s*(?:x|vezes|parcelas?)\b/gi, " ").replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, " ");
   const out = [];
   for (const m of t.matchAll(/(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)(\s*(?:mil\b|k\b))?/gi)) {
     const raw = m[1];
@@ -514,17 +578,32 @@ function normalizeCategory(raw, message, description, type, custom = []) {
   if (type === "receita" && guess !== "Renda") return void 0;
   return guess;
 }
-function entryFrom(a, message, custom = []) {
+function entryFrom(a, message, custom = [], cards = []) {
   const e = { type: a.type, amount: a.amount, description: String(a.description), date: String(a.date) };
   const category2 = normalizeCategory(a.category, message, e.description, e.type, custom);
   if (category2) e.category = category2;
+  const raw = a.cartao;
+  if (raw && e.type === "despesa") {
+    const said = typeof raw.nome === "string" ? raw.nome.replace(/[^\p{L}\p{N} &'\-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 30) : "";
+    let name;
+    if (said) {
+      const known = findCard(cards, said);
+      if (known) name = known.name;
+      else if (normalize(message).includes(normalize(said))) name = said;
+    } else name = findCard(cards)?.name;
+    const parsed = installmentsIn(message);
+    const installments = Math.max(raw.parcelas ?? 1, 1) > 1 ? raw.parcelas : parsed && parsed > 1 ? parsed : 1;
+    e.card = { ...name ? { name } : {}, ...installments > 1 ? { installments } : {} };
+  }
   return e;
 }
 function blockForEntry(e, evidence2, ctx) {
   if (e.date > ctx.today) return "FUTURE_DATE";
   if (e.date < dateOffset(ctx.today, -OLDEST_DAYS)) return "DATE_TOO_OLD";
   const { text } = backing(ctx);
-  if (!hasAmount(text, e.amount)) return "AMOUNT_NOT_IN_MESSAGE";
+  const n = e.card?.installments ?? 1;
+  if (n > 1 && installmentsIn(text) !== n) return "INSTALLMENTS_NOT_IN_MESSAGE";
+  if (!hasAmount(text, e.amount) && !(n > 1 && amountsIn(text).some((v) => cents2(v * n) === cents2(e.amount)))) return "AMOUNT_NOT_IN_MESSAGE";
   if (!contains(text, evidence2)) return "EVIDENCE_NOT_IN_MESSAGE";
   return void 0;
 }
@@ -546,13 +625,15 @@ function decideCreate(call, ctx) {
   if (ctx.risk) return { decision: "block", reason: "RISK_CONTEXT" };
   if (a.natureza !== "fato_ocorrido") return { decision: "block", reason: "NOT_A_FACT" };
   const items = call.name === "registrar_varios" ? a.lancamentos : [a];
-  const entries = items.map((i) => entryFrom(i, backing(ctx).text, ctx.session.state.categories ?? []));
+  const cards = ctx.session.state.cards ?? [];
+  const entries = items.map((i) => entryFrom(i, backing(ctx).text, ctx.session.state.categories ?? [], cards));
   for (let i = 0; i < entries.length; i++) {
     const reason2 = blockForEntry(entries[i], String(items[i].evidencia), ctx);
     if (reason2) return { decision: "block", reason: reason2 };
   }
+  if (entries.some((e) => e.card && !e.card.name) && cards.length > 1) return { decision: "block", reason: "CARD_UNSPECIFIED" };
   if (entries.length > 1) return { decision: "confirm", reason: "MULTIPLE_ENTRIES", entries };
-  const reason = confirmForEntry(entries[0], ctx);
+  const reason = confirmForEntry(entries[0], ctx) ?? ((entries[0].card?.installments ?? 1) > 1 ? "INSTALLMENTS" : void 0);
   if (reason) return { decision: "confirm", reason, entries };
   return ctx.viaAudio ? { decision: "confirm", reason: "FROM_AUDIO", entries } : { decision: "execute", entries };
 }
@@ -572,6 +653,19 @@ function decideGoal(call, ctx) {
   if (ctx.viaAudio) return { decision: "confirm", reason: "FROM_AUDIO", goal: parsed };
   if (!/\b(meta|objetivo|defina|definir|crie|criar|registre|registrar)\b/.test(normalize(ctx.message)) || tentative(ctx.message)) return { decision: "confirm", reason: "GOAL_NOT_EXPLICIT", goal: parsed };
   return { decision: "execute", goal: parsed };
+}
+function decideCard(call, ctx) {
+  const a = call.arguments;
+  if (ctx.risk) return { decision: "block", reason: "RISK_CONTEXT" };
+  if (!contains(ctx.message, String(a.evidencia))) return { decision: "block", reason: "EVIDENCE_NOT_IN_MESSAGE" };
+  const closingDay = a.dia_fechamento, dueDay = a.dia_vencimento;
+  const digits = (n) => new RegExp(`(^|[^0-9])0?${n}([^0-9]|$)`).test(ctx.message);
+  if (!digits(closingDay) || !digits(dueDay)) return { decision: "block", reason: "CARD_DAYS_NOT_IN_MESSAGE" };
+  const name = String(a.nome).replace(/[^\p{L}\p{N} &'\-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 30);
+  const recent = [ctx.message, ...ctx.session.history.slice(-4).map((h) => h.content)].map(normalize).join(" ");
+  const key = normalize(name).replace(/\bcartao\b/g, " ").replace(/\s+/g, " ").trim();
+  if (!key || !recent.includes(key)) return { decision: "block", reason: "CARD_NAME_NOT_IN_MESSAGE" };
+  return { decision: "execute", card: { name, closingDay, dueDay } };
 }
 function lastRecord(state) {
   return state.transactions.find((t) => t.id === state.lastRecordId) ?? state.transactions[state.transactions.length - 1];
@@ -636,6 +730,12 @@ function blockedMessage(reason) {
       return "H\xE1 mais de um lan\xE7amento poss\xEDvel. Informe a descri\xE7\xE3o e a data ou o valor original para identificar um \xFAnico registro.";
     case "TARGET_NOT_FOUND":
       return "N\xE3o encontrei esse lan\xE7amento. Pode me dizer a descri\xE7\xE3o e a data ou o valor original?";
+    case "INSTALLMENTS_NOT_IN_MESSAGE":
+      return "N\xE3o ficou claro em quantas parcelas foi. Me diz o valor total e quantas vezes?";
+    case "CARD_DAYS_NOT_IN_MESSAGE":
+      return "N\xE3o peguei os dias com certeza. Me diz de novo: que dia a fatura fecha e que dia vence?";
+    case "CARD_NAME_NOT_IN_MESSAGE":
+      return "Qual \xE9 o nome desse cart\xE3o?";
     case "INVALID_CHANGE":
       return "O novo dado \xE9 inv\xE1lido. Informe um valor positivo com at\xE9 duas casas decimais ou uma data ISO v\xE1lida.";
     default:
@@ -656,6 +756,8 @@ function confirmLead(reason) {
       return "S\xF3 pra ter certeza de que isso j\xE1 aconteceu:";
     case "MULTIPLE_AMOUNTS":
       return "Vi mais de um valor na sua mensagem, ent\xE3o quero ter certeza:";
+    case "INSTALLMENTS":
+      return "Compra parcelada, ent\xE3o confirmo com voc\xEA:";
     case "HIGH_VALUE":
       return "\xC9 um valor alto, ent\xE3o confirmo com voc\xEA:";
     case "RELATIVE_DATE":
@@ -719,16 +821,23 @@ var RETRYABLE = /* @__PURE__ */ new Set(["VALIDATION_FAILED", "UNKNOWN_TOOL"]);
 var LIMITS = { steps: 4, tools: 8, timeoutMs: 35e3, tokens: 3e4 };
 var messageHash = async (text) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))).map((n) => n.toString(16).padStart(2, "0")).join("");
 var errorMessage = (code) => ({ OPENAI_AUTH_FAILED: "A chave OpenAI n\xE3o foi aceita. Verifique a configura\xE7\xE3o do laborat\xF3rio.", OPENAI_QUOTA_EXCEEDED: "A OpenAI informou falta de cr\xE9ditos ou limite de uso.", OPENAI_RATE_LIMITED: "A OpenAI est\xE1 limitando requisi\xE7\xF5es. Aguarde antes de tentar de novo.", MODEL_INCOMPATIBLE: "O modelo n\xE3o aceitou o contrato de ferramentas.", OPENAI_TIMEOUT: "A OpenAI n\xE3o respondeu no prazo.", REAL_AI_LOCKED: "IA real bloqueada na configura\xE7\xE3o do laborat\xF3rio.", INVALID_SESSION: "Esta sess\xE3o perdeu a validade. Inicie uma nova sess\xE3o.", STEP_LIMIT: "Parei no limite de etapas. Tente uma pergunta mais espec\xEDfica.", TOKEN_LIMIT: "Parei no limite de consumo desta intera\xE7\xE3o.", LOOP_DETECTED: "A consulta se repetiu. Parei para evitar um loop." })[code] || "N\xE3o consegui concluir esta intera\xE7\xE3o. Nenhum sucesso de ferramenta foi inventado.";
-function readable(step, detail, live = false, name) {
+function cardAsk(t) {
+  return t.card?.name ? `Vamos cadastrar o ${t.card.name}? Se voc\xEA me contar que dia ele fecha e qual dia vence, deixo tudo organizado na fatura certa. \u{1F609}` : "Vamos cadastrar esse cart\xE3o? Se voc\xEA me contar o nome, que dia ele fecha e qual dia vence, deixo tudo organizado na fatura certa. \u{1F609}";
+}
+function readable(step, detail, live = false, name, cards = []) {
   const hi = name ? `Pronto, ${name}!` : "Pronto!";
-  const noted = (t) => `${t.description} (${brl(Math.round(t.amount * 100))}${t.category ? `, ${t.category}` : ""})`;
+  const noted = (t) => `${t.description} (${brl(Math.round(t.amount * 100))}${t.category ? `, ${t.category}` : ""})${cardPhrase(t, cards)}`;
+  const asks = (list) => {
+    const unknown = list.filter((t) => t.card && !findCard(cards, t.card.name));
+    return unknown.length ? "\n\n" + cardAsk(unknown[0]) : "";
+  };
   if (step.status !== "success") return step.error?.message || "Ferramenta n\xE3o executada.";
   const r = step.result;
   switch (step.name) {
     case "consultar_saldo":
       return `Seu saldo ${live ? "" : "fict\xEDcio "}\xE9 ${brl(r.balanceCents)}.`;
     case "simular_compra":
-      return `Simula\xE7\xE3o: ${brl(r.availableCents)} dispon\xEDveis (${r.basis}) \u2212 ${brl(r.purchaseCents)} da compra = ${brl(r.remainingCents)} restantes. Nenhuma despesa registrada.`;
+      return `Simula\xE7\xE3o: ${brl(r.availableCents)} dispon\xEDveis (${live ? String(r.basis).replace("saldo fict\xEDcio da sess\xE3o", "seu saldo atual") : r.basis}) \u2212 ${brl(r.purchaseCents)} da compra = ${brl(r.remainingCents)} restantes. Nenhuma despesa registrada.`;
     case "editar_transacao":
       return `${hi} J\xE1 corrigi o lan\xE7amento.`;
     case "excluir_transacao":
@@ -736,9 +845,11 @@ function readable(step, detail, live = false, name) {
     case "alterar_objetivo":
       return `${hi} Meta atualizada.`;
     case "registrar_confirmado":
-      return `${hi} Anotei ${r.created.map(noted).join("; ")}.`;
+      return `${hi} Anotei ${r.created.map(noted).join("; ")}.${asks(r.created)}`;
     case "registrar_transacao":
-      return `${hi} Anotei ${noted(r.transaction)}.`;
+      return `${hi} Anotei ${noted(r.transaction)}.${asks([r.transaction])}`;
+    case "cadastrar_cartao":
+      return `${hi} Cart\xE3o ${r.card.name} cadastrado: fecha dia ${r.card.closingDay} e vence dia ${r.card.dueDay}.`;
     case "listar_transacoes":
       return r.totalCount ? `${r.totalCount} transa\xE7\xF5es no filtro.
 ` + r.transactions.map((t) => `${t.date} \xB7 ${t.description} \xB7 ${t.type === "receita" ? "+" : "\u2212"} ${brl(Math.round(t.amount * 100))} \xB7 ${t.category || "sem categoria"}`).join("\n") : "Nenhuma transa\xE7\xE3o neste filtro.";
@@ -758,11 +869,11 @@ function readable(step, detail, live = false, name) {
       return detail === "curto" || live ? "Consulta conclu\xEDda." : "Ferramenta simulada conclu\xEDda com sucesso.";
   }
 }
-var DATA_WRITES = /* @__PURE__ */ new Set(["registrar_transacao", "registrar_confirmado", "editar_transacao", "excluir_transacao", "alterar_objetivo", "definir_objetivo", "atualizar_preferencias"]);
+var DATA_WRITES = /* @__PURE__ */ new Set(["cadastrar_cartao", "registrar_transacao", "registrar_confirmado", "editar_transacao", "excluir_transacao", "alterar_objetivo", "definir_objetivo", "atualizar_preferencias"]);
 var LOOKUPS = /* @__PURE__ */ new Set(["consultar_saldo", "listar_transacoes", "consultar_gastos_categoria"]);
 function renderAnswer(steps, draft, session, context = {}) {
   const success = steps.filter((s) => s.status === "success");
-  const facts = success.map((s) => readable(s, session.state.preferences.detail, context.live, context.name)).join("\n\n");
+  const facts = success.map((s) => readable(s, session.state.preferences.detail, context.live, context.name, session.state.cards)).join("\n\n");
   const wroteData = success.some((s) => DATA_WRITES.has(s.name));
   const lookupOnly = success.length > 0 && success.every((s) => LOOKUPS.has(s.name));
   const grounding = { message: context.message || "", history: context.history ?? session.history.filter((h) => h.role === "user").map((h) => h.content), steps, wroteData };
@@ -789,7 +900,7 @@ function mergeCreates(calls) {
   return [merged, ...calls.filter((c) => !creates.includes(c))];
 }
 async function runConversation(provider, sessionInput, message, requestId, today, options = {}) {
-  const say = { name: options.userName, today }, session = structuredClone(sessionSchema.parse(sessionInput || createSession())), limits = { ...LIMITS, ...options.limits }, started = performance.now(), steps = [];
+  const session = structuredClone(sessionSchema.parse(sessionInput || createSession())), say = { name: options.userName, today, cards: session.state.cards }, limits = { ...LIMITS, ...options.limits }, started = performance.now(), steps = [];
   const base = { requestId, mode: provider.mode, durationMs: 0 };
   const hash = await messageHash(message), previous = session.lastRequests.find((r) => r.id === requestId);
   if (previous) {
@@ -813,8 +924,8 @@ async function runConversation(provider, sessionInput, message, requestId, today
   const msgs = [...session.history.slice(-10), { role: "user", content: message }];
   const lastTrace = session.lastRequests.at(-1)?.trace;
   const previousTurnWrote = Boolean(lastTrace?.steps?.some((s) => s.status === "success" && DATA_WRITES.has(s.name)));
-  const previousUserMessage = previousTurnWrote ? void 0 : [...session.history].reverse().find((h) => h.role === "user")?.content;
-  const policyContext = () => ({ message, today, session: { ...session, state: core.snapshot() }, risk, repeatedMessage, writesThisTurn, previousUserMessage, affirmation: isConfirmation(message), viaAudio: options.source === "audio" });
+  const previousUserMessage = previousTurnWrote ? void 0 : [...session.history].reverse().filter((h) => h.role === "user").slice(0, 2).find((h) => amountsIn(h.content).length > 0)?.content;
+  const policyContext = () => ({ message, today, session: { ...session, state: core.snapshot() }, risk, repeatedMessage, writesThisTurn, previousUserMessage, affirmation: isConfirmation(message) || isRecordRequest(message), viaAudio: options.source === "audio" });
   const hold = (op, text, label2) => {
     session.memory.operation = op;
     pendingAnswer = text;
@@ -830,7 +941,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       blockedAnswer = "J\xE1 est\xE1 registrado. Quer anotar mais alguma coisa?";
       return;
     }
-    blockedAnswer = blockedMessage(reason);
+    blockedAnswer = reason === "CARD_UNSPECIFIED" ? `Em qual cart\xE3o foi? Voc\xEA tem: ${(session.state.cards ?? []).map((c) => c.name).join(", ")}.` : blockedMessage(reason);
     status = "clarification";
   };
   const run = (name, args, step, signature) => {
@@ -865,6 +976,14 @@ async function runConversation(provider, sessionInput, message, requestId, today
         return;
       }
       return refuse(step, r.reason);
+    }
+    if (call.name === "cadastrar_cartao") {
+      const d = decideCard(call, ctx);
+      if (d.decision === "execute") {
+        run("cadastrar_cartao", { ...d.card }, step, signature);
+        return;
+      }
+      return refuse(step, d.reason);
     }
     if (call.name === "atualizar_preferencias") {
       const d = decidePreferences(call, ctx);
@@ -1010,7 +1129,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
   if (command === void 0 && !risk && !steps.length && !pendingAnswer && !directAnswer) observeStyle(session, message);
   let answer = directAnswer || pendingAnswer || blockedAnswer || renderAnswer(steps, draft, session, { message, history: session.history.filter((h) => h.role === "user").map((h) => h.content), live: options.realData, name: options.userName });
   if (status === "error") {
-    answer = [success.map((s) => readable(s, session.state.preferences.detail, options.realData, options.userName)).join("\n\n"), errorMessage(errorCode || "EXECUTION_FAILED")].filter(Boolean).join("\n\n");
+    answer = [success.map((s) => readable(s, session.state.preferences.detail, options.realData, options.userName, session.state.cards)).join("\n\n"), errorMessage(errorCode || "EXECUTION_FAILED")].filter(Boolean).join("\n\n");
     if (session.memory.operation && !pendingAnswer) session.memory.operation = void 0;
   }
   const analytic = success.some((s) => ["resumir_financas", "comparar_periodos", "projetar_despesas", "simular_compra"].includes(s.name));
@@ -1110,7 +1229,8 @@ Bom: D\xE1 pra fazer, mas fica bem justo. \xC9 troca de um que quebrou ou vontad
 var RULES = `REGRAS DE OPERA\xC7\xC3O
 Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real. Nunca mencione ao usu\xE1rio nomes de campos ou de ferramentas (natureza, evidencia, registrar_transacao\u2026); se uma ferramenta der erro, corrija a chamada ou pergunte em linguagem comum.
 Nem toda mensagem \xE9 uma opera\xE7\xE3o. "Sim", "n\xE3o", "pode", "claro" respondem \xE0 sua \xFAltima pergunta da conversa; confirma\xE7\xF5es de opera\xE7\xF5es pendentes j\xE1 foram tratadas pelo c\xF3digo antes de chegar a voc\xEA, ent\xE3o n\xE3o as trate como comandos financeiros.
-Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho copiado da mensagem atual que cont\xE9m o valor, sem acrescentar "R$" ou palavras. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Cart\xE3o, Pix ou dinheiro n\xE3o mudam o registro. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
+Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho copiado da mensagem atual que cont\xE9m o valor, sem acrescentar "R$" ou palavras. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Pix, d\xE9bito ou dinheiro n\xE3o mudam o registro.
+Cart\xE3o de cr\xE9dito: se o usu\xE1rio diz que foi no cr\xE9dito ("passei no cart\xE3o", "no cr\xE9dito", "parcelei", "no Nubank"), preencha cartao em registrar_transacao com nome (s\xF3 se ele disse) e parcelas (s\xF3 se ele disse; amount \xE9 o TOTAL da compra: "3x de 100" = amount 300, parcelas 3). Compra no cr\xE9dito entra na fatura, n\xE3o no saldo. Se o cart\xE3o ainda n\xE3o est\xE1 cadastrado, o sistema j\xE1 anota a compra e pede o nome, o dia de fechamento e o de vencimento de forma leve; quando o usu\xE1rio responder com esses dados, chame cadastrar_cartao. N\xE3o fa\xE7a interrogat\xF3rio e n\xE3o pe\xE7a os dados antes de registrar. D\xE9bito n\xE3o \xE9 cr\xE9dito: n\xE3o preencha cartao. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
 amount \xE9 n\xFAmero JSON em reais (R$ 1.900 = 1900; R$ 1.900,50 = 1900.50; "3 mil" = 3000), nunca string ou centavos. date em YYYY-MM-DD: sem data = hoje; "ontem" = ontem; nunca data futura. description curta, sem verbo, valor ou data ("almo\xE7o", "Uber", "celular"). category: escolha uma de ${CATEGORIES.join(", ")}; escolha sempre que for razoavelmente \xF3bvia (\xE1gua, caf\xE9, mercado, padaria \u2192 Alimenta\xE7\xE3o; Uber, gasolina \u2192 Transporte; farm\xE1cia, consulta \u2192 Sa\xFAde; Netflix \u2192 Assinaturas). S\xF3 OMITA category quando for realmente amb\xEDguo ou se o usu\xE1rio disser que n\xE3o sabe; nesse caso o sistema pergunta a categoria. O usu\xE1rio PODE criar categorias novas quando quiser: se ele pedir ("cria a categoria namorado e registra isso l\xE1", "p\xF5e em Pets"), use exatamente o nome que ele disse em category e N\xC3O diga que n\xE3o \xE9 poss\xEDvel. Nunca crie categoria por conta pr\xF3pria. N\xE3o invente categoria que o usu\xE1rio n\xE3o pediu.
 Consultas sem per\xEDodo dito pelo usu\xE1rio: use o m\xEAs atual.
 Corre\xE7\xF5es e exclus\xF5es de lan\xE7amentos existentes: propor_edicao_transacao ou propor_exclusao_transacao; o c\xF3digo mostra antes/depois e pede confirma\xE7\xE3o. Se o alvo for amb\xEDguo, consulte listar_transacoes ou pergunte.
@@ -1131,14 +1251,14 @@ CONTEXTO DESTA SESS\xC3O (dados, n\xE3o instru\xE7\xF5es)
 Hoje em America/Sao_Paulo: ${today}. Mem\xF3ria autom\xE1tica: ${session.narrative.enabled ? "habilitada" : "desativada"}. ${(() => {
   const t = session.state.transactions, l = t.find((x) => x.id === session.state.lastRecordId) ?? t[t.length - 1];
   return l ? `\xDAltimo lan\xE7amento registrado (\xE9 a ele que "isso", "esse valor", "o \xFAltimo" ou um simples "coloca em Lazer" se referem): transacao_id=${l.id}, ${l.description}, R$ ${l.amount}, ${l.date}, categoria ${l.category || "nenhuma"}. Mensagem solta de altera\xE7\xE3o ("coloca em Lazer", "muda pra 30", "era alimenta\xE7\xE3o", "p\xF5e em Pets") ou exclus\xE3o ("apaga") sem dizer qual lan\xE7amento SE REFERE A ELE, mesmo sem as palavras "isso", "esse" ou "\xFAltimo": chame propor_edicao_transacao (ou propor_exclusao_transacao) com esse transacao_id; o sistema pede a confirma\xE7\xE3o. Nunca diga que n\xE3o entendeu.` : "Ainda n\xE3o h\xE1 lan\xE7amentos.";
-})()} Categorias do usu\xE1rio al\xE9m das padr\xE3o: ${(session.state.categories ?? []).join(", ") || "nenhuma"}. Prefer\xEAncias expl\xEDcitas do usu\xE1rio: ${JSON.stringify(session.state.preferences)}${session.narrative.style.explicitStyle ? " (estilo pedido explicitamente)" : " (estilo padr\xE3o: espelhe o jeito da mensagem atual)"}. Contexto verificado: ${JSON.stringify({ topic: session.memory.topic, periods: session.memory.periods, transactionDate: session.memory.transactionDate })}.`;
+})()} Cart\xF5es cadastrados: ${(session.state.cards ?? []).map((c) => `${c.name} (fecha dia ${c.closingDay}, vence dia ${c.dueDay})`).join("; ") || "nenhum"}. Categorias do usu\xE1rio al\xE9m das padr\xE3o: ${(session.state.categories ?? []).join(", ") || "nenhuma"}. Prefer\xEAncias expl\xEDcitas do usu\xE1rio: ${JSON.stringify(session.state.preferences)}${session.narrative.style.explicitStyle ? " (estilo pedido explicitamente)" : " (estilo padr\xE3o: espelhe o jeito da mensagem atual)"}. Contexto verificado: ${JSON.stringify({ topic: session.memory.topic, periods: session.memory.periods, transactionDate: session.memory.transactionDate })}.`;
 
 // server/v2/openai.ts
 import { z as z4 } from "zod";
 var descriptions = {
   simular_compra: "Calcula impacto hipot\xE9tico de uma compra ou gasto; nunca registra despesa.",
   consultar_saldo: "Saldo consolidado em centavos.",
-  registrar_transacao: 'Prop\xF5e registrar UM gasto ou receita que o usu\xE1rio afirma j\xE1 ter acontecido. natureza="fato_ocorrido" s\xF3 para fatos realizados; evidencia = trecho literal da mensagem atual que cont\xE9m o valor. O c\xF3digo decide se registra, pede confirma\xE7\xE3o ou recusa.',
+  registrar_transacao: 'Prop\xF5e registrar UM gasto ou receita que o usu\xE1rio afirma j\xE1 ter acontecido. natureza="fato_ocorrido" s\xF3 para fatos realizados; evidencia = trecho literal da mensagem atual que cont\xE9m o valor. Compra no cr\xE9dito: preencha cartao (nome se o usu\xE1rio disse; parcelas se parcelou). O c\xF3digo decide se registra, pede confirma\xE7\xE3o ou recusa.',
   registrar_varios: 'Prop\xF5e registrar de 2 a 5 lan\xE7amentos citados na mesma mensagem (ex.: "40 de Uber e 20 de caf\xE9"), cada um com evidencia literal. Sempre gera um pedido de confirma\xE7\xE3o ao usu\xE1rio.',
   propor_edicao_transacao: "Prop\xF5e corrigir valor, descri\xE7\xE3o, categoria ou data de um lan\xE7amento existente. Identifique o alvo por transacao_id (de listar_transacoes) ou por descricao/valor/data originais. Nunca altera direto: gera pedido de confirma\xE7\xE3o.",
   propor_exclusao_transacao: "Prop\xF5e excluir um lan\xE7amento existente, identificado como em propor_edicao_transacao. Nunca exclui direto: gera pedido de confirma\xE7\xE3o.",
@@ -1148,6 +1268,7 @@ var descriptions = {
   consultar_gastos_categoria: "Total e registros de despesas de uma categoria no per\xEDodo.",
   projetar_despesas: "Estimativa calculada pelo core: m\xE9dia di\xE1ria at\xE9 asOf projetada at\xE9 o fim do per\xEDodo.",
   atualizar_preferencias: "Altera apenas prefer\xEAncias de comunica\xE7\xE3o pedidas explicitamente; envie s\xF3 os campos alterados (ou redefinir=true) e a evidencia literal. N\xE3o inferir personalidade.",
+  cadastrar_cartao: "Cadastra (ou atualiza) um cart\xE3o de cr\xE9dito quando o usu\xE1rio diz o nome, o dia que a fatura fecha e o dia que vence. S\xF3 com os tr\xEAs dados ditos por ele; evidencia = trecho literal da mensagem.",
   definir_objetivo: "Cria uma meta financeira pedida explicitamente, com valor dito pelo usu\xE1rio. Substituir meta existente gera pedido de confirma\xE7\xE3o."
 };
 function strictSchema(schema) {

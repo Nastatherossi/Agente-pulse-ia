@@ -164,24 +164,24 @@ var SupabaseStore = class {
   async recordUsage(r) {
     await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null, user_text: r.userText ?? null, reply_text: r.replyText ?? null, intent: r.intent ?? null, duration_ms: r.durationMs ?? null, confirmation: r.confirmation ?? null, steps: r.steps ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
   }
-  async problemTurns(iso, limit = 100) {
-    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
+  async problemTurns(iso2, limit = 100) {
+    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso2)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
   }
   /** Painel de gestão: marca (ou desmarca, com null) um problema como resolvido. */
   async setResolved(messageId, atIso) {
     await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}`, { method: "PATCH", body: JSON.stringify({ resolved_at: atIso }), prefer: "return=minimal" });
   }
   /** Painel de gestão: lembretes enviados ou criados desde `iso` (histórico, só leitura). */
-  remindersSince(iso) {
-    const t = encodeURIComponent(iso);
+  remindersSince(iso2) {
+    const t = encodeURIComponent(iso2);
     return this.rest(`whatsapp_reminders?or=(last_sent_at.gte.${t},created_at.gte.${t})&select=*&order=last_sent_at.desc.nullslast&limit=1000`);
   }
   async turn(messageId) {
     const rows = await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}&select=*&limit=1`);
     return rows[0] ?? null;
   }
-  async usageSince(iso) {
-    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
+  async usageSince(iso2) {
+    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso2)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
   }
   async reminderStates(ids) {
     if (!ids.length) return [];
@@ -195,6 +195,24 @@ var SupabaseStore = class {
       prefer: "resolution=merge-duplicates,return=minimal"
     });
   }
+  async noticeStates(ids) {
+    if (!ids.length) return [];
+    return this.rest(`whatsapp_invoice_notices?invoice_id=in.(${ids.map(encodeURIComponent).join(",")})&select=*`);
+  }
+  async markNoticed(items, phone, atIso) {
+    const have = new Map((await this.noticeStates(items.map((i) => i.invoiceId))).map((r) => [`${r.invoice_id}:${r.kind}`, r.sent_count]));
+    await this.rest("whatsapp_invoice_notices?on_conflict=invoice_id,kind", {
+      method: "POST",
+      body: JSON.stringify(items.map((i) => ({ invoice_id: i.invoiceId, kind: i.kind, workspace_id: i.workspaceId, phone, sent_count: (have.get(`${i.invoiceId}:${i.kind}`) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
+      prefer: "resolution=merge-duplicates,return=minimal"
+    });
+  }
+  awaitingNotices(phone, sinceIso) {
+    return this.rest(`whatsapp_invoice_notices?phone=eq.${encodeURIComponent(phone)}&kind=eq.due&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
+  }
+  async markNoticeAnswered(items, atIso) {
+    for (const i of items) await this.rest(`whatsapp_invoice_notices?invoice_id=eq.${encodeURIComponent(i.invoiceId)}&kind=eq.${i.kind}`, { method: "PATCH", body: JSON.stringify({ answered_at: atIso }), prefer: "return=minimal" });
+  }
   awaitingReminders(phone, sinceIso) {
     return this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
   }
@@ -203,8 +221,9 @@ var SupabaseStore = class {
     await this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(",")})`, { method: "PATCH", body: JSON.stringify({ answered_at: atIso }), prefer: "return=minimal" });
   }
   async lastReminderAt(phone) {
-    const rows = await this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
-    return rows[0]?.last_sent_at ?? null;
+    const q = (table) => this.rest(`${table}?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
+    const [a, b] = await Promise.all([q("whatsapp_reminders"), q("whatsapp_invoice_notices")]);
+    return [a[0]?.last_sent_at, b[0]?.last_sent_at].filter((x) => Boolean(x)).sort().at(-1) ?? null;
   }
   async setRemindersEnabled(phone, enabled) {
     await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify({ reminders_enabled: enabled }), prefer: "return=minimal" });
@@ -251,7 +270,9 @@ var isoDate = z2.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => {
 });
 var money = z2.number().finite().positive().max(1e6).refine((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-5);
 var category = z2.string().trim().min(1).max(50);
-var transaction = z2.object({ type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: category.optional() }).strict();
+var cardRef = z2.object({ name: z2.string().trim().min(1).max(30).optional(), installments: z2.number().int().min(1).max(48).optional() }).strict();
+var cardInfo = z2.object({ name: z2.string().trim().min(1).max(30), closingDay: z2.number().int().min(1).max(31), dueDay: z2.number().int().min(1).max(31) }).strict();
+var transaction = z2.object({ type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: category.optional(), card: cardRef.optional() }).strict();
 var storedTransaction = transaction.extend({ id: z2.string().uuid() });
 var period = z2.object({ start: isoDate, end: isoDate }).strict().refine((p) => p.start <= p.end, "Per\xEDodo invertido");
 var preferences = z2.object({ style: z2.enum(["direto", "descontraido", "neutro", "formal"]).default("neutro"), detail: z2.enum(["curto", "detalhado"]).default("curto"), proactivity: z2.enum(["discreto", "equilibrado", "proativo"]).default("discreto"), explanation: z2.enum(["minima", "completa"]).default("minima"), examples: z2.boolean().default(false), emojis: z2.boolean().default(false) }).strict();
@@ -266,7 +287,8 @@ var schemas = {
   projetar_despesas: z2.object({ period, asOf: isoDate }).strict(),
   atualizar_preferencias: preferences,
   simular_compra: z2.object({ amount: money, available: money.optional() }).strict(),
-  definir_objetivo: goal
+  definir_objetivo: goal,
+  cadastrar_cartao: cardInfo
 };
 var CATEGORIES = ["Alimenta\xE7\xE3o", "Transporte", "Lazer", "Moradia", "Sa\xFAde", "Educa\xE7\xE3o", "Compras", "Contas e servi\xE7os", "Assinaturas", "Renda"];
 var NATURE_ALIASES = { fato: "fato_ocorrido", ocorrido: "fato_ocorrido", fato_ocorrida: "fato_ocorrido", fato_realizado: "fato_ocorrido", realizado: "fato_ocorrido", hipotetico: "hipotese", hipotetica: "hipotese", planejamento: "plano", intencao: "desejo", vontade: "desejo", pergunta: "duvida" };
@@ -277,7 +299,8 @@ var nature = z2.preprocess((v) => {
 }, z2.enum(["fato_ocorrido", "hipotese", "plano", "desejo", "duvida"]));
 var evidence = z2.string().trim().min(1).max(300);
 var modelCategory = z2.string().trim().max(50).nullable().optional();
-var entryFields = { type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: modelCategory };
+var modelCard = z2.object({ nome: z2.string().trim().max(30).nullable().optional(), parcelas: z2.number().int().min(1).max(48).nullable().optional() }).nullable().optional();
+var entryFields = { type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: modelCategory, cartao: modelCard };
 var target = z2.object({ transacao_id: z2.string().uuid().optional(), descricao: z2.string().trim().min(1).max(120).optional(), valor: money.optional(), data: isoDate.optional() }).strict().refine((t) => Object.keys(t).length > 0, "TARGET_REQUIRED");
 var toolSchemas = {
   consultar_saldo: schemas.consultar_saldo,
@@ -292,7 +315,8 @@ var toolSchemas = {
   propor_edicao_transacao: z2.object({ alvo: target, novo: z2.object({ amount: money.optional(), description: z2.string().trim().min(1).max(120).optional(), category: z2.string().trim().min(1).max(50).optional(), date: isoDate.optional() }).strict().refine((n) => Object.keys(n).length > 0, "CHANGE_REQUIRED"), evidencia: evidence }).strict(),
   propor_exclusao_transacao: z2.object({ alvo: target, evidencia: evidence }).strict(),
   atualizar_preferencias: z2.object({ style: z2.enum(["direto", "descontraido", "neutro", "formal"]).optional(), detail: z2.enum(["curto", "detalhado"]).optional(), proactivity: z2.enum(["discreto", "equilibrado", "proativo"]).optional(), explanation: z2.enum(["minima", "completa"]).optional(), examples: z2.boolean().optional(), emojis: z2.boolean().optional(), redefinir: z2.boolean().optional(), evidencia: evidence }).strict(),
-  definir_objetivo: goal.extend({ evidencia: evidence }).strict()
+  definir_objetivo: goal.extend({ evidencia: evidence }).strict(),
+  cadastrar_cartao: z2.object({ nome: z2.string().trim().min(1).max(30), dia_fechamento: z2.number().int().min(1).max(31), dia_vencimento: z2.number().int().min(1).max(31), evidencia: evidence }).strict()
 };
 var financialState = z2.object({
   initialBalanceCents: z2.number().int().min(0).max(1e8),
@@ -302,7 +326,11 @@ var financialState = z2.object({
   /** The user's own categories (beyond CATEGORIES). Loaded from the ledger; the user may create more by asking. */
   categories: z2.array(category.max(30)).max(40).optional(),
   /** The record registered most recently ("isso", "esse", "o último" refer to it). */
-  lastRecordId: z2.string().uuid().optional()
+  lastRecordId: z2.string().uuid().optional(),
+  /** Cartões cadastrados (vêm do banco a cada mensagem). */
+  cards: z2.array(cardInfo).max(10).optional(),
+  /** Compras no cartão registradas NESTA mensagem; o servidor grava na fatura e esvazia. Não entram no saldo. */
+  cardPurchases: z2.array(transaction.extend({ id: z2.string().uuid() })).max(20).optional()
 }).strict();
 var pendingOperation = z2.object({ id: z2.string().uuid(), kind: z2.enum(["edit", "delete", "goal", "create"]), targetId: z2.string().uuid().optional(), before: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), after: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), items: z2.array(transaction).min(1).max(5).optional(), createdAt: z2.number().int(), expiresAt: z2.number().int() }).strict().refine((op) => op.kind === "create" ? Boolean(op.items) && !op.before : op.kind === "goal" ? Boolean(op.after) && !op.items : Boolean(op.before) && !op.items, "OPERATION_SHAPE");
 var memory = z2.object({ topic: z2.enum(["saldo", "despesas", "receitas", "analise"]).optional(), periods: z2.array(period).max(2).default([]), transactionDate: isoDate.optional(), pending: transaction.optional(), operation: pendingOperation.optional() }).strict();
@@ -310,6 +338,30 @@ var historyEntry = z2.object({ role: z2.enum(["user", "assistant"]), content: z2
 var sessionSchema = z2.object({ version: z2.literal(2), narrative: narrativeSchema.default(() => createNarrative()), id: z2.string().uuid(), state: financialState, memory, history: z2.array(historyEntry).max(10), lastRequests: z2.array(z2.object({ id: z2.string().uuid(), messageHash: z2.string().max(64), trace: z2.unknown() })).max(8), expiresAt: z2.number().int() }).strict().refine((s) => s.narrative.records.every((r) => r.ownerId === s.id), "MEMORY_OWNER_MISMATCH");
 var brl = (cents2) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents2 / 100);
 var todayBR = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
+var normalize = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+// shared/v2/cards.ts
+var cardKey = (name) => normalize(name).replace(/\bcartao\b/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+function findCard(cards, name) {
+  const list = cards ?? [];
+  if (!name || !cardKey(name)) return list.length === 1 ? list[0] : void 0;
+  const key = cardKey(name);
+  return list.find((c) => cardKey(c.name) === key);
+}
+var iso = (y, m, d) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+var lastDay = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+var addMonths = (y, m, n) => {
+  const t = y * 12 + (m - 1) + n;
+  return { y: Math.floor(t / 12), m: t % 12 + 1 };
+};
+function invoiceFor(card, purchaseDate, index = 0) {
+  const y0 = Number(purchaseDate.slice(0, 4)), m0 = Number(purchaseDate.slice(5, 7)), day = Number(purchaseDate.slice(8, 10));
+  const base = addMonths(y0, m0, day > card.closingDay ? 1 : 0), c = addMonths(base.y, base.m, index);
+  const closingDate = iso(c.y, c.m, Math.min(card.closingDay, lastDay(c.y, c.m)));
+  const d = card.dueDay > card.closingDay ? c : addMonths(c.y, c.m, 1);
+  const dueDate = iso(d.y, d.m, Math.min(card.dueDay, lastDay(d.y, d.m)));
+  return { competence: iso(c.y, c.m, 1), closingDate, dueDate };
+}
 
 // server/whatsapp/ledger.ts
 var MAX_STATE_TRANSACTIONS = 300;
@@ -402,13 +454,77 @@ var SupabaseLedger = class {
   async confirm(ws, transactionId, effectiveDate) {
     await this.rpc("finance_confirm_transaction", { target_transaction_id: transactionId, target_workspace_id: ws.workspaceId, target_effective_date: effectiveDate });
   }
+  async cardRows(workspaceId) {
+    const rows = await this.rest(`finance_cards?workspace_id=eq.${workspaceId}&status=eq.active&select=id,name,closing_day,due_day&order=created_at.asc&limit=20`);
+    return rows.map((r) => ({ id: r.id, name: r.name, closingDay: r.closing_day, dueDay: r.due_day }));
+  }
+  async invoiceNotices(ws, today) {
+    const back = (n) => new Date(Date.parse(`${today}T12:00:00Z`) - n * 864e5).toISOString().slice(0, 10);
+    const cols = "id,card_id,amount,status,closing_date,due_date";
+    const [closing, due, cards] = await Promise.all([
+      this.rest(`finance_invoices?workspace_id=eq.${ws.workspaceId}&status=neq.paid&amount=gt.0&closing_date=lte.${today}&closing_date=gte.${back(3)}&select=${cols}&limit=20`),
+      this.rest(`finance_invoices?workspace_id=eq.${ws.workspaceId}&status=in.(planned,overdue)&amount=gt.0&due_date=lte.${today}&due_date=gte.${back(30)}&select=${cols}&order=due_date.asc&limit=20`),
+      this.cardRows(ws.workspaceId)
+    ]);
+    const names = new Map(cards.map((c) => [c.id, c.name]));
+    const mk = (kind) => (i) => ({ invoiceId: i.id, kind, cardName: names.get(i.card_id) ?? "cart\xE3o", amount: Number(i.amount), closingDate: i.closing_date, dueDate: i.due_date });
+    return [...closing.map(mk("closed")), ...due.map(mk("due"))];
+  }
+  async payInvoice(ws, invoiceId, date) {
+    await this.rpc("finance_pay_invoice", { target_invoice_id: invoiceId, target_workspace_id: ws.workspaceId, target_account_id: ws.accountId, target_payment_date: date, target_idempotency_key: `wa-invoice:${invoiceId}` });
+  }
+  /** Grava cartões e compras no cartão. Compra sem cartão cadastrado fica esperando; quando o cartão aparece, ela é encaixada na fatura. */
+  async applyCards(ws, changes, key, catId) {
+    const result = { waitingCard: 0, placed: null };
+    const upserts = changes.cardUpserts ?? [], purchases = changes.cardPurchases ?? [];
+    let cards = await this.cardRows(ws.workspaceId);
+    for (const u of upserts) {
+      const existing = cards.find((c) => cardKey(c.name) === cardKey(u.name));
+      if (existing) await this.rest(`finance_cards?id=eq.${existing.id}&workspace_id=eq.${ws.workspaceId}`, { method: "PATCH", body: JSON.stringify({ closing_day: u.closingDay, due_day: u.dueDay }), prefer: "return=minimal" });
+      else await this.rest("finance_cards", { method: "POST", body: JSON.stringify({ workspace_id: ws.workspaceId, name: u.name, closing_day: u.closingDay, due_day: u.dueDay }), prefer: "return=minimal" });
+    }
+    if (upserts.length) cards = await this.cardRows(ws.workspaceId);
+    const place = async (p, card) => {
+      await this.rpc("finance_create_card_purchase", { target_workspace_id: ws.workspaceId, target_account_id: ws.accountId, target_card_id: card.id, target_description: p.description, target_amount: p.amount, target_purchase_date: p.date, target_installments: p.installments, target_category_id: p.categoryId, target_idempotency_key: p.idem });
+    };
+    let i = 0;
+    for (const p of purchases) {
+      const card = findCard(cards, p.cardName);
+      const idem = `${key}:cp${i++}`;
+      if (card) await place({ description: p.description, amount: p.amount, date: p.date, installments: p.installments, categoryId: catId(p.category), idem }, card);
+      else {
+        await this.rest("whatsapp_card_pending?on_conflict=workspace_id,idempotency_key", { method: "POST", body: JSON.stringify({ workspace_id: ws.workspaceId, card_name: p.cardName ?? null, description: p.description, amount: p.amount, purchase_date: p.date, installments: p.installments, category_id: catId(p.category), idempotency_key: idem }), prefer: "resolution=ignore-duplicates,return=minimal" });
+        result.waitingCard++;
+      }
+    }
+    if (cards.length && (upserts.length || purchases.length)) {
+      const waiting = await this.rest(`whatsapp_card_pending?workspace_id=eq.${ws.workspaceId}&select=*&order=created_at.asc&limit=30`);
+      const target2 = upserts.length === 1 ? cards.find((c) => cardKey(c.name) === cardKey(upserts[0].name)) : void 0;
+      let total = 0, count = 0, name = "";
+      const dueDates = /* @__PURE__ */ new Set();
+      for (const w of waiting) {
+        const card = w.card_name ? findCard(cards, w.card_name) : target2 ?? (cards.length === 1 ? cards[0] : void 0);
+        if (!card) continue;
+        await place({ description: w.description, amount: Number(w.amount), date: w.purchase_date, installments: w.installments, categoryId: w.category_id, idem: w.idempotency_key }, card);
+        await this.rest(`whatsapp_card_pending?id=eq.${w.id}`, { method: "DELETE" });
+        total += Number(w.amount);
+        count++;
+        name = card.name;
+        dueDates.add(invoiceFor(card, w.purchase_date).dueDate);
+      }
+      if (count) result.placed = { count, total, dueDates: [...dueDates].sort(), cardName: name };
+      result.waitingCard = waiting.length - count;
+    }
+    return result;
+  }
   async load(ws) {
-    const [summary, rows, cats] = await Promise.all([
+    const [summary, rows, cats, cardRows] = await Promise.all([
       this.rpc("whatsapp_ledger_summary", { p_workspace: ws.workspaceId }),
       this.rest(
         `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id,created_at&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
       ),
-      this.categoryMap(ws.workspaceId)
+      this.categoryMap(ws.workspaceId),
+      this.cardRows(ws.workspaceId)
     ]);
     const nameOf = new Map([...cats].map(([name, id]) => [id, name]));
     const opening = Number(summary[0]?.opening_cents ?? 0);
@@ -425,12 +541,13 @@ var SupabaseLedger = class {
     visible.reverse();
     const builtIn = new Set(CATEGORIES);
     const customCategories = [...cats.keys()].filter((name) => !builtIn.has(name) && name.length <= 30).slice(0, 40);
-    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...newest ? { lastRecordId: newest } : {} };
+    return { cards: cardRows, initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...newest ? { lastRecordId: newest } : {} };
   }
   async apply(ws, changes, key) {
-    if (!changes.create.length && !changes.update.length && !changes.remove.length) return;
+    const hasCards = Boolean(changes.cardUpserts?.length || changes.cardPurchases?.length);
+    if (!changes.create.length && !changes.update.length && !changes.remove.length && !hasCards) return;
     let cats = await this.categoryMap(ws.workspaceId);
-    const wanted = [...new Set([...changes.create, ...changes.update].map((e) => e.category).filter((c) => Boolean(c) && !cats.has(c)))];
+    const wanted = [...new Set([...changes.create, ...changes.update, ...changes.cardPurchases ?? []].map((e) => e.category).filter((c) => Boolean(c) && !cats.has(c)))];
     if (wanted.length) {
       await this.rest(`finance_categories?on_conflict=workspace_id,name`, {
         method: "POST",
@@ -476,6 +593,7 @@ var SupabaseLedger = class {
     for (const id of changes.remove) {
       await this.rest(`finance_transactions?id=eq.${id}&workspace_id=eq.${ws.workspaceId}`, { method: "DELETE" });
     }
+    if (hasCards) return this.applyCards(ws, changes, key, catId);
   }
 };
 
@@ -604,7 +722,8 @@ Bom: D\xE1 pra fazer, mas fica bem justo. \xC9 troca de um que quebrou ou vontad
 var RULES = `REGRAS DE OPERA\xC7\xC3O
 Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real. Nunca mencione ao usu\xE1rio nomes de campos ou de ferramentas (natureza, evidencia, registrar_transacao\u2026); se uma ferramenta der erro, corrija a chamada ou pergunte em linguagem comum.
 Nem toda mensagem \xE9 uma opera\xE7\xE3o. "Sim", "n\xE3o", "pode", "claro" respondem \xE0 sua \xFAltima pergunta da conversa; confirma\xE7\xF5es de opera\xE7\xF5es pendentes j\xE1 foram tratadas pelo c\xF3digo antes de chegar a voc\xEA, ent\xE3o n\xE3o as trate como comandos financeiros.
-Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho copiado da mensagem atual que cont\xE9m o valor, sem acrescentar "R$" ou palavras. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Cart\xE3o, Pix ou dinheiro n\xE3o mudam o registro. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
+Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho copiado da mensagem atual que cont\xE9m o valor, sem acrescentar "R$" ou palavras. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Pix, d\xE9bito ou dinheiro n\xE3o mudam o registro.
+Cart\xE3o de cr\xE9dito: se o usu\xE1rio diz que foi no cr\xE9dito ("passei no cart\xE3o", "no cr\xE9dito", "parcelei", "no Nubank"), preencha cartao em registrar_transacao com nome (s\xF3 se ele disse) e parcelas (s\xF3 se ele disse; amount \xE9 o TOTAL da compra: "3x de 100" = amount 300, parcelas 3). Compra no cr\xE9dito entra na fatura, n\xE3o no saldo. Se o cart\xE3o ainda n\xE3o est\xE1 cadastrado, o sistema j\xE1 anota a compra e pede o nome, o dia de fechamento e o de vencimento de forma leve; quando o usu\xE1rio responder com esses dados, chame cadastrar_cartao. N\xE3o fa\xE7a interrogat\xF3rio e n\xE3o pe\xE7a os dados antes de registrar. D\xE9bito n\xE3o \xE9 cr\xE9dito: n\xE3o preencha cartao. Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
 amount \xE9 n\xFAmero JSON em reais (R$ 1.900 = 1900; R$ 1.900,50 = 1900.50; "3 mil" = 3000), nunca string ou centavos. date em YYYY-MM-DD: sem data = hoje; "ontem" = ontem; nunca data futura. description curta, sem verbo, valor ou data ("almo\xE7o", "Uber", "celular"). category: escolha uma de ${CATEGORIES.join(", ")}; escolha sempre que for razoavelmente \xF3bvia (\xE1gua, caf\xE9, mercado, padaria \u2192 Alimenta\xE7\xE3o; Uber, gasolina \u2192 Transporte; farm\xE1cia, consulta \u2192 Sa\xFAde; Netflix \u2192 Assinaturas). S\xF3 OMITA category quando for realmente amb\xEDguo ou se o usu\xE1rio disser que n\xE3o sabe; nesse caso o sistema pergunta a categoria. O usu\xE1rio PODE criar categorias novas quando quiser: se ele pedir ("cria a categoria namorado e registra isso l\xE1", "p\xF5e em Pets"), use exatamente o nome que ele disse em category e N\xC3O diga que n\xE3o \xE9 poss\xEDvel. Nunca crie categoria por conta pr\xF3pria. N\xE3o invente categoria que o usu\xE1rio n\xE3o pediu.
 Consultas sem per\xEDodo dito pelo usu\xE1rio: use o m\xEAs atual.
 Corre\xE7\xF5es e exclus\xF5es de lan\xE7amentos existentes: propor_edicao_transacao ou propor_exclusao_transacao; o c\xF3digo mostra antes/depois e pede confirma\xE7\xE3o. Se o alvo for amb\xEDguo, consulte listar_transacoes ou pergunte.
@@ -625,7 +744,7 @@ import { z as z4 } from "zod";
 var descriptions = {
   simular_compra: "Calcula impacto hipot\xE9tico de uma compra ou gasto; nunca registra despesa.",
   consultar_saldo: "Saldo consolidado em centavos.",
-  registrar_transacao: 'Prop\xF5e registrar UM gasto ou receita que o usu\xE1rio afirma j\xE1 ter acontecido. natureza="fato_ocorrido" s\xF3 para fatos realizados; evidencia = trecho literal da mensagem atual que cont\xE9m o valor. O c\xF3digo decide se registra, pede confirma\xE7\xE3o ou recusa.',
+  registrar_transacao: 'Prop\xF5e registrar UM gasto ou receita que o usu\xE1rio afirma j\xE1 ter acontecido. natureza="fato_ocorrido" s\xF3 para fatos realizados; evidencia = trecho literal da mensagem atual que cont\xE9m o valor. Compra no cr\xE9dito: preencha cartao (nome se o usu\xE1rio disse; parcelas se parcelou). O c\xF3digo decide se registra, pede confirma\xE7\xE3o ou recusa.',
   registrar_varios: 'Prop\xF5e registrar de 2 a 5 lan\xE7amentos citados na mesma mensagem (ex.: "40 de Uber e 20 de caf\xE9"), cada um com evidencia literal. Sempre gera um pedido de confirma\xE7\xE3o ao usu\xE1rio.',
   propor_edicao_transacao: "Prop\xF5e corrigir valor, descri\xE7\xE3o, categoria ou data de um lan\xE7amento existente. Identifique o alvo por transacao_id (de listar_transacoes) ou por descricao/valor/data originais. Nunca altera direto: gera pedido de confirma\xE7\xE3o.",
   propor_exclusao_transacao: "Prop\xF5e excluir um lan\xE7amento existente, identificado como em propor_edicao_transacao. Nunca exclui direto: gera pedido de confirma\xE7\xE3o.",
@@ -635,6 +754,7 @@ var descriptions = {
   consultar_gastos_categoria: "Total e registros de despesas de uma categoria no per\xEDodo.",
   projetar_despesas: "Estimativa calculada pelo core: m\xE9dia di\xE1ria at\xE9 asOf projetada at\xE9 o fim do per\xEDodo.",
   atualizar_preferencias: "Altera apenas prefer\xEAncias de comunica\xE7\xE3o pedidas explicitamente; envie s\xF3 os campos alterados (ou redefinir=true) e a evidencia literal. N\xE3o inferir personalidade.",
+  cadastrar_cartao: "Cadastra (ou atualiza) um cart\xE3o de cr\xE9dito quando o usu\xE1rio diz o nome, o dia que a fatura fecha e o dia que vence. S\xF3 com os tr\xEAs dados ditos por ele; evidencia = trecho literal da mensagem.",
   definir_objetivo: "Cria uma meta financeira pedida explicitamente, com valor dito pelo usu\xE1rio. Substituir meta existente gera pedido de confirma\xE7\xE3o."
 };
 function strictSchema(schema) {
@@ -668,8 +788,8 @@ var MAX_ITEMS_PER_MESSAGE = 3;
 var REPLY_WINDOW_MS = 48 * 36e5;
 var MAX_MESSAGES_PER_RUN = 60;
 var first = (name) => name?.trim().split(/\s+/)[0] || void 0;
-var dm = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
-var dayLabel = (item, today) => item.expectedDate === today ? "pra hoje" : `pro dia ${dm(item.expectedDate)}`;
+var dm2 = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+var dayLabel = (item, today) => item.expectedDate === today ? "pra hoje" : `pro dia ${dm2(item.expectedDate)}`;
 var what = (i) => `${brl(Math.round(i.amount * 100))} de ${i.description}${i.category && i.category !== i.description ? ` (${i.category})` : ""}`;
 var optOutNote = 'Se preferir n\xE3o receber esses lembretes, \xE9 s\xF3 me dizer "parar lembretes". \u{1F609}';
 function composeReminder(items, name, today, firstEver) {
@@ -680,7 +800,7 @@ function composeReminder(items, name, today, firstEver) {
     const i = shown[0];
     body = i.type === "receita" ? `${name ? `Fala, ${name}, blz?` : "Oi, tudo bem?"} Aqueles ${what(i)} que estavam previstos ${dayLabel(i, today)} j\xE1 ca\xEDram? Me avisa aqui que eu dou baixa pra voc\xEA. \u{1F49C}` : `${nm}${name ? "v" : "V"}oc\xEA tinha ${what(i)} previsto ${dayLabel(i, today)}. J\xE1 foi pago? Me avisa aqui que eu dou baixa pra voc\xEA. \u{1F49C}`;
   } else {
-    const lines = shown.map((i) => `\u2022 ${i.type === "receita" ? "Receber" : "Pagar"} ${what(i)} (${i.expectedDate === today ? "hoje" : dm(i.expectedDate)})`).join("\n");
+    const lines = shown.map((i) => `\u2022 ${i.type === "receita" ? "Receber" : "Pagar"} ${what(i)} (${i.expectedDate === today ? "hoje" : dm2(i.expectedDate)})`).join("\n");
     const more = items.length > shown.length ? `
 \u2026e mais ${items.length - shown.length}.` : "";
     body = `${name ? `Fala, ${name}, blz?` : "Oi, tudo bem?"} Hoje tem umas pend\xEAncias por aqui:
@@ -690,6 +810,19 @@ J\xE1 aconteceram? Me conta aqui que eu dou baixa pra voc\xEA. \u{1F49C}`;
   return firstEver ? `${body}
 
 ${optOutNote}` : body;
+}
+var MAX_NOTICES_PER_MESSAGE = 2;
+function composeNotices(notices, name, today) {
+  const shown = notices.slice(0, MAX_NOTICES_PER_MESSAGE);
+  const line = (n) => {
+    const v = brl(Math.round(n.amount * 100));
+    if (n.kind === "closed") return `a fatura do ${n.cardName} fechou${n.closingDate === today ? " hoje" : ""}: ${v}. Ela vence dia ${dm2(n.dueDate)}.`;
+    if (n.dueDate === today) return `hoje vence a fatura do ${n.cardName} (${v}). J\xE1 pagou? Me avisa aqui que eu dou baixa pra voc\xEA.`;
+    return `a fatura do ${n.cardName} (${v}) venceu dia ${dm2(n.dueDate)}. J\xE1 pagou? Me avisa aqui que eu dou baixa pra voc\xEA.`;
+  };
+  const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+  const lines = shown.map((n) => name ? `${name}, ${line(n)}` : cap(line(n)));
+  return `${lines.join("\n\n")} \u{1F49C}`;
 }
 async function runReminders(deps, opts = {}) {
   const today = deps.today?.() ?? todayBR();
@@ -708,23 +841,32 @@ async function runReminders(deps, opts = {}) {
       }
       const ws = await deps.ledger.resolve(c.phone, c.name ?? void 0);
       const due = await deps.ledger.due(ws, today);
-      if (!due.length) {
-        out.skipped++;
-        continue;
-      }
       const states = new Map((await deps.store.reminderStates(due.map((d) => d.id))).map((s) => [s.transaction_id, s]));
       const items = due.filter((d) => (states.get(d.id)?.sent_count ?? 0) < MAX_ASKS_PER_ITEM);
-      if (!items.length) {
+      const allNotices = await deps.ledger.invoiceNotices(ws, today);
+      const noticeStates = await deps.store.noticeStates(allNotices.map((n) => n.invoiceId));
+      const notices = allNotices.filter((n) => {
+        const sent = noticeStates.find((s) => s.invoice_id === n.invoiceId && s.kind === n.kind)?.sent_count ?? 0;
+        return sent < (n.kind === "closed" ? 1 : MAX_ASKS_PER_ITEM);
+      });
+      if (!items.length && !notices.length) {
         out.skipped++;
         continue;
       }
       const firstEver = !last;
-      const text = composeReminder(items, first(c.name), today, firstEver);
+      const nm = first(c.name);
+      const parts = [items.length ? composeReminder(items, nm, today, false) : "", notices.length ? composeNotices(notices, nm, today) : ""].filter(Boolean);
+      const text = parts.join("\n\n") + (firstEver ? `
+
+${optOutNote}` : "");
       out.messages.push({ phone: c.phone, text });
       if (opts.dry) continue;
       await deps.messenger.sendText(c.phone, text);
       const asked = items.slice(0, MAX_ITEMS_PER_MESSAGE).map((i) => ({ id: i.id, workspaceId: ws.workspaceId }));
-      await deps.store.markReminded(asked, c.phone, new Date(nowMs).toISOString());
+      const at = new Date(nowMs).toISOString();
+      if (asked.length) await deps.store.markReminded(asked, c.phone, at);
+      const told = notices.slice(0, MAX_NOTICES_PER_MESSAGE).map((n) => ({ invoiceId: n.invoiceId, kind: n.kind, workspaceId: ws.workspaceId }));
+      if (told.length) await deps.store.markNoticed(told, c.phone, at);
       await rememberInSession(deps.store, c.phone, text, nowMs).catch(() => void 0);
       out.sent++;
       await sleep(2500 + Math.floor(Math.random() * 2500));
@@ -777,17 +919,17 @@ async function execOwnerCommand(deps, cmd) {
 var esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 var TZ = "America/Sao_Paulo";
 var TRACKING_SINCE = "2026-10-22";
-var fmtDate = (iso) => iso ? new Date(iso).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "short", timeStyle: "short" }) : "\u2014";
-var fmtFull = (iso) => iso ? new Date(iso).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "full", timeStyle: "medium" }) : "\u2014";
+var fmtDate = (iso2) => iso2 ? new Date(iso2).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "short", timeStyle: "short" }) : "\u2014";
+var fmtFull = (iso2) => iso2 ? new Date(iso2).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "full", timeStyle: "medium" }) : "\u2014";
 var fmtTime = (ms) => new Date(ms).toLocaleTimeString("pt-BR", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 var fmtInt = (n) => n.toLocaleString("pt-BR");
 var fmtUsd = (n) => n === void 0 ? "\u2014" : `US$ ${n.toFixed(n < 1 ? 3 : 2)}`;
 var fmtShort = (n) => n >= 1e6 ? `${(n / 1e6).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mi` : n >= 1e4 ? `${(n / 1e3).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mil` : fmtInt(n);
 var fmtPhone = (p) => /^55\d{2}9\d{8}$/.test(p) ? `+55 (${p.slice(2, 4)}) ${p.slice(4, 9)}-${p.slice(9)}` : `+${p}`;
 var maskPhone = (p) => /^55\d{2}9\d{8}$/.test(p) ? `+55 (${p.slice(2, 4)}) \u2022\u2022\u2022\u2022\u2022-${p.slice(9)}` : `+\u2022\u2022\u2022${p.slice(-4)}`;
-function relTime(iso, nowMs) {
-  if (!iso) return "\u2014";
-  const diff = Math.max(0, nowMs - Date.parse(iso));
+function relTime(iso2, nowMs) {
+  if (!iso2) return "\u2014";
+  const diff = Math.max(0, nowMs - Date.parse(iso2));
   const min = Math.round(diff / 6e4);
   if (min < 1) return "agora";
   if (min < 60) return `h\xE1 ${min} min`;
@@ -796,7 +938,7 @@ function relTime(iso, nowMs) {
   const d = Math.round(h / 24);
   if (d === 1) return "ontem";
   if (d < 7) return `h\xE1 ${d} dias`;
-  return new Date(iso).toLocaleDateString("pt-BR", { timeZone: TZ, day: "2-digit", month: "short" });
+  return new Date(iso2).toLocaleDateString("pt-BR", { timeZone: TZ, day: "2-digit", month: "short" });
 }
 var dayLabel2 = (key) => (/* @__PURE__ */ new Date(`${key}T12:00:00Z`)).toLocaleDateString("pt-BR", { timeZone: "UTC", day: "numeric", month: "short" }).replace(".", "");
 var weekday = (key) => (/* @__PURE__ */ new Date(`${key}T12:00:00Z`)).toLocaleDateString("pt-BR", { timeZone: "UTC", weekday: "short" }).replace(".", "");
