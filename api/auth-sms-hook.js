@@ -207,6 +207,24 @@ var SupabaseStore = class {
       prefer: "resolution=merge-duplicates,return=minimal"
     });
   }
+  async debtNoticeStates(ids) {
+    if (!ids.length) return [];
+    return this.rest(`whatsapp_debt_notices?debt_id=in.(${ids.map(encodeURIComponent).join(",")})&select=*`);
+  }
+  async markDebtNoticed(items, phone, atIso) {
+    const have = new Map((await this.debtNoticeStates(items.map((i) => i.debtId))).map((r) => [`${r.debt_id}:${r.due_date}`, r.sent_count]));
+    await this.rest("whatsapp_debt_notices?on_conflict=debt_id,due_date", {
+      method: "POST",
+      body: JSON.stringify(items.map((i) => ({ debt_id: i.debtId, due_date: i.dueDate, workspace_id: i.workspaceId, phone, sent_count: (have.get(`${i.debtId}:${i.dueDate}`) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
+      prefer: "resolution=merge-duplicates,return=minimal"
+    });
+  }
+  awaitingDebtNotices(phone, sinceIso) {
+    return this.rest(`whatsapp_debt_notices?phone=eq.${encodeURIComponent(phone)}&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
+  }
+  async markDebtNoticeAnswered(items, atIso) {
+    for (const i of items) await this.rest(`whatsapp_debt_notices?debt_id=eq.${encodeURIComponent(i.debtId)}&due_date=eq.${i.dueDate}`, { method: "PATCH", body: JSON.stringify({ answered_at: atIso }), prefer: "return=minimal" });
+  }
   async noticeStates(ids) {
     if (!ids.length) return [];
     return this.rest(`whatsapp_invoice_notices?invoice_id=in.(${ids.map(encodeURIComponent).join(",")})&select=*`);
@@ -234,8 +252,8 @@ var SupabaseStore = class {
   }
   async lastReminderAt(phone) {
     const q = (table) => this.rest(`${table}?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
-    const [a, b] = await Promise.all([q("whatsapp_reminders"), q("whatsapp_invoice_notices")]);
-    return [a[0]?.last_sent_at, b[0]?.last_sent_at].filter((x) => Boolean(x)).sort().at(-1) ?? null;
+    const [a, b, c] = await Promise.all([q("whatsapp_reminders"), q("whatsapp_invoice_notices"), q("whatsapp_debt_notices")]);
+    return [a[0]?.last_sent_at, b[0]?.last_sent_at, c[0]?.last_sent_at].filter((x) => Boolean(x)).sort().at(-1) ?? null;
   }
   async setRemindersEnabled(phone, enabled) {
     await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify({ reminders_enabled: enabled }), prefer: "return=minimal" });

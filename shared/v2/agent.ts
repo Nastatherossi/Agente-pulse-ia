@@ -5,7 +5,7 @@ import {FinancialCoreV2} from './finance.js';
 import {isConfirmation,isRecordRequest,isCancellation,isClear,clearContext,describeOperation,type Intent} from './personality.js';
 import {findCard,dm,type Card} from './cards.js';
 import {cardPhrase} from './personality.js';
-import {cleanCategoryName,categoryInReply,amountsIn,riskSignal,decideCreate,decideCard,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
+import {cleanCategoryName,categoryInReply,amountsIn,riskSignal,decideCreate,decideCard,decideDebt,debtOperation,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
 import {groundedText,withoutNumbers,asksToConfirmInText} from './grounding.js';
 /** Tool errors the model can fix by itself: the error (with the schema message) goes back to it for another try. */
 const RETRYABLE=new Set(['VALIDATION_FAILED','UNKNOWN_TOOL']);
@@ -34,6 +34,7 @@ function readable(step:Step,detail:Session['state']['preferences']['detail'],liv
    if(!r.invoices.length)return r.month?`Não tenho nenhuma fatura vencendo em ${monthName}${r.card?` no ${r.card}`:''}.`:'Você não tem fatura em aberto.';
    const lines=r.invoices.map((i:any)=>`• ${i.card}: ${brl(Math.round(i.amount*100))} · fecha ${dm(i.closingDate)} · vence ${dm(i.dueDate)}${i.status==='paid'?' (paga)':''}`).join('\n');
    return `${r.month?`Faturas que vencem em ${monthName}`:'Suas faturas em aberto'}:\n${lines}${r.invoices.length>1?`\nTotal: ${brl(r.totalCents)}`:''}`;}
+  case 'registrar_financiamento_confirmado':{const d=r.debt;return `${hi} Registrei o ${d.description} de ${brl(Math.round(d.principal*100))} nas suas dívidas${d.receivedInAccount?' e lancei a entrada na sua conta':''}. A parcela é de ${brl(Math.round(d.installment*100))} e a primeira vence ${dm(d.firstDue)}. Quando vencer, eu te pergunto se você pagou. 💜`;}
   case 'cadastrar_cartao':return `${hi} Cartão ${r.card.name} cadastrado: fecha dia ${r.card.closingDay} e vence dia ${r.card.dueDay}.`;
   case 'listar_transacoes':return r.totalCount?`${r.totalCount} transações no filtro.\n`+r.transactions.map((t:any)=>`${t.date} · ${t.description} · ${t.type==='receita'?'+':'−'} ${brl(Math.round(t.amount*100))} · ${t.category||'sem categoria'}`).join('\n'):'Nenhuma transação neste filtro.';
   case 'resumir_financas':return `${r.period.start} a ${r.period.end}: receitas ${brl(r.incomeCents)}, despesas ${brl(r.expenseCents)} e resultado ${brl(r.netCents)} (${r.count} registros).`+(r.categories.length?'\n'+r.categories.filter((c:any)=>c.expenseCents).map((c:any)=>`${c.category}: ${brl(c.expenseCents)} (${c.expenseSharePercent}%).`).join('\n'):'')+(r.limitedData?'\nOs dados registrados ainda são limitados; isso não descreve toda a sua vida financeira.':'');
@@ -46,7 +47,7 @@ function readable(step:Step,detail:Session['state']['preferences']['detail'],liv
  }
 }
 /** Tools whose success means data changed this turn: the answer is the code-written receipt, nothing else. */
-const DATA_WRITES=new Set(['cadastrar_cartao','registrar_transacao','registrar_confirmado','editar_transacao','excluir_transacao','alterar_objetivo','definir_objetivo','atualizar_preferencias']);
+const DATA_WRITES=new Set(['registrar_financiamento_confirmado','cadastrar_cartao','registrar_transacao','registrar_confirmado','editar_transacao','excluir_transacao','alterar_objetivo','definir_objetivo','atualizar_preferencias']);
 /** Plain lookups: the code-written facts answer the question; model commentary is not appended (discreet by default). */
 const LOOKUPS=new Set(['consultar_fatura','consultar_saldo','listar_transacoes','consultar_gastos_categoria']);
 export type AnswerContext={message?:string;history?:string[];live?:boolean;name?:string};
@@ -128,6 +129,16 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
    if(r.operation){hold(r.operation,describeOperation(r.operation,undefined,say),'alteracao');step.status='blocked';step.error={code:'CONFIRMATION_REQUIRED',reason:'CHANGE_EXISTING_RECORD',message:'Aguardando confirmação explícita; nada foi alterado.'};return;}
    return refuse(step,r.reason);
   }
+  if(call.name==='registrar_financiamento'){
+   const d=decideDebt(call,ctx);
+   if(d.decision==='confirm'){const op=debtOperation(d.debt!);hold(op,describeOperation(op,undefined,say),'execucao');step.status='blocked';step.error={code:'CONFIRMATION_REQUIRED',reason:'DEBT',message:'Aguardando confirmação explícita; nada foi registrado.'};return;}
+   if(d.decision==='ask'){
+    const i=brl(Math.round(d.installment!*100));
+    step.status='blocked';step.error={code:'WRITE_NOT_AUTHORIZED',reason:d.reason,message:'Falta o primeiro vencimento.'};
+    blockedAnswer=`${say.name?`${say.name}, f`:'F'}iz as contas: a parcela fica em ${i} por mês (parcela fixa). Se no seu contrato o valor for outro, me diz qual é. E quando vence a primeira parcela?`;status='clarification';return;
+   }
+   return refuse(step,d.reason);
+  }
   if(call.name==='cadastrar_cartao'){
    const d=decideCard(call,ctx);
    if(d.decision==='execute'){run('cadastrar_cartao',{...d.card!},step,signature);return;}
@@ -189,7 +200,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
   else if(op&&live&&yes){
    kind='confirmacao';if(options.failTools)throw new Error('EXECUTION_FAILED');
    const result=core.confirm(op!);
-   steps.push({order:1,id:op!.id,name:op!.kind==='create'?'registrar_confirmado':op!.kind==='goal'?'alterar_objetivo':op!.kind==='delete'?'excluir_transacao':'editar_transacao',arguments:{operationId:op!.id},status:'success',result,durationMs:0});
+   steps.push({order:1,id:op!.id,name:op!.kind==='create'?'registrar_confirmado':op!.kind==='debt'?'registrar_financiamento_confirmado':op!.kind==='goal'?'alterar_objetivo':op!.kind==='delete'?'excluir_transacao':'editar_transacao',arguments:{operationId:op!.id},status:'success',result,durationMs:0});
    confirmation='confirmed';
    if(newCategory)createdCategory=newCategory;
   }

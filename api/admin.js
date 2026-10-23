@@ -164,8 +164,8 @@ var SupabaseStore = class {
   async recordUsage(r) {
     await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null, user_text: r.userText ?? null, reply_text: r.replyText ?? null, intent: r.intent ?? null, duration_ms: r.durationMs ?? null, confirmation: r.confirmation ?? null, steps: r.steps ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
   }
-  async problemTurns(iso2, limit = 100) {
-    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso2)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
+  async problemTurns(iso3, limit = 100) {
+    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso3)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
   }
   /** Painel de gestão: configuração salva (admin_settings). null = nada salvo. */
   async getSetting(key) {
@@ -183,16 +183,16 @@ var SupabaseStore = class {
     await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}`, { method: "PATCH", body: JSON.stringify({ resolved_at: atIso }), prefer: "return=minimal" });
   }
   /** Painel de gestão: lembretes enviados ou criados desde `iso` (histórico, só leitura). */
-  remindersSince(iso2) {
-    const t = encodeURIComponent(iso2);
+  remindersSince(iso3) {
+    const t = encodeURIComponent(iso3);
     return this.rest(`whatsapp_reminders?or=(last_sent_at.gte.${t},created_at.gte.${t})&select=*&order=last_sent_at.desc.nullslast&limit=1000`);
   }
   async turn(messageId) {
     const rows = await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}&select=*&limit=1`);
     return rows[0] ?? null;
   }
-  async usageSince(iso2) {
-    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso2)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
+  async usageSince(iso3) {
+    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso3)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
   }
   async reminderStates(ids) {
     if (!ids.length) return [];
@@ -205,6 +205,24 @@ var SupabaseStore = class {
       body: JSON.stringify(items.map((i) => ({ transaction_id: i.id, workspace_id: i.workspaceId, phone, sent_count: (have.get(i.id) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
       prefer: "resolution=merge-duplicates,return=minimal"
     });
+  }
+  async debtNoticeStates(ids) {
+    if (!ids.length) return [];
+    return this.rest(`whatsapp_debt_notices?debt_id=in.(${ids.map(encodeURIComponent).join(",")})&select=*`);
+  }
+  async markDebtNoticed(items, phone, atIso) {
+    const have = new Map((await this.debtNoticeStates(items.map((i) => i.debtId))).map((r) => [`${r.debt_id}:${r.due_date}`, r.sent_count]));
+    await this.rest("whatsapp_debt_notices?on_conflict=debt_id,due_date", {
+      method: "POST",
+      body: JSON.stringify(items.map((i) => ({ debt_id: i.debtId, due_date: i.dueDate, workspace_id: i.workspaceId, phone, sent_count: (have.get(`${i.debtId}:${i.dueDate}`) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
+      prefer: "resolution=merge-duplicates,return=minimal"
+    });
+  }
+  awaitingDebtNotices(phone, sinceIso) {
+    return this.rest(`whatsapp_debt_notices?phone=eq.${encodeURIComponent(phone)}&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
+  }
+  async markDebtNoticeAnswered(items, atIso) {
+    for (const i of items) await this.rest(`whatsapp_debt_notices?debt_id=eq.${encodeURIComponent(i.debtId)}&due_date=eq.${i.dueDate}`, { method: "PATCH", body: JSON.stringify({ answered_at: atIso }), prefer: "return=minimal" });
   }
   async noticeStates(ids) {
     if (!ids.length) return [];
@@ -233,8 +251,8 @@ var SupabaseStore = class {
   }
   async lastReminderAt(phone) {
     const q = (table) => this.rest(`${table}?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
-    const [a, b] = await Promise.all([q("whatsapp_reminders"), q("whatsapp_invoice_notices")]);
-    return [a[0]?.last_sent_at, b[0]?.last_sent_at].filter((x) => Boolean(x)).sort().at(-1) ?? null;
+    const [a, b, c] = await Promise.all([q("whatsapp_reminders"), q("whatsapp_invoice_notices"), q("whatsapp_debt_notices")]);
+    return [a[0]?.last_sent_at, b[0]?.last_sent_at, c[0]?.last_sent_at].filter((x) => Boolean(x)).sort().at(-1) ?? null;
   }
   async setRemindersEnabled(phone, enabled) {
     await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify({ reminders_enabled: enabled }), prefer: "return=minimal" });
@@ -283,6 +301,7 @@ var money = z2.number().finite().positive().max(1e6).refine((v) => Math.abs(v * 
 var category = z2.string().trim().min(1).max(50);
 var cardRef = z2.object({ name: z2.string().trim().min(1).max(30).optional(), installments: z2.number().int().min(1).max(48).optional() }).strict();
 var cardInfo = z2.object({ name: z2.string().trim().min(1).max(30), closingDay: z2.number().int().min(1).max(31), dueDay: z2.number().int().min(1).max(31) }).strict();
+var debtSpec = z2.object({ description: z2.string().trim().min(1).max(60), principal: z2.number().finite().positive().max(1e8), rate: z2.number().finite().min(0).max(1e3), ratePeriod: z2.enum(["annual", "monthly"]), termMonths: z2.number().int().min(1).max(600), installment: z2.number().finite().positive().max(1e8), firstDue: isoDate, receivedInAccount: z2.boolean() }).strict();
 var invoiceInfo = z2.object({ card: z2.string().max(30), competence: isoDate, closingDate: isoDate, dueDate: isoDate, amount: z2.number().min(0).max(1e8), status: z2.enum(["planned", "overdue", "paid"]) }).strict();
 var transaction = z2.object({ type: z2.enum(["receita", "despesa"]), amount: money, description: z2.string().trim().min(1).max(120), date: isoDate, category: category.optional(), card: cardRef.optional() }).strict();
 var storedTransaction = transaction.extend({ id: z2.string().uuid() });
@@ -301,6 +320,7 @@ var schemas = {
   simular_compra: z2.object({ amount: money, available: money.optional() }).strict(),
   definir_objetivo: goal,
   cadastrar_cartao: cardInfo,
+  registrar_financiamento: debtSpec,
   consultar_fatura: z2.object({ month: z2.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(), card: z2.string().trim().max(30).optional() }).strict()
 };
 var CATEGORIES = ["Alimenta\xE7\xE3o", "Transporte", "Lazer", "Moradia", "Sa\xFAde", "Educa\xE7\xE3o", "Compras", "Contas e servi\xE7os", "Assinaturas", "Renda"];
@@ -329,6 +349,7 @@ var toolSchemas = {
   propor_edicao_transacao: z2.object({ alvo: target, novo: z2.object({ amount: money.optional(), description: z2.string().trim().min(1).max(120).optional(), category: z2.string().trim().min(1).max(50).optional(), date: isoDate.optional() }).strict().refine((n) => Object.keys(n).length > 0, "CHANGE_REQUIRED"), evidencia: evidence }).strict(),
   propor_exclusao_transacao: z2.object({ alvo: target, evidencia: evidence }).strict(),
   atualizar_preferencias: z2.object({ style: z2.enum(["direto", "descontraido", "neutro", "formal"]).optional(), detail: z2.enum(["curto", "detalhado"]).optional(), proactivity: z2.enum(["discreto", "equilibrado", "proativo"]).optional(), explanation: z2.enum(["minima", "completa"]).optional(), examples: z2.boolean().optional(), emojis: z2.boolean().optional(), redefinir: z2.boolean().optional(), evidencia: evidence }).strict(),
+  registrar_financiamento: z2.object({ descricao: z2.string().trim().min(1).max(60), valor: money, juros_percentual: z2.number().finite().min(0).max(1e3), periodo_juros: z2.enum(["anual", "mensal"]), prazo_meses: z2.number().int().min(1).max(600), parcela: money.nullable().optional(), primeiro_vencimento: isoDate.nullable().optional(), entrou_na_conta: z2.boolean(), evidencia: evidence, natureza: nature }).strict(),
   definir_objetivo: goal.extend({ evidencia: evidence }).strict(),
   cadastrar_cartao: z2.object({ nome: z2.string().trim().min(1).max(30), dia_fechamento: z2.number().int().min(1).max(31), dia_vencimento: z2.number().int().min(1).max(31), evidencia: evidence }).strict()
 };
@@ -345,16 +366,27 @@ var financialState = z2.object({
   cards: z2.array(cardInfo).max(10).optional(),
   /** Faturas dos cartões (vencimento a partir de ~45 dias atrás), vindas do banco. */
   invoices: z2.array(invoiceInfo).max(40).optional(),
+  /** Financiamentos confirmados NESTA mensagem; o servidor grava nas dívidas e esvazia. */
+  newDebts: z2.array(debtSpec.extend({ id: z2.string().uuid() })).max(3).optional(),
   /** Compras no cartão registradas NESTA mensagem; o servidor grava na fatura e esvazia. Não entram no saldo. */
   cardPurchases: z2.array(transaction.extend({ id: z2.string().uuid() })).max(20).optional()
 }).strict();
-var pendingOperation = z2.object({ id: z2.string().uuid(), kind: z2.enum(["edit", "delete", "goal", "create"]), targetId: z2.string().uuid().optional(), before: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), after: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), items: z2.array(transaction).min(1).max(5).optional(), createdAt: z2.number().int(), expiresAt: z2.number().int() }).strict().refine((op) => op.kind === "create" ? Boolean(op.items) && !op.before : op.kind === "goal" ? Boolean(op.after) && !op.items : Boolean(op.before) && !op.items, "OPERATION_SHAPE");
+var pendingOperation = z2.object({ id: z2.string().uuid(), kind: z2.enum(["edit", "delete", "goal", "create", "debt"]), debt: debtSpec.optional(), targetId: z2.string().uuid().optional(), before: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), after: z2.union([transaction.extend({ id: z2.string().uuid() }), goal]).optional(), items: z2.array(transaction).min(1).max(5).optional(), createdAt: z2.number().int(), expiresAt: z2.number().int() }).strict().refine((op) => op.kind === "debt" ? Boolean(op.debt) && !op.items && !op.before : op.debt ? false : op.kind === "create" ? Boolean(op.items) && !op.before : op.kind === "goal" ? Boolean(op.after) && !op.items : Boolean(op.before) && !op.items, "OPERATION_SHAPE");
 var memory = z2.object({ topic: z2.enum(["saldo", "despesas", "receitas", "analise"]).optional(), periods: z2.array(period).max(2).default([]), transactionDate: isoDate.optional(), pending: transaction.optional(), operation: pendingOperation.optional() }).strict();
 var historyEntry = z2.object({ role: z2.enum(["user", "assistant"]), content: z2.string().max(1800) }).strict();
 var sessionSchema = z2.object({ version: z2.literal(2), narrative: narrativeSchema.default(() => createNarrative()), id: z2.string().uuid(), state: financialState, memory, history: z2.array(historyEntry).max(10), lastRequests: z2.array(z2.object({ id: z2.string().uuid(), messageHash: z2.string().max(64), trace: z2.unknown() })).max(8), expiresAt: z2.number().int() }).strict().refine((s) => s.narrative.records.every((r) => r.ownerId === s.id), "MEMORY_OWNER_MISMATCH");
 var brl = (cents2) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents2 / 100);
 var todayBR = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
 var normalize = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+// shared/v2/debts.ts
+var lastDay = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+var iso = (y, m, d) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+function addMonths(date, n, keepDay) {
+  const y = Number(date.slice(0, 4)), m = Number(date.slice(5, 7)), d = keepDay ?? Number(date.slice(8, 10));
+  const t = y * 12 + (m - 1) + n, ny = Math.floor(t / 12), nm = t % 12 + 1;
+  return iso(ny, nm, Math.min(d, lastDay(ny, nm)));
+}
 
 // shared/v2/cards.ts
 var cardKey = (name) => normalize(name).replace(/\bcartao\b/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
@@ -364,19 +396,19 @@ function findCard(cards, name) {
   const key = cardKey(name);
   return list.find((c) => cardKey(c.name) === key);
 }
-var iso = (y, m, d) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-var lastDay = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
-var addMonths = (y, m, n) => {
+var iso2 = (y, m, d) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+var lastDay2 = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+var addMonths2 = (y, m, n) => {
   const t = y * 12 + (m - 1) + n;
   return { y: Math.floor(t / 12), m: t % 12 + 1 };
 };
 function invoiceFor(card, purchaseDate, index = 0) {
   const y0 = Number(purchaseDate.slice(0, 4)), m0 = Number(purchaseDate.slice(5, 7)), day = Number(purchaseDate.slice(8, 10));
-  const base = addMonths(y0, m0, day > card.closingDay ? 1 : 0), c = addMonths(base.y, base.m, index);
-  const closingDate = iso(c.y, c.m, Math.min(card.closingDay, lastDay(c.y, c.m)));
-  const d = card.dueDay > card.closingDay ? c : addMonths(c.y, c.m, 1);
-  const dueDate = iso(d.y, d.m, Math.min(card.dueDay, lastDay(d.y, d.m)));
-  return { competence: iso(c.y, c.m, 1), closingDate, dueDate };
+  const base = addMonths2(y0, m0, day > card.closingDay ? 1 : 0), c = addMonths2(base.y, base.m, index);
+  const closingDate = iso2(c.y, c.m, Math.min(card.closingDay, lastDay2(c.y, c.m)));
+  const d = card.dueDay > card.closingDay ? c : addMonths2(c.y, c.m, 1);
+  const dueDate = iso2(d.y, d.m, Math.min(card.dueDay, lastDay2(d.y, d.m)));
+  return { competence: iso2(c.y, c.m, 1), closingDate, dueDate };
 }
 
 // server/whatsapp/ledger.ts
@@ -483,6 +515,39 @@ var SupabaseLedger = class {
     const names = new Map(cards.map((c) => [c.id, c.name]));
     return rows.map((r) => ({ card: (names.get(r.card_id) ?? "cart\xE3o").slice(0, 30), competence: r.competence, closingDate: r.closing_date, dueDate: r.due_date, amount: Number(r.amount), status: r.status }));
   }
+  async debtsDue(ws, today) {
+    const from = new Date(Date.parse(`${today}T12:00:00Z`) - 30 * 864e5).toISOString().slice(0, 10);
+    const rows = await this.rest(
+      `finance_debts?workspace_id=eq.${ws.workspaceId}&status=eq.active&installment_amount=not.is.null&next_due_date=lte.${today}&next_due_date=gte.${from}&select=id,description,installment_amount,next_due_date&order=next_due_date.asc&limit=10`
+    );
+    return rows.map((r) => ({ debtId: r.id, description: r.description, installment: Number(r.installment_amount), dueDate: r.next_due_date }));
+  }
+  async payDebt(ws, due, amount, date) {
+    await this.rpc("finance_record_debt_payment", { target_debt_id: due.debtId, target_workspace_id: ws.workspaceId, target_account_id: ws.accountId, payment_amount: amount, target_payment_type: "principal_interest", target_payment_method: null, target_paid_at: date, target_note: "Parcela paga, confirmada pelo WhatsApp", target_idempotency_key: `wa-debt:${due.debtId}:${due.dueDate}` });
+    const [debt] = await this.rest(`finance_debts?id=eq.${due.debtId}&workspace_id=eq.${ws.workspaceId}&select=due_day,status`);
+    if (debt && debt.status !== "paid") await this.rest(`finance_debts?id=eq.${due.debtId}&workspace_id=eq.${ws.workspaceId}`, { method: "PATCH", body: JSON.stringify({ next_due_date: addMonths(due.dueDate, 1, debt.due_day ?? void 0) }), prefer: "return=minimal" });
+  }
+  /** Financiamento: cria a dívida (id estável) e, se o dinheiro entrou, lança a entrada na conta. */
+  async applyDebts(ws, debts, key) {
+    const today = todayBR();
+    let i = 0;
+    for (const d of debts) {
+      await this.rest("finance_debts?on_conflict=id", {
+        method: "POST",
+        body: JSON.stringify({ id: d.id, workspace_id: ws.workspaceId, creditor: d.description, description: d.description, principal_original: d.principal, principal_balance: d.principal, rate: d.rate, rate_period: d.ratePeriod === "annual" ? "annual" : "monthly", interest_type: "compound", start_date: today, last_interest_date: today, next_due_date: d.firstDue, status: "active", installment_amount: d.installment, installments_total: d.termMonths, due_day: Number(d.firstDue.slice(8, 10)) }),
+        prefer: "resolution=ignore-duplicates,return=minimal"
+      });
+      if (d.receivedInAccount) {
+        let cats = await this.categoryMap(ws.workspaceId);
+        if (!cats.has("Financiamento")) {
+          await this.rest("finance_categories?on_conflict=workspace_id,name", { method: "POST", body: JSON.stringify([{ workspace_id: ws.workspaceId, name: "Financiamento", kind: "income" }]), prefer: "resolution=ignore-duplicates,return=minimal" });
+          cats = await this.categoryMap(ws.workspaceId);
+        }
+        await this.rpc("finance_create_transaction", { target_workspace_id: ws.workspaceId, target_account_id: ws.accountId, target_category_id: cats.get("Financiamento") ?? null, target_description: `${d.description} (valor recebido)`, target_amount: d.principal, target_type: "income", target_status: "confirmed", target_competence_date: today, target_expected_date: today, target_effective_date: today, target_origin: "ai", target_payment_method: null, target_note: "Registrado pelo Pulse no WhatsApp", target_idempotency_key: `${key}:debt${i}` });
+      }
+      i++;
+    }
+  }
   async invoiceNotices(ws, today) {
     const back = (n) => new Date(Date.parse(`${today}T12:00:00Z`) - n * 864e5).toISOString().slice(0, 10);
     const cols = "id,card_id,amount,status,closing_date,due_date";
@@ -571,7 +636,8 @@ var SupabaseLedger = class {
   }
   async apply(ws, changes, key) {
     const hasCards = Boolean(changes.cardUpserts?.length || changes.cardPurchases?.length);
-    if (!changes.create.length && !changes.update.length && !changes.remove.length && !hasCards) return;
+    const hasDebts = Boolean(changes.debts?.length);
+    if (!changes.create.length && !changes.update.length && !changes.remove.length && !hasCards && !hasDebts) return;
     let cats = await this.categoryMap(ws.workspaceId);
     const wanted = [...new Set([...changes.create, ...changes.update, ...changes.cardPurchases ?? []].map((e) => e.category).filter((c) => Boolean(c) && !cats.has(c)))];
     if (wanted.length) {
@@ -619,6 +685,7 @@ var SupabaseLedger = class {
     for (const id of changes.remove) {
       await this.rest(`finance_transactions?id=eq.${id}&workspace_id=eq.${ws.workspaceId}`, { method: "DELETE" });
     }
+    if (hasDebts) await this.applyDebts(ws, changes.debts ?? [], key);
     if (hasCards) return this.applyCards(ws, changes, key, catId);
   }
 };
@@ -684,7 +751,7 @@ COMO VOC\xCA FALA
 - Curto, como mensagem de WhatsApp: em geral 1 a 3 frases. S\xF3 escreva mais quando pedirem ajuda concreta, um plano ou uma explica\xE7\xE3o.
 - Espelhe o jeito da pessoa. Se ela escreve solto ("cara", "mano", "p\xF4", "\xE9 foda", "kkk"), responda solto, em portugu\xEAs do Brasil do dia a dia ("p\xF4", "eita", "putz", "t\xE1", "pra"). Se ela escreve formal, responda formal. N\xE3o imite palavr\xE3o nem agressividade; acompanhar o tom n\xE3o \xE9 exagerar.
 - No m\xE1ximo uma pergunta por resposta, e s\xF3 se for uma pergunta que voc\xEA realmente quer saber a resposta. Pode n\xE3o perguntar nada.
-- Pode ter opini\xE3o e dizer o \xF3bvio quando for verdade ("xingar n\xE3o \xE9 cobran\xE7a, \xE9 falta de respeito"). Sem julgar a pessoa nem os gastos dela.
+- Pode ter opini\xE3o e dizer o \xF3bvio quando for verdade ("xingar n\xE3o \xE9 cobran\xE7a, \xE9 falta de respeito"). Sem julgar a pessoa nem os gastos dela. Nunca comente se um valor \xE9 alto, baixo, grande ou pequeno ("financiamento grande, hein", "\xE9 muito dinheiro"): isso s\xF3 quando o usu\xE1rio perguntar o que voc\xEA acha.
 - Humor leve s\xF3 quando a pessoa est\xE1 leve. Em assunto pesado, seja direto e caloroso, sem drama.
 - Num desabafo, fique no desabafo. N\xE3o traga dinheiro, or\xE7amento, reserva ou plano se a pessoa n\xE3o trouxe.
 - N\xE3o ofere\xE7a seus servi\xE7os nem liste op\xE7\xF5es do que voc\xEA pode fazer. Ajude quando pedirem; quando fizer sentido oferecer, ofere\xE7a UMA coisa concreta, n\xE3o um card\xE1pio.
@@ -749,7 +816,7 @@ var RULES = `REGRAS DE OPERA\xC7\xC3O
 Voc\xEA interpreta a mensagem e prop\xF5e a\xE7\xF5es por ferramentas; o c\xF3digo valida, autoriza e executa. Nunca afirme que algo foi registrado, alterado, exclu\xEDdo ou salvo: o sistema mostra o recibo a partir do resultado real. Nunca mencione ao usu\xE1rio nomes de campos ou de ferramentas (natureza, evidencia, registrar_transacao\u2026); se uma ferramenta der erro, corrija a chamada ou pergunte em linguagem comum.
 Nem toda mensagem \xE9 uma opera\xE7\xE3o. "Sim", "n\xE3o", "pode", "claro" respondem \xE0 sua \xFAltima pergunta da conversa; confirma\xE7\xF5es de opera\xE7\xF5es pendentes j\xE1 foram tratadas pelo c\xF3digo antes de chegar a voc\xEA, ent\xE3o n\xE3o as trate como comandos financeiros.
 Registro: quando o usu\xE1rio relata um gasto ou receita que J\xC1 aconteceu, mesmo de forma informal ("almocei hoje, deu 35", "uber 18", "gastei 50 no mercado com cart\xE3o"), chame registrar_transacao com natureza "fato_ocorrido" e evidencia = trecho copiado da mensagem atual que cont\xE9m o valor, sem acrescentar "R$" ou palavras. V\xE1rios lan\xE7amentos na mesma mensagem: registrar_varios, um item por lan\xE7amento. N\xE3o pergunte em texto "quer que eu registre?": proponha pela ferramenta, e o c\xF3digo pede a confirma\xE7\xE3o quando for preciso. Pix, d\xE9bito ou dinheiro n\xE3o mudam o registro.
-Cart\xE3o de cr\xE9dito: se o usu\xE1rio diz que foi no cr\xE9dito ("passei no cart\xE3o", "no cr\xE9dito", "parcelei", "no Nubank"), preencha cartao em registrar_transacao com nome (s\xF3 se ele disse) e parcelas (s\xF3 se ele disse; amount \xE9 o TOTAL da compra: "3x de 100" = amount 300, parcelas 3). Compra no cr\xE9dito entra na fatura, n\xE3o no saldo. Se o cart\xE3o ainda n\xE3o est\xE1 cadastrado, o sistema j\xE1 anota a compra e pede o nome, o dia de fechamento e o de vencimento de forma leve; quando o usu\xE1rio responder com esses dados, chame cadastrar_cartao. N\xE3o fa\xE7a interrogat\xF3rio e n\xE3o pe\xE7a os dados antes de registrar. D\xE9bito n\xE3o \xE9 cr\xE9dito: n\xE3o preencha cartao. Perguntas sobre fatura ("quanto vai vir na fatura do m\xEAs que vem?", "quando vence meu cart\xE3o?") usam consultar_fatura, nunca listar_transacoes; "fatura do m\xEAs que vem" = a que vence no pr\xF3ximo m\xEAs do calend\xE1rio (month em YYYY-MM). Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
+Cart\xE3o de cr\xE9dito: se o usu\xE1rio diz que foi no cr\xE9dito ("passei no cart\xE3o", "no cr\xE9dito", "parcelei", "no Nubank"), preencha cartao em registrar_transacao com nome (s\xF3 se ele disse) e parcelas (s\xF3 se ele disse; amount \xE9 o TOTAL da compra: "3x de 100" = amount 300, parcelas 3). Compra no cr\xE9dito entra na fatura, n\xE3o no saldo. Se o cart\xE3o ainda n\xE3o est\xE1 cadastrado, o sistema j\xE1 anota a compra e pede o nome, o dia de fechamento e o de vencimento de forma leve; quando o usu\xE1rio responder com esses dados, chame cadastrar_cartao. N\xE3o fa\xE7a interrogat\xF3rio e n\xE3o pe\xE7a os dados antes de registrar. D\xE9bito n\xE3o \xE9 cr\xE9dito: n\xE3o preencha cartao. Financiamento ou empr\xE9stimo ("fiz um financiamento de 150 mil a 5% ao ano em 420 meses", "quero registrar nas minhas d\xEDvidas"): \xE9 uma d\xEDvida que o usu\xE1rio contraiu, e o dinheiro costuma entrar na conta. Use registrar_financiamento (entrou_na_conta=true) com os n\xFAmeros que ele disse nas \xFAltimas mensagens, mesmo que cheguem em mensagens separadas; nunca registre como despesa comum nem recuse por "n\xE3o ser recorrente". Se faltar valor, juros ou prazo, pergunte s\xF3 o que falta. Perguntas sobre fatura ("quanto vai vir na fatura do m\xEAs que vem?", "quando vence meu cart\xE3o?") usam consultar_fatura, nunca listar_transacoes; "fatura do m\xEAs que vem" = a que vence no pr\xF3ximo m\xEAs do calend\xE1rio (month em YYYY-MM). Hip\xF3tese, plano, desejo, d\xFAvida ou pergunta ("se eu gastar", "quero comprar", "estou pensando em", "vale a pena?") n\xE3o s\xE3o registros: converse, ou use simular_compra quando houver valores. Em simular_compra, s\xF3 preencha available se o usu\xE1rio disse quanto tem; sem isso, o c\xF3digo usa o saldo e voc\xEA n\xE3o precisa consultar o saldo antes. S\xF3 ofere\xE7a corrigir ou excluir um lan\xE7amento que existe (confira com listar_transacoes).
 amount \xE9 n\xFAmero JSON em reais (R$ 1.900 = 1900; R$ 1.900,50 = 1900.50; "3 mil" = 3000), nunca string ou centavos. date em YYYY-MM-DD: sem data = hoje; "ontem" = ontem; nunca data futura. description curta, sem verbo, valor ou data ("almo\xE7o", "Uber", "celular"). category: escolha uma de ${CATEGORIES.join(", ")}; escolha sempre que for razoavelmente \xF3bvia (\xE1gua, caf\xE9, mercado, padaria \u2192 Alimenta\xE7\xE3o; Uber, gasolina \u2192 Transporte; farm\xE1cia, consulta \u2192 Sa\xFAde; Netflix \u2192 Assinaturas). S\xF3 OMITA category quando for realmente amb\xEDguo ou se o usu\xE1rio disser que n\xE3o sabe; nesse caso o sistema pergunta a categoria. O usu\xE1rio PODE criar categorias novas quando quiser: se ele pedir ("cria a categoria namorado e registra isso l\xE1", "p\xF5e em Pets"), use exatamente o nome que ele disse em category e N\xC3O diga que n\xE3o \xE9 poss\xEDvel. Nunca crie categoria por conta pr\xF3pria. N\xE3o invente categoria que o usu\xE1rio n\xE3o pediu.
 Consultas sem per\xEDodo dito pelo usu\xE1rio: use o m\xEAs atual.
 Corre\xE7\xF5es e exclus\xF5es de lan\xE7amentos existentes: propor_edicao_transacao ou propor_exclusao_transacao; o c\xF3digo mostra antes/depois e pede confirma\xE7\xE3o. Se o alvo for amb\xEDguo, consulte listar_transacoes ou pergunte.
@@ -780,6 +847,7 @@ var descriptions = {
   consultar_gastos_categoria: "Total e registros de despesas de uma categoria no per\xEDodo.",
   projetar_despesas: "Estimativa calculada pelo core: m\xE9dia di\xE1ria at\xE9 asOf projetada at\xE9 o fim do per\xEDodo.",
   atualizar_preferencias: "Altera apenas prefer\xEAncias de comunica\xE7\xE3o pedidas explicitamente; envie s\xF3 os campos alterados (ou redefinir=true) e a evidencia literal. N\xE3o inferir personalidade.",
+  registrar_financiamento: "Prop\xF5e registrar um FINANCIAMENTO ou EMPR\xC9STIMO nas d\xEDvidas: valor, juros, prazo em meses. entrou_na_conta=true quando o usu\xE1rio recebeu o dinheiro (financiamento, empr\xE9stimo novo); false quando s\xF3 quer registrar uma d\xEDvida que j\xE1 tinha. Envie parcela s\xF3 se o usu\xE1rio disse o valor; o c\xF3digo calcula a parcela fixa. primeiro_vencimento s\xF3 se o usu\xE1rio disse o dia (data futura YYYY-MM-DD); sen\xE3o deixe vazio e o c\xF3digo pergunta. Os n\xFAmeros (valor, prazo, juros) precisam estar nas mensagens do usu\xE1rio; evidencia = trecho literal. Nunca grava direto: o c\xF3digo pede confirma\xE7\xE3o.",
   consultar_fatura: "Faturas dos cart\xF5es de cr\xE9dito do usu\xE1rio: valor, fechamento e vencimento. month = m\xEAs de VENCIMENTO da fatura (YYYY-MM); sem month, lista as faturas em aberto. card = nome do cart\xE3o, se ele disse.",
   cadastrar_cartao: "Cadastra (ou atualiza) um cart\xE3o de cr\xE9dito quando o usu\xE1rio diz o nome, o dia que a fatura fecha e o dia que vence. S\xF3 com os tr\xEAs dados ditos por ele; evidencia = trecho literal da mensagem.",
   definir_objetivo: "Cria uma meta financeira pedida explicitamente, com valor dito pelo usu\xE1rio. Substituir meta existente gera pedido de confirma\xE7\xE3o."
@@ -851,6 +919,14 @@ function composeNotices(notices, name, today) {
   const lines = shown.map((n) => name ? `${name}, ${line(n)}` : cap(line(n)));
   return `${lines.join("\n\n")} \u{1F49C}`;
 }
+function composeDebtNotices(items, name, today) {
+  const line = (d) => {
+    const v = brl(Math.round(d.installment * 100));
+    return d.dueDate === today ? `hoje vence a parcela do ${d.description} (${v}). J\xE1 pagou? Me conta o valor que voc\xEA pagou que eu dou baixa pra voc\xEA.` : `a parcela do ${d.description} (${v}) venceu dia ${dm2(d.dueDate)}. J\xE1 pagou? Me conta o valor que voc\xEA pagou que eu dou baixa pra voc\xEA.`;
+  };
+  const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+  return `${items.slice(0, MAX_NOTICES_PER_MESSAGE).map((d) => name ? `${name}, ${line(d)}` : cap(line(d))).join("\n\n")} \u{1F49C}`;
+}
 async function runReminders(deps, opts = {}) {
   const today = deps.today?.() ?? todayBR();
   const nowMs = deps.now?.() ?? Date.now();
@@ -876,13 +952,16 @@ async function runReminders(deps, opts = {}) {
         const sent = noticeStates.find((s) => s.invoice_id === n.invoiceId && s.kind === n.kind)?.sent_count ?? 0;
         return sent < (n.kind === "closed" ? 1 : MAX_ASKS_PER_ITEM);
       });
-      if (!items.length && !notices.length) {
+      const allDebts = await deps.ledger.debtsDue(ws, today);
+      const debtStates = await deps.store.debtNoticeStates(allDebts.map((d) => d.debtId));
+      const debts = allDebts.filter((d) => (debtStates.find((s) => s.debt_id === d.debtId && s.due_date === d.dueDate)?.sent_count ?? 0) < MAX_ASKS_PER_ITEM);
+      if (!items.length && !notices.length && !debts.length) {
         out.skipped++;
         continue;
       }
       const firstEver = !last;
       const nm = first(c.name);
-      const parts = [items.length ? composeReminder(items, nm, today, false) : "", notices.length ? composeNotices(notices, nm, today) : ""].filter(Boolean);
+      const parts = [items.length ? composeReminder(items, nm, today, false) : "", notices.length ? composeNotices(notices, nm, today) : "", debts.length ? composeDebtNotices(debts, nm, today) : ""].filter(Boolean);
       const text = parts.join("\n\n") + (firstEver ? `
 
 ${optOutNote}` : "");
@@ -894,6 +973,8 @@ ${optOutNote}` : "");
       if (asked.length) await deps.store.markReminded(asked, c.phone, at);
       const told = notices.slice(0, MAX_NOTICES_PER_MESSAGE).map((n) => ({ invoiceId: n.invoiceId, kind: n.kind, workspaceId: ws.workspaceId }));
       if (told.length) await deps.store.markNoticed(told, c.phone, at);
+      const toldDebts = debts.slice(0, MAX_NOTICES_PER_MESSAGE).map((d) => ({ debtId: d.debtId, dueDate: d.dueDate, workspaceId: ws.workspaceId }));
+      if (toldDebts.length) await deps.store.markDebtNoticed(toldDebts, c.phone, at);
       await rememberInSession(deps.store, c.phone, text, nowMs).catch(() => void 0);
       out.sent++;
       await sleep(2500 + Math.floor(Math.random() * 2500));
@@ -1013,17 +1094,17 @@ function pricesFromForm(form) {
 var esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 var TZ = "America/Sao_Paulo";
 var TRACKING_SINCE = "2026-10-22";
-var fmtDate = (iso2) => iso2 ? new Date(iso2).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "short", timeStyle: "short" }) : "\u2014";
-var fmtFull = (iso2) => iso2 ? new Date(iso2).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "full", timeStyle: "medium" }) : "\u2014";
+var fmtDate = (iso3) => iso3 ? new Date(iso3).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "short", timeStyle: "short" }) : "\u2014";
+var fmtFull = (iso3) => iso3 ? new Date(iso3).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "full", timeStyle: "medium" }) : "\u2014";
 var fmtTime = (ms) => new Date(ms).toLocaleTimeString("pt-BR", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 var fmtInt = (n) => n.toLocaleString("pt-BR");
 var fmtUsd = (n) => n === void 0 ? "\u2014" : `US$ ${n.toFixed(n < 1 ? 3 : 2)}`;
 var fmtShort = (n) => n >= 1e6 ? `${(n / 1e6).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mi` : n >= 1e4 ? `${(n / 1e3).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mil` : fmtInt(n);
 var fmtPhone = (p) => /^55\d{2}9\d{8}$/.test(p) ? `+55 (${p.slice(2, 4)}) ${p.slice(4, 9)}-${p.slice(9)}` : `+${p}`;
 var maskPhone = (p) => /^55\d{2}9\d{8}$/.test(p) ? `+55 (${p.slice(2, 4)}) \u2022\u2022\u2022\u2022\u2022-${p.slice(9)}` : `+\u2022\u2022\u2022${p.slice(-4)}`;
-function relTime(iso2, nowMs) {
-  if (!iso2) return "\u2014";
-  const diff = Math.max(0, nowMs - Date.parse(iso2));
+function relTime(iso3, nowMs) {
+  if (!iso3) return "\u2014";
+  const diff = Math.max(0, nowMs - Date.parse(iso3));
   const min = Math.round(diff / 6e4);
   if (min < 1) return "agora";
   if (min < 60) return `h\xE1 ${min} min`;
@@ -1032,7 +1113,7 @@ function relTime(iso2, nowMs) {
   const d = Math.round(h / 24);
   if (d === 1) return "ontem";
   if (d < 7) return `h\xE1 ${d} dias`;
-  return new Date(iso2).toLocaleDateString("pt-BR", { timeZone: TZ, day: "2-digit", month: "short" });
+  return new Date(iso3).toLocaleDateString("pt-BR", { timeZone: TZ, day: "2-digit", month: "short" });
 }
 var dayLabel2 = (key) => (/* @__PURE__ */ new Date(`${key}T12:00:00Z`)).toLocaleDateString("pt-BR", { timeZone: "UTC", day: "numeric", month: "short" }).replace(".", "");
 var weekday = (key) => (/* @__PURE__ */ new Date(`${key}T12:00:00Z`)).toLocaleDateString("pt-BR", { timeZone: "UTC", weekday: "short" }).replace(".", "");

@@ -50,6 +50,12 @@ export function describeOperation(op:PendingOperation,lead?:string,say:Say={}){
   }
   return `${lead?lead+' ':''}${addressed(name,`vou lançar estes ${items.length} aqui, pode ser?`)}\n${items.map(i=>bullet(i,today,say.cards)).join('\n')}${hint?'\n'+hint.trim():''}`;
  }
+ if(op.kind==='debt'){
+  const d=op.debt!,i=(n:number)=>brl(Math.round(n*100));
+  const rate=`${String(d.rate).replace('.',',')}% ${d.ratePeriod==='annual'?'ao ano':'ao mês'}`;
+  const day=`${d.firstDue.slice(8,10)}/${d.firstDue.slice(5,7)}`;
+  return `${addressed(name,`confirma pra mim: vou registrar nas suas dívidas o ${d.description} de ${i(d.principal)}, ${rate}, em ${d.termMonths}x de ${i(d.installment)}, com a primeira parcela em ${day}${d.receivedInAccount?` e lançar a entrada de ${i(d.principal)} na sua conta`:''}. Pode ser?`)}`;
+ }
  if(op.kind==='goal'&&!op.before)return addressed(name,`vou criar a meta "${op.after!.description}" de ${brl(Math.round(op.after!.amount*100))}${'targetDate' in op.after!&&op.after!.targetDate?' para '+op.after!.targetDate:''}. Pode ser?`);
  if(op.kind==='edit'&&op.before&&op.after&&'type' in op.before&&'type' in op.after&&op.after.category&&op.before.category!==op.after.category&&op.before.amount===op.after.amount&&op.before.description===op.after.description&&op.before.date===op.after.date)
   return `${lead?lead+' ':''}${addressed(name,`quer que eu coloque ${showRecord(op.before,today)} na categoria ${op.after.category}?`)}`;
