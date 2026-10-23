@@ -91,7 +91,7 @@ async function runAgent(deps: Deps, phone: string, message: string, messageId: s
   throw new Error('SESSION_CONFLICT');
 }
 
-async function execOwnerCommand(deps: Deps, cmd: OwnerCommand): Promise<string> {
+export async function execOwnerCommand(deps: Deps, cmd: OwnerCommand): Promise<string> {
   if (cmd.kind === 'help') return messages.ownerHelp;
   if (cmd.kind === 'invalid') return messages.ownerBadPhone;
   if (cmd.kind === 'list') return renderContactList(await deps.store.listContacts());
