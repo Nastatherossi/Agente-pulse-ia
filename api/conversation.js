@@ -696,7 +696,7 @@ function withoutNumbers(text) {
 
 // shared/v2/agent.ts
 var RETRYABLE = /* @__PURE__ */ new Set(["VALIDATION_FAILED", "UNKNOWN_TOOL"]);
-var LIMITS = { steps: 4, tools: 8, timeoutMs: 35e3, tokens: 14e3 };
+var LIMITS = { steps: 4, tools: 8, timeoutMs: 35e3, tokens: 3e4 };
 var messageHash = async (text) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))).map((n) => n.toString(16).padStart(2, "0")).join("");
 var errorMessage = (code) => ({ OPENAI_AUTH_FAILED: "A chave OpenAI n\xE3o foi aceita. Verifique a configura\xE7\xE3o do laborat\xF3rio.", OPENAI_QUOTA_EXCEEDED: "A OpenAI informou falta de cr\xE9ditos ou limite de uso.", OPENAI_RATE_LIMITED: "A OpenAI est\xE1 limitando requisi\xE7\xF5es. Aguarde antes de tentar de novo.", MODEL_INCOMPATIBLE: "O modelo n\xE3o aceitou o contrato de ferramentas.", OPENAI_TIMEOUT: "A OpenAI n\xE3o respondeu no prazo.", REAL_AI_LOCKED: "IA real bloqueada na configura\xE7\xE3o do laborat\xF3rio.", INVALID_SESSION: "Esta sess\xE3o perdeu a validade. Inicie uma nova sess\xE3o.", STEP_LIMIT: "Parei no limite de etapas. Tente uma pergunta mais espec\xEDfica.", TOKEN_LIMIT: "Parei no limite de consumo desta intera\xE7\xE3o.", LOOP_DETECTED: "A consulta se repetiu. Parei para evitar um loop." })[code] || "N\xE3o consegui concluir esta intera\xE7\xE3o. Nenhum sucesso de ferramenta foi inventado.";
 function readable(step, detail, live = false) {

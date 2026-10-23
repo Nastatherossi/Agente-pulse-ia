@@ -1,6 +1,10 @@
 import type { Contact, ContactStatus } from '../../shared/whatsapp/access.js';
 
-export type UsageRow = { phone: string; messageId: string; source: 'text' | 'audio'; model?: string; modelCalls: number; inputTokens: number; outputTokens: number; status: string; errorCode?: string };
+export type UsageRow = { phone: string; messageId: string; source: 'text' | 'audio'; model?: string; modelCalls: number; inputTokens: number; outputTokens: number; status: string; errorCode?: string;
+  /** Só preenchidos em turnos com problema (erro, não entendeu, ferramenta bloqueada), para o dono depurar no painel. */
+  userText?: string; replyText?: string; intent?: string; durationMs?: number; confirmation?: string; steps?: unknown };
+
+export type TurnDetail = UsageRecord & { message_id: string; source?: string; model_calls?: number; user_text: string | null; reply_text: string | null; intent: string | null; duration_ms: number | null; confirmation: string | null; steps: unknown };
 
 export type UsageRecord = { phone: string; model: string | null; input_tokens: number; output_tokens: number; status: string; error_code: string | null; created_at: string };
 
@@ -112,7 +116,16 @@ export class SupabaseStore implements Store {
   }
 
   async recordUsage(r: UsageRow) {
-    await this.rest('whatsapp_usage', { method: 'POST', body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null }), prefer: 'resolution=ignore-duplicates,return=minimal' });
+    await this.rest('whatsapp_usage', { method: 'POST', body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null, user_text: r.userText ?? null, reply_text: r.replyText ?? null, intent: r.intent ?? null, duration_ms: r.durationMs ?? null, confirmation: r.confirmation ?? null, steps: r.steps ?? null }), prefer: 'resolution=ignore-duplicates,return=minimal' });
+  }
+
+  async problemTurns(iso: string, limit = 100) {
+    return this.rest<TurnDetail[]>(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
+  }
+
+  async turn(messageId: string) {
+    const rows = await this.rest<TurnDetail[]>(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}&select=*&limit=1`);
+    return rows[0] ?? null;
   }
 
   async usageSince(iso: string) {

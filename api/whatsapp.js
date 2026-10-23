@@ -699,7 +699,7 @@ function withoutNumbers(text) {
 
 // shared/v2/agent.ts
 var RETRYABLE = /* @__PURE__ */ new Set(["VALIDATION_FAILED", "UNKNOWN_TOOL"]);
-var LIMITS = { steps: 4, tools: 8, timeoutMs: 35e3, tokens: 14e3 };
+var LIMITS = { steps: 4, tools: 8, timeoutMs: 35e3, tokens: 3e4 };
 var messageHash = async (text) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))).map((n) => n.toString(16).padStart(2, "0")).join("");
 var errorMessage = (code) => ({ OPENAI_AUTH_FAILED: "A chave OpenAI n\xE3o foi aceita. Verifique a configura\xE7\xE3o do laborat\xF3rio.", OPENAI_QUOTA_EXCEEDED: "A OpenAI informou falta de cr\xE9ditos ou limite de uso.", OPENAI_RATE_LIMITED: "A OpenAI est\xE1 limitando requisi\xE7\xF5es. Aguarde antes de tentar de novo.", MODEL_INCOMPATIBLE: "O modelo n\xE3o aceitou o contrato de ferramentas.", OPENAI_TIMEOUT: "A OpenAI n\xE3o respondeu no prazo.", REAL_AI_LOCKED: "IA real bloqueada na configura\xE7\xE3o do laborat\xF3rio.", INVALID_SESSION: "Esta sess\xE3o perdeu a validade. Inicie uma nova sess\xE3o.", STEP_LIMIT: "Parei no limite de etapas. Tente uma pergunta mais espec\xEDfica.", TOKEN_LIMIT: "Parei no limite de consumo desta intera\xE7\xE3o.", LOOP_DETECTED: "A consulta se repetiu. Parei para evitar um loop." })[code] || "N\xE3o consegui concluir esta intera\xE7\xE3o. Nenhum sucesso de ferramenta foi inventado.";
 function readable(step, detail, live = false) {
@@ -1596,7 +1596,14 @@ var SupabaseStore = class {
     return rows.length;
   }
   async recordUsage(r) {
-    await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
+    await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null, user_text: r.userText ?? null, reply_text: r.replyText ?? null, intent: r.intent ?? null, duration_ms: r.durationMs ?? null, confirmation: r.confirmation ?? null, steps: r.steps ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
+  }
+  async problemTurns(iso, limit = 100) {
+    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
+  }
+  async turn(messageId) {
+    const rows = await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}&select=*&limit=1`);
+    return rows[0] ?? null;
   }
   async usageSince(iso) {
     return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
@@ -1828,13 +1835,37 @@ async function runAgent(deps, phone, message, messageId, source, name) {
     if (ws && deps.ledger && before && !out.trace.errorCode) {
       await deps.ledger.apply(ws, diffEntries(before.transactions, out.session.state.transactions), `wa:${messageId}`);
     }
-    if (await deps.store.saveSession(phone, out.session, version)) {
-      const u = out.trace.usage;
-      await deps.store.recordUsage({ phone, messageId, source, model: out.trace.model, modelCalls: out.trace.modelCalls ?? 0, inputTokens: u?.inputTokens ?? 0, outputTokens: u?.outputTokens ?? 0, status: out.trace.status ?? "unknown", errorCode: out.trace.errorCode }).catch(() => void 0);
-      return out;
-    }
+    if (await deps.store.saveSession(phone, out.session, version)) return out;
   }
   throw new Error("SESSION_CONFLICT");
+}
+var clip = (t, n) => t && t.length > n ? `${t.slice(0, n)}\u2026` : t;
+function isProblemTurn(t) {
+  return Boolean(t.errorCode) || t.status !== "success" && t.confirmation !== "pending" || t.steps.some((st) => st.status !== "success");
+}
+async function recordTurn(deps, info) {
+  const t = info.trace;
+  const problem = t ? isProblemTurn(t) : true;
+  const row = {
+    phone: info.phone,
+    messageId: info.messageId,
+    source: info.source,
+    model: t?.model,
+    modelCalls: t?.modelCalls ?? 0,
+    inputTokens: t?.usage?.inputTokens ?? 0,
+    outputTokens: t?.usage?.outputTokens ?? 0,
+    status: t ? t.errorCode ? "error" : t.status : "error",
+    errorCode: t?.errorCode ?? info.errorCode,
+    ...problem ? {
+      userText: clip(info.userText, 2e3),
+      replyText: clip(info.replyText, 2e3),
+      intent: t?.intent,
+      durationMs: t?.durationMs ?? info.durationMs,
+      confirmation: t?.confirmation,
+      steps: t?.steps.map((st) => ({ name: st.name, status: st.status, durationMs: st.durationMs, arguments: st.arguments, error: st.error }))
+    } : {}
+  };
+  await deps.store.recordUsage(row).catch(() => void 0);
 }
 async function execOwnerCommand(deps, cmd) {
   if (cmd.kind === "help") return messages.ownerHelp;
@@ -1910,6 +1941,7 @@ async function handleInbound(deps, input) {
     await deps.messenger.sendText(phone, messages.unsupported);
     return;
   }
+  let userText;
   try {
     let text;
     let heard;
@@ -1922,9 +1954,12 @@ async function handleInbound(deps, input) {
       text = t.text;
       heard = t.text;
     } else text = input.text.slice(0, 2e3);
-    const out = await runAgent(deps, phone, text, messageId, input.kind === "audio" ? "audio" : "text", input.name);
+    const source = input.kind === "audio" ? "audio" : "text";
+    userText = text;
+    const out = await runAgent(deps, phone, text, messageId, source, input.name);
     if (out.trace.errorCode) {
       deps.log?.({ event: "whatsapp_agent_error", code: out.trace.errorCode });
+      await recordTurn(deps, { phone, messageId, source, userText: text, replyText: messages.technicalProblem, trace: out.trace });
       await deps.messenger.sendText(phone, messages.technicalProblem);
       return;
     }
@@ -1932,9 +1967,11 @@ async function handleInbound(deps, input) {
     const heardLine = heard && !understood ? `\u{1F3A4} "${heard.length > 200 ? `${heard.slice(0, 200)}\u2026` : heard}"
 
 ` : "";
+    await recordTurn(deps, { phone, messageId, source, userText: text, replyText: out.trace.message, trace: out.trace });
     await deps.messenger.sendText(phone, `${heardLine}${out.trace.message}`);
   } catch (e) {
     deps.log?.({ event: "whatsapp_error", message: e instanceof Error ? e.message : "unknown" });
+    await recordTurn(deps, { phone, messageId, source: input.kind === "audio" ? "audio" : "text", userText, replyText: messages.technicalProblem, errorCode: e instanceof Error ? e.message.slice(0, 80) : "UNKNOWN" });
     try {
       await deps.messenger.sendText(phone, messages.technicalProblem);
     } catch {
@@ -1999,5 +2036,6 @@ export {
   handler as default,
   execOwnerCommand,
   handleInbound,
+  isProblemTurn,
   requestIdFor
 };

@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { Contact } from '../../shared/whatsapp/access.js';
 import { parseOwnerCommand, normalizePhone } from '../../shared/whatsapp/access.js';
-import { SupabaseStore, type UsageRecord } from '../whatsapp/store.js';
+import { SupabaseStore, type UsageRecord, type TurnDetail } from '../whatsapp/store.js';
 import { SupabaseLedger } from '../whatsapp/ledger.js';
 import { ZApiClient } from '../whatsapp/zapi.js';
 import { execOwnerCommand, type Deps } from '../whatsapp/handler.js';
@@ -11,6 +11,8 @@ import { execOwnerCommand, type Deps } from '../whatsapp/handler.js';
 export type AdminSource = {
   contacts(): Promise<Contact[]>;
   usageSince(iso: string): Promise<UsageRecord[]>;
+  problemTurns(iso: string): Promise<TurnDetail[]>;
+  turn(messageId: string): Promise<TurnDetail | null>;
 };
 export type AdminDeps = {
   source: AdminSource;
@@ -52,14 +54,17 @@ function formOf(req: Req): Record<string, string> {
 
 export type Summary = ReturnType<typeof summarize>;
 
-/** Agrega o consumo: totais por período, por pessoa e erros recentes. Puro, para ser testado sem banco. */
+const isErr = (u: UsageRecord) => u.status === 'error' || Boolean(u.error_code);
+const BRT = -3 * 3_600_000;
+const dayKey = (ms: number) => new Date(ms + BRT).toISOString().slice(0, 10);
+
+/** Agrega o consumo: totais por período, por pessoa e mensagens por dia. Puro, para ser testado sem banco. */
 export function summarize(contacts: Contact[], usage: UsageRecord[], nowMs: number, price?: AdminDeps['price']) {
   const cost = (i: number, o: number) => (price ? (i * price.inputPerMTok + o * price.outputPerMTok) / 1_000_000 : undefined);
   const since = (ms: number) => usage.filter(u => nowMs - Date.parse(u.created_at) <= ms);
   const d1 = since(DAY), d7 = since(7 * DAY);
   const tokens = (rows: UsageRecord[]) => rows.reduce((a, u) => ({ i: a.i + u.input_tokens, o: a.o + u.output_tokens }), { i: 0, o: 0 });
   const t30 = tokens(usage);
-  const isErr = (u: UsageRecord) => u.status === 'error' || Boolean(u.error_code);
   const people = contacts.map(c => {
     const mine = usage.filter(u => u.phone === c.phone);
     const t = tokens(mine);
@@ -68,21 +73,46 @@ export function summarize(contacts: Contact[], usage: UsageRecord[], nowMs: numb
   });
   const order = { pending: 0, authorized: 1, blocked: 2 } as Record<string, number>;
   people.sort((a, b) => (order[a.contact.status] ?? 3) - (order[b.contact.status] ?? 3) || (b.lastAt ?? '').localeCompare(a.lastAt ?? ''));
+  const perDay = Array.from({ length: 14 }, (_, i) => {
+    const key = dayKey(nowMs - (13 - i) * DAY);
+    return { day: key, count: usage.filter(u => dayKey(Date.parse(u.created_at)) === key).length };
+  });
   return {
     counts: { authorized: contacts.filter(c => c.status === 'authorized').length, pending: contacts.filter(c => c.status === 'pending').length, blocked: contacts.filter(c => c.status === 'blocked').length },
     messages: { d1: d1.length, d7: d7.length, d30: usage.length },
     tokens30d: t30.i + t30.o,
+    avgTokens: usage.length ? Math.round((t30.i + t30.o) / usage.length) : 0,
     cost30d: cost(t30.i, t30.o),
     errors7d: d7.filter(isErr).length,
+    perDay,
     people,
-    recentErrors: usage.filter(isErr).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 20),
   };
 }
 
 const fmtDate = (iso?: string) => (iso ? new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'short' }) : '—');
+const fmtFull = (iso?: string) => (iso ? new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'full', timeStyle: 'medium' }) : '—');
 const fmtInt = (n: number) => n.toLocaleString('pt-BR');
 const fmtUsd = (n?: number) => (n === undefined ? '—' : `US$ ${n.toFixed(n < 1 ? 3 : 2)}`);
+export const fmtPhone = (p: string) => (/^55\d{2}9\d{8}$/.test(p) ? `+55 (${p.slice(2, 4)}) ${p.slice(4, 9)}-${p.slice(9)}` : `+${p}`);
 const STATUS: Record<string, string> = { authorized: 'Autorizado', pending: 'Pendente', blocked: 'Bloqueado' };
+
+/** Em português claro: o que cada código de erro significa. */
+export const ERROR_HELP: Record<string, string> = {
+  TOKEN_LIMIT: 'A conversa desta mensagem passou do limite de tokens por mensagem (o agente chamou o modelo várias vezes). O usuário recebeu "problema técnico".',
+  TOOL_LIMIT: 'O agente tentou usar ferramentas demais numa só mensagem.',
+  OPENAI_TIMEOUT: 'A OpenAI demorou demais para responder.',
+  OPENAI_NETWORK_FAILED: 'Falha de rede ao falar com a OpenAI.',
+  OPENAI_QUOTA_EXCEEDED: 'Sem saldo ou cota na OpenAI.',
+  OPENAI_AUTH_FAILED: 'A chave da OpenAI não foi aceita.',
+  SESSION_CONFLICT: 'Duas mensagens do mesmo número chegaram ao mesmo tempo e a sessão não pôde ser salva.',
+  INVALID_MODEL_JSON: 'A OpenAI devolveu uma resposta que o sistema não conseguiu ler.',
+};
+const KIND: Record<string, [string, string]> = { error: ['Erro', 'bad'], clarification: ['Não entendeu', 'warn'], blocked: ['Recusado', 'warn'] };
+export function turnKind(t: { status: string; error_code: string | null; steps?: unknown }): [string, string] {
+  if (t.status === 'error' || t.error_code) return KIND.error;
+  if (Array.isArray(t.steps) && t.steps.some((x: any) => x?.status === 'blocked')) return KIND.blocked;
+  return KIND[t.status] ?? ['Atenção', 'warn'];
+}
 
 const page = (title: string, body: string) =>
   `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${esc(title)}</title><link rel="stylesheet" href="/admin.css"></head><body>${body}</body></html>`;
@@ -90,17 +120,47 @@ const page = (title: string, body: string) =>
 export const loginPage = (error?: string) =>
   page('Pulse — gestão', `<main class="login"><h1>Pulse · gestão</h1><form method="post" action="/admin"><input type="hidden" name="action" value="login"><label>Senha<input type="password" name="password" autocomplete="current-password" autofocus required></label>${error ? `<p class="err">${esc(error)}</p>` : ''}<button type="submit">Entrar</button></form></main>`);
 
-export function dashboardPage(s: Summary, flash?: string) {
-  const card = (label: string, value: string, hint = '') => `<div class="card"><span>${esc(label)}</span><strong>${esc(value)}</strong>${hint ? `<small>${esc(hint)}</small>` : ''}</div>`;
-  const costNote = s.cost30d === undefined ? 'defina OPENAI_PRICE_IN_PER_MTOK e OPENAI_PRICE_OUT_PER_MTOK' : 'estimado';
+const shell = (view: string, problems: number, inner: string, flash?: string) =>
+  page('Pulse — gestão', `<div class="wrap"><header><div class="brand">Pulse <span>gestão</span></div><nav><a href="/admin"${view === 'home' ? ' class="on"' : ''}>Visão geral</a><a href="/admin?v=problemas"${view === 'problemas' ? ' class="on"' : ''}>Problemas${problems ? ` <b>${problems}</b>` : ''}</a></nav><form method="post" action="/admin"><input type="hidden" name="action" value="logout"><button type="submit" class="small ghost">Sair</button></form></header>${flash ? `<p class="flash">${esc(flash)}</p>` : ''}${inner}</div>`);
+
+const who = (contacts: Contact[], phone: string) => contacts.find(c => c.phone === phone)?.name || fmtPhone(phone);
+const clip = (t: string | null | undefined, n: number) => (t ? (t.length > n ? `${t.slice(0, n)}…` : t) : '—');
+
+function turnCard(t: TurnDetail, contacts: Contact[]) {
+  const [label, tone] = turnKind(t);
+  return `<a class="turn" href="/admin?v=turno&amp;id=${encodeURIComponent(t.message_id)}"><div class="turn-top"><span class="tag ${tone}">${esc(label)}${t.error_code ? ` · ${esc(t.error_code)}` : ''}</span><span class="when">${fmtDate(t.created_at)}</span></div><div class="who">${esc(who(contacts, t.phone))}</div><div class="bubble in"><small>Usuário</small>${esc(clip(t.user_text, 220))}</div><div class="bubble out"><small>Pulse</small>${esc(clip(t.reply_text, 220))}</div></a>`;
+}
+
+export function homePage(s: Summary, problems: TurnDetail[], contacts: Contact[], flash?: string) {
+  const card = (label: string, value: string, hint = '', tone = '') => `<div class="card ${tone}"><span>${esc(label)}</span><strong>${esc(value)}</strong>${hint ? `<small>${esc(hint)}</small>` : ''}</div>`;
+  const max = Math.max(1, ...s.perDay.map(d => d.count));
+  const bars = s.perDay.map(d => `<div class="bar" title="${esc(d.day)}: ${d.count}"><i class="h${Math.round(((d.count / max) * 100) / 5) * 5}"></i><em>${esc(d.day.slice(8))}</em></div>`).join('');
   const action = (phone: string, act: string, label: string) => `<form method="post" action="/admin"><input type="hidden" name="action" value="${act}"><input type="hidden" name="phone" value="${esc(phone)}"><button type="submit" class="small">${label}</button></form>`;
-  const rows = s.people.map(p => `<tr><td>${esc(p.contact.name || '—')}</td><td class="mono">${esc(p.contact.phone)}</td><td><span class="tag ${esc(p.contact.status)}">${esc(STATUS[p.contact.status] ?? p.contact.status)}</span></td><td>${fmtDate(p.lastAt)}</td><td class="num">${fmtInt(p.messages30d)}</td><td class="num">${fmtInt(p.inputTokens + p.outputTokens)}</td><td class="num">${fmtUsd(p.cost)}</td><td class="num">${p.errors || '—'}</td><td class="actions">${p.contact.status !== 'authorized' ? action(p.contact.phone, 'authorize', 'Autorizar') : ''}${p.contact.status !== 'blocked' ? action(p.contact.phone, 'block', 'Bloquear') : ''}</td></tr>`).join('');
-  const errs = s.recentErrors.map(e => `<tr><td>${fmtDate(e.created_at)}</td><td class="mono">${esc(e.phone)}</td><td>${esc(e.error_code || e.status)}</td><td>${esc(e.model || '—')}</td></tr>`).join('');
-  return page('Pulse — gestão', `<main><header><h1>Pulse · gestão</h1><form method="post" action="/admin"><input type="hidden" name="action" value="logout"><button type="submit" class="small ghost">Sair</button></form></header>${flash ? `<p class="flash">${esc(flash)}</p>` : ''}
-<section class="cards">${card('Autorizados', fmtInt(s.counts.authorized))}${card('Pendentes', fmtInt(s.counts.pending))}${card('Bloqueados', fmtInt(s.counts.blocked))}${card('Mensagens 24h', fmtInt(s.messages.d1), `${fmtInt(s.messages.d7)} em 7 dias`)}${card('Tokens 30 dias', fmtInt(s.tokens30d))}${card('Custo IA 30 dias', fmtUsd(s.cost30d), costNote)}${card('Erros 7 dias', fmtInt(s.errors7d))}</section>
-<h2>Usuários</h2><div class="scroll"><table><thead><tr><th>Nome</th><th>Telefone</th><th>Status</th><th>Última mensagem</th><th class="num">Msgs 30d</th><th class="num">Tokens 30d</th><th class="num">Custo 30d</th><th class="num">Erros</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="9">Ninguém ainda.</td></tr>'}</tbody></table></div>
-<h2>Erros recentes</h2><div class="scroll"><table><thead><tr><th>Quando</th><th>Telefone</th><th>Erro</th><th>Modelo</th></tr></thead><tbody>${errs || '<tr><td colspan="4">Nenhum erro registrado.</td></tr>'}</tbody></table></div>
-<p class="foot">Consumo registrado a partir de 22/10/2026. Mostra só números e códigos de erro, nunca o texto das conversas nem valores financeiros.</p></main>`);
+  const rows = s.people.map(p => `<tr><td data-l="Nome" class="name">${esc(p.contact.name || '—')}</td><td data-l="Telefone" class="mono">${esc(fmtPhone(p.contact.phone))}</td><td data-l="Status"><span class="tag ${esc(p.contact.status)}">${esc(STATUS[p.contact.status] ?? p.contact.status)}</span></td><td data-l="Última mensagem">${fmtDate(p.lastAt)}</td><td data-l="Mensagens (30d)" class="num">${fmtInt(p.messages30d)}</td><td data-l="Tokens (30d)" class="num">${fmtInt(p.inputTokens + p.outputTokens)}</td><td data-l="Custo (30d)" class="num">${fmtUsd(p.cost)}</td><td data-l="Erros" class="num">${p.errors || '—'}</td><td class="actions">${p.contact.status !== 'authorized' ? action(p.contact.phone, 'authorize', 'Autorizar') : ''}${p.contact.status !== 'blocked' ? action(p.contact.phone, 'block', 'Bloquear') : ''}</td></tr>`).join('');
+  const recent = problems.slice(0, 4).map(t => turnCard(t, contacts)).join('');
+  return shell('home', problems.length, `<section class="cards">${card('Autorizados', fmtInt(s.counts.authorized), s.counts.pending ? `${s.counts.pending} pendente(s)` : '')}${card('Mensagens hoje', fmtInt(s.messages.d1), `${fmtInt(s.messages.d7)} em 7 dias`)}${card('Tokens (30 dias)', fmtInt(s.tokens30d), `média ${fmtInt(s.avgTokens)} por mensagem`)}${card('Custo da IA (30 dias)', fmtUsd(s.cost30d), s.cost30d === undefined ? 'preço não configurado' : 'estimado')}${card('Erros (7 dias)', fmtInt(s.errors7d), '', s.errors7d ? 'alert' : '')}</section>
+<section class="panel"><h2>Mensagens por dia</h2><div class="bars">${bars}</div></section>
+<section><div class="h2row"><h2>Precisa de atenção</h2><a href="/admin?v=problemas">ver todos${problems.length ? ` (${problems.length})` : ''}</a></div>${recent ? `<div class="turns">${recent}</div>` : '<p class="empty">Nenhum problema nos últimos 30 dias.</p>'}</section>
+<section><h2>Usuários</h2><div class="scroll"><table class="stack"><thead><tr><th>Nome</th><th>Telefone</th><th>Status</th><th>Última mensagem</th><th class="num">Mensagens</th><th class="num">Tokens</th><th class="num">Custo</th><th class="num">Erros</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="9">Ninguém ainda.</td></tr>'}</tbody></table></div></section>
+<p class="foot">Consumo registrado desde 22/10/2026. O texto da conversa só fica guardado nos turnos com problema (erro, não entendeu, recusado), para você depurar.</p>`, flash);
+}
+
+export function problemsPage(problems: TurnDetail[], contacts: Contact[]) {
+  const cards = problems.map(t => turnCard(t, contacts)).join('');
+  return shell('problemas', problems.length, `<h2>Problemas dos últimos 30 dias</h2><p class="lead">Mensagens em que o Pulse deu erro, não entendeu ou recusou uma ação. Clique para ver tudo.</p>${cards ? `<div class="turns">${cards}</div>` : '<p class="empty">Nenhum problema registrado.</p>'}`);
+}
+
+export function turnPage(t: TurnDetail | null, contacts: Contact[], problems: number) {
+  if (!t) return shell('problemas', problems, '<p class="empty">Não encontrei essa mensagem.</p><p><a href="/admin?v=problemas">Voltar</a></p>');
+  const [label, tone] = turnKind(t);
+  const help = t.error_code ? ERROR_HELP[t.error_code] : undefined;
+  const steps = Array.isArray(t.steps) ? (t.steps as any[]) : [];
+  const stepRows = steps.map((x, i) => `<li class="step ${esc(x.status)}"><b>${i + 1}. ${esc(x.name)}</b> <span class="tag ${x.status === 'success' ? 'authorized' : 'bad'}">${esc(x.status)}</span><small>${esc(x.durationMs ?? 0)} ms</small>${x.arguments ? `<pre>${esc(JSON.stringify(x.arguments, null, 2))}</pre>` : ''}${x.error ? `<pre class="errtxt">${esc(JSON.stringify(x.error, null, 2))}</pre>` : ''}</li>`).join('');
+  const kv = (k: string, v: string) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`;
+  return shell('problemas', problems, `<p><a href="/admin?v=problemas">← Problemas</a></p><h2>${esc(who(contacts, t.phone))} <span class="tag ${tone}">${esc(label)}${t.error_code ? ` · ${esc(t.error_code)}` : ''}</span></h2><p class="lead">${esc(fmtFull(t.created_at))} · ${esc(fmtPhone(t.phone))} · ${t.source === 'audio' ? 'áudio' : 'texto'}</p>${help ? `<p class="explain"><b>O que significa:</b> ${esc(help)}</p>` : ''}
+<div class="convo"><div class="bubble in"><small>O usuário mandou</small>${esc(t.user_text ?? '(não registrado)')}</div><div class="bubble out"><small>O Pulse respondeu</small>${esc(t.reply_text ?? '(não registrado)')}</div></div>
+<h3>Detalhes</h3><dl class="kv">${kv('Intenção entendida', t.intent || '—')}${kv('Confirmação', t.confirmation || '—')}${kv('Modelo', t.model || '—')}${kv('Chamadas ao modelo', String(t.model_calls ?? 0))}${kv('Tokens', `${fmtInt(t.input_tokens)} entrada · ${fmtInt(t.output_tokens)} saída`)}${kv('Tempo total', t.duration_ms != null ? `${(t.duration_ms / 1000).toFixed(1)} s` : '—')}${kv('ID da mensagem', t.message_id)}</dl>
+<h3>O que o agente tentou fazer</h3>${stepRows ? `<ol class="steps">${stepRows}</ol>` : '<p class="empty">Nenhuma ferramenta foi chamada.</p>'}`);
 }
 
 export function createAdmin(config: { password: string }, deps: AdminDeps) {
@@ -149,8 +209,22 @@ export function createAdmin(config: { password: string }, deps: AdminDeps) {
     }
     try {
       const now = deps.now?.() ?? Date.now();
-      const [contacts, usage] = await Promise.all([deps.source.contacts(), deps.source.usageSince(new Date(now - 30 * DAY).toISOString())]);
-      return html(res, 200, dashboardPage(summarize(contacts, usage, now, deps.price), flash));
+      const since = new Date(now - 30 * DAY).toISOString();
+      let q = new URLSearchParams();
+      try {
+        q = new URL(req.url ?? '', 'https://x.invalid').searchParams;
+      } catch {
+        /* url inválida: visão geral */
+      }
+      const view = q.get('v');
+      const contacts = await deps.source.contacts();
+      if (view === 'turno') {
+        const [turn, problems] = await Promise.all([deps.source.turn(q.get('id') ?? ''), deps.source.problemTurns(since)]);
+        return html(res, 200, turnPage(turn, contacts, problems.length));
+      }
+      const [usage, problems] = await Promise.all([deps.source.usageSince(since), deps.source.problemTurns(since)]);
+      if (view === 'problemas') return html(res, 200, problemsPage(problems, contacts));
+      return html(res, 200, homePage(summarize(contacts, usage, now, deps.price), problems, contacts, flash));
     } catch {
       return html(res, 502, page('Pulse — gestão', '<main><h1>Pulse · gestão</h1><p class="err">Não consegui ler o banco agora. Atualize a página em instantes.</p></main>'));
     }
@@ -181,7 +255,7 @@ export default async function entry(req: Req, res: Res) {
     log,
   };
   return createAdmin({ password }, {
-    source: { contacts: () => store.listContacts(), usageSince: since => store.usageSince(since) },
+    source: { contacts: () => store.listContacts(), usageSince: since => store.usageSince(since), problemTurns: since => store.problemTurns(since), turn: id => store.turn(id) },
     run: async command => {
       const cmd = parseOwnerCommand(command);
       return cmd ? execOwnerCommand(ownerDeps, cmd) : 'Comando inválido.';

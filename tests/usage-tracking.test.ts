@@ -27,3 +27,18 @@ describe('registro de consumo de IA',()=>{
   expect((deps.messenger as Fake).sent.length).toBeGreaterThan(0);
  });
 });
+
+describe('texto só em turnos com problema',()=>{
+ const rowsOf=(store:MemoryStore)=>store.usage;
+ it('turno normal não guarda o texto',async()=>{
+  const {store,deps}=setup(model({content:'Oi!',usage:{inputTokens:10,outputTokens:5,totalTokens:15}}));
+  await handleInbound(deps,text('M3','bom dia'));
+  expect(rowsOf(store)[0].userText).toBeUndefined();
+ });
+ it('erro do agente guarda o que o usuário mandou e o que o Pulse respondeu',async()=>{
+  const {store,deps}=setup({mode:'real',next:vi.fn().mockRejectedValue(new Error('OPENAI_TIMEOUT'))});
+  await handleInbound(deps,text('M4','gastei 50 no mercado'));
+  const r=rowsOf(store)[0];
+  expect(r.status).toBe('error');expect(r.userText).toBe('gastei 50 no mercado');expect(r.replyText).toBeTruthy();
+ });
+});

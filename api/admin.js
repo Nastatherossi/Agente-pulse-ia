@@ -159,7 +159,14 @@ var SupabaseStore = class {
     return rows.length;
   }
   async recordUsage(r) {
-    await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
+    await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null, user_text: r.userText ?? null, reply_text: r.replyText ?? null, intent: r.intent ?? null, duration_ms: r.durationMs ?? null, confirmation: r.confirmation ?? null, steps: r.steps ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
+  }
+  async problemTurns(iso, limit = 100) {
+    return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
+  }
+  async turn(messageId) {
+    const rows = await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}&select=*&limit=1`);
+    return rows[0] ?? null;
   }
   async usageSince(iso) {
     return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
@@ -648,13 +655,15 @@ function formOf(req) {
   if (b && typeof b === "object") return Object.fromEntries(Object.entries(b).map(([k, v]) => [k, String(v)]));
   return {};
 }
+var isErr = (u) => u.status === "error" || Boolean(u.error_code);
+var BRT = -3 * 36e5;
+var dayKey = (ms) => new Date(ms + BRT).toISOString().slice(0, 10);
 function summarize(contacts, usage, nowMs, price) {
   const cost = (i, o) => price ? (i * price.inputPerMTok + o * price.outputPerMTok) / 1e6 : void 0;
   const since = (ms) => usage.filter((u) => nowMs - Date.parse(u.created_at) <= ms);
   const d1 = since(DAY2), d7 = since(7 * DAY2);
   const tokens = (rows) => rows.reduce((a, u) => ({ i: a.i + u.input_tokens, o: a.o + u.output_tokens }), { i: 0, o: 0 });
   const t30 = tokens(usage);
-  const isErr = (u) => u.status === "error" || Boolean(u.error_code);
   const people = contacts.map((c) => {
     const mine = usage.filter((u) => u.phone === c.phone);
     const t = tokens(mine);
@@ -663,33 +672,80 @@ function summarize(contacts, usage, nowMs, price) {
   });
   const order = { pending: 0, authorized: 1, blocked: 2 };
   people.sort((a, b) => (order[a.contact.status] ?? 3) - (order[b.contact.status] ?? 3) || (b.lastAt ?? "").localeCompare(a.lastAt ?? ""));
+  const perDay = Array.from({ length: 14 }, (_, i) => {
+    const key = dayKey(nowMs - (13 - i) * DAY2);
+    return { day: key, count: usage.filter((u) => dayKey(Date.parse(u.created_at)) === key).length };
+  });
   return {
     counts: { authorized: contacts.filter((c) => c.status === "authorized").length, pending: contacts.filter((c) => c.status === "pending").length, blocked: contacts.filter((c) => c.status === "blocked").length },
     messages: { d1: d1.length, d7: d7.length, d30: usage.length },
     tokens30d: t30.i + t30.o,
+    avgTokens: usage.length ? Math.round((t30.i + t30.o) / usage.length) : 0,
     cost30d: cost(t30.i, t30.o),
     errors7d: d7.filter(isErr).length,
-    people,
-    recentErrors: usage.filter(isErr).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 20)
+    perDay,
+    people
   };
 }
 var fmtDate = (iso) => iso ? new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", dateStyle: "short", timeStyle: "short" }) : "\u2014";
+var fmtFull = (iso) => iso ? new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", dateStyle: "full", timeStyle: "medium" }) : "\u2014";
 var fmtInt = (n) => n.toLocaleString("pt-BR");
 var fmtUsd = (n) => n === void 0 ? "\u2014" : `US$ ${n.toFixed(n < 1 ? 3 : 2)}`;
+var fmtPhone = (p) => /^55\d{2}9\d{8}$/.test(p) ? `+55 (${p.slice(2, 4)}) ${p.slice(4, 9)}-${p.slice(9)}` : `+${p}`;
 var STATUS = { authorized: "Autorizado", pending: "Pendente", blocked: "Bloqueado" };
+var ERROR_HELP = {
+  TOKEN_LIMIT: 'A conversa desta mensagem passou do limite de tokens por mensagem (o agente chamou o modelo v\xE1rias vezes). O usu\xE1rio recebeu "problema t\xE9cnico".',
+  TOOL_LIMIT: "O agente tentou usar ferramentas demais numa s\xF3 mensagem.",
+  OPENAI_TIMEOUT: "A OpenAI demorou demais para responder.",
+  OPENAI_NETWORK_FAILED: "Falha de rede ao falar com a OpenAI.",
+  OPENAI_QUOTA_EXCEEDED: "Sem saldo ou cota na OpenAI.",
+  OPENAI_AUTH_FAILED: "A chave da OpenAI n\xE3o foi aceita.",
+  SESSION_CONFLICT: "Duas mensagens do mesmo n\xFAmero chegaram ao mesmo tempo e a sess\xE3o n\xE3o p\xF4de ser salva.",
+  INVALID_MODEL_JSON: "A OpenAI devolveu uma resposta que o sistema n\xE3o conseguiu ler."
+};
+var KIND = { error: ["Erro", "bad"], clarification: ["N\xE3o entendeu", "warn"], blocked: ["Recusado", "warn"] };
+function turnKind(t) {
+  if (t.status === "error" || t.error_code) return KIND.error;
+  if (Array.isArray(t.steps) && t.steps.some((x) => x?.status === "blocked")) return KIND.blocked;
+  return KIND[t.status] ?? ["Aten\xE7\xE3o", "warn"];
+}
 var page = (title, body) => `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${esc(title)}</title><link rel="stylesheet" href="/admin.css"></head><body>${body}</body></html>`;
 var loginPage = (error) => page("Pulse \u2014 gest\xE3o", `<main class="login"><h1>Pulse \xB7 gest\xE3o</h1><form method="post" action="/admin"><input type="hidden" name="action" value="login"><label>Senha<input type="password" name="password" autocomplete="current-password" autofocus required></label>${error ? `<p class="err">${esc(error)}</p>` : ""}<button type="submit">Entrar</button></form></main>`);
-function dashboardPage(s, flash) {
-  const card = (label, value, hint = "") => `<div class="card"><span>${esc(label)}</span><strong>${esc(value)}</strong>${hint ? `<small>${esc(hint)}</small>` : ""}</div>`;
-  const costNote = s.cost30d === void 0 ? "defina OPENAI_PRICE_IN_PER_MTOK e OPENAI_PRICE_OUT_PER_MTOK" : "estimado";
+var shell = (view, problems, inner, flash) => page("Pulse \u2014 gest\xE3o", `<div class="wrap"><header><div class="brand">Pulse <span>gest\xE3o</span></div><nav><a href="/admin"${view === "home" ? ' class="on"' : ""}>Vis\xE3o geral</a><a href="/admin?v=problemas"${view === "problemas" ? ' class="on"' : ""}>Problemas${problems ? ` <b>${problems}</b>` : ""}</a></nav><form method="post" action="/admin"><input type="hidden" name="action" value="logout"><button type="submit" class="small ghost">Sair</button></form></header>${flash ? `<p class="flash">${esc(flash)}</p>` : ""}${inner}</div>`);
+var who = (contacts, phone) => contacts.find((c) => c.phone === phone)?.name || fmtPhone(phone);
+var clip = (t, n) => t ? t.length > n ? `${t.slice(0, n)}\u2026` : t : "\u2014";
+function turnCard(t, contacts) {
+  const [label, tone] = turnKind(t);
+  return `<a class="turn" href="/admin?v=turno&amp;id=${encodeURIComponent(t.message_id)}"><div class="turn-top"><span class="tag ${tone}">${esc(label)}${t.error_code ? ` \xB7 ${esc(t.error_code)}` : ""}</span><span class="when">${fmtDate(t.created_at)}</span></div><div class="who">${esc(who(contacts, t.phone))}</div><div class="bubble in"><small>Usu\xE1rio</small>${esc(clip(t.user_text, 220))}</div><div class="bubble out"><small>Pulse</small>${esc(clip(t.reply_text, 220))}</div></a>`;
+}
+function homePage(s, problems, contacts, flash) {
+  const card = (label, value, hint = "", tone = "") => `<div class="card ${tone}"><span>${esc(label)}</span><strong>${esc(value)}</strong>${hint ? `<small>${esc(hint)}</small>` : ""}</div>`;
+  const max = Math.max(1, ...s.perDay.map((d) => d.count));
+  const bars = s.perDay.map((d) => `<div class="bar" title="${esc(d.day)}: ${d.count}"><i class="h${Math.round(d.count / max * 100 / 5) * 5}"></i><em>${esc(d.day.slice(8))}</em></div>`).join("");
   const action = (phone, act, label) => `<form method="post" action="/admin"><input type="hidden" name="action" value="${act}"><input type="hidden" name="phone" value="${esc(phone)}"><button type="submit" class="small">${label}</button></form>`;
-  const rows = s.people.map((p) => `<tr><td>${esc(p.contact.name || "\u2014")}</td><td class="mono">${esc(p.contact.phone)}</td><td><span class="tag ${esc(p.contact.status)}">${esc(STATUS[p.contact.status] ?? p.contact.status)}</span></td><td>${fmtDate(p.lastAt)}</td><td class="num">${fmtInt(p.messages30d)}</td><td class="num">${fmtInt(p.inputTokens + p.outputTokens)}</td><td class="num">${fmtUsd(p.cost)}</td><td class="num">${p.errors || "\u2014"}</td><td class="actions">${p.contact.status !== "authorized" ? action(p.contact.phone, "authorize", "Autorizar") : ""}${p.contact.status !== "blocked" ? action(p.contact.phone, "block", "Bloquear") : ""}</td></tr>`).join("");
-  const errs = s.recentErrors.map((e) => `<tr><td>${fmtDate(e.created_at)}</td><td class="mono">${esc(e.phone)}</td><td>${esc(e.error_code || e.status)}</td><td>${esc(e.model || "\u2014")}</td></tr>`).join("");
-  return page("Pulse \u2014 gest\xE3o", `<main><header><h1>Pulse \xB7 gest\xE3o</h1><form method="post" action="/admin"><input type="hidden" name="action" value="logout"><button type="submit" class="small ghost">Sair</button></form></header>${flash ? `<p class="flash">${esc(flash)}</p>` : ""}
-<section class="cards">${card("Autorizados", fmtInt(s.counts.authorized))}${card("Pendentes", fmtInt(s.counts.pending))}${card("Bloqueados", fmtInt(s.counts.blocked))}${card("Mensagens 24h", fmtInt(s.messages.d1), `${fmtInt(s.messages.d7)} em 7 dias`)}${card("Tokens 30 dias", fmtInt(s.tokens30d))}${card("Custo IA 30 dias", fmtUsd(s.cost30d), costNote)}${card("Erros 7 dias", fmtInt(s.errors7d))}</section>
-<h2>Usu\xE1rios</h2><div class="scroll"><table><thead><tr><th>Nome</th><th>Telefone</th><th>Status</th><th>\xDAltima mensagem</th><th class="num">Msgs 30d</th><th class="num">Tokens 30d</th><th class="num">Custo 30d</th><th class="num">Erros</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="9">Ningu\xE9m ainda.</td></tr>'}</tbody></table></div>
-<h2>Erros recentes</h2><div class="scroll"><table><thead><tr><th>Quando</th><th>Telefone</th><th>Erro</th><th>Modelo</th></tr></thead><tbody>${errs || '<tr><td colspan="4">Nenhum erro registrado.</td></tr>'}</tbody></table></div>
-<p class="foot">Consumo registrado a partir de 22/10/2026. Mostra s\xF3 n\xFAmeros e c\xF3digos de erro, nunca o texto das conversas nem valores financeiros.</p></main>`);
+  const rows = s.people.map((p) => `<tr><td data-l="Nome" class="name">${esc(p.contact.name || "\u2014")}</td><td data-l="Telefone" class="mono">${esc(fmtPhone(p.contact.phone))}</td><td data-l="Status"><span class="tag ${esc(p.contact.status)}">${esc(STATUS[p.contact.status] ?? p.contact.status)}</span></td><td data-l="\xDAltima mensagem">${fmtDate(p.lastAt)}</td><td data-l="Mensagens (30d)" class="num">${fmtInt(p.messages30d)}</td><td data-l="Tokens (30d)" class="num">${fmtInt(p.inputTokens + p.outputTokens)}</td><td data-l="Custo (30d)" class="num">${fmtUsd(p.cost)}</td><td data-l="Erros" class="num">${p.errors || "\u2014"}</td><td class="actions">${p.contact.status !== "authorized" ? action(p.contact.phone, "authorize", "Autorizar") : ""}${p.contact.status !== "blocked" ? action(p.contact.phone, "block", "Bloquear") : ""}</td></tr>`).join("");
+  const recent = problems.slice(0, 4).map((t) => turnCard(t, contacts)).join("");
+  return shell("home", problems.length, `<section class="cards">${card("Autorizados", fmtInt(s.counts.authorized), s.counts.pending ? `${s.counts.pending} pendente(s)` : "")}${card("Mensagens hoje", fmtInt(s.messages.d1), `${fmtInt(s.messages.d7)} em 7 dias`)}${card("Tokens (30 dias)", fmtInt(s.tokens30d), `m\xE9dia ${fmtInt(s.avgTokens)} por mensagem`)}${card("Custo da IA (30 dias)", fmtUsd(s.cost30d), s.cost30d === void 0 ? "pre\xE7o n\xE3o configurado" : "estimado")}${card("Erros (7 dias)", fmtInt(s.errors7d), "", s.errors7d ? "alert" : "")}</section>
+<section class="panel"><h2>Mensagens por dia</h2><div class="bars">${bars}</div></section>
+<section><div class="h2row"><h2>Precisa de aten\xE7\xE3o</h2><a href="/admin?v=problemas">ver todos${problems.length ? ` (${problems.length})` : ""}</a></div>${recent ? `<div class="turns">${recent}</div>` : '<p class="empty">Nenhum problema nos \xFAltimos 30 dias.</p>'}</section>
+<section><h2>Usu\xE1rios</h2><div class="scroll"><table class="stack"><thead><tr><th>Nome</th><th>Telefone</th><th>Status</th><th>\xDAltima mensagem</th><th class="num">Mensagens</th><th class="num">Tokens</th><th class="num">Custo</th><th class="num">Erros</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="9">Ningu\xE9m ainda.</td></tr>'}</tbody></table></div></section>
+<p class="foot">Consumo registrado desde 22/10/2026. O texto da conversa s\xF3 fica guardado nos turnos com problema (erro, n\xE3o entendeu, recusado), para voc\xEA depurar.</p>`, flash);
+}
+function problemsPage(problems, contacts) {
+  const cards = problems.map((t) => turnCard(t, contacts)).join("");
+  return shell("problemas", problems.length, `<h2>Problemas dos \xFAltimos 30 dias</h2><p class="lead">Mensagens em que o Pulse deu erro, n\xE3o entendeu ou recusou uma a\xE7\xE3o. Clique para ver tudo.</p>${cards ? `<div class="turns">${cards}</div>` : '<p class="empty">Nenhum problema registrado.</p>'}`);
+}
+function turnPage(t, contacts, problems) {
+  if (!t) return shell("problemas", problems, '<p class="empty">N\xE3o encontrei essa mensagem.</p><p><a href="/admin?v=problemas">Voltar</a></p>');
+  const [label, tone] = turnKind(t);
+  const help = t.error_code ? ERROR_HELP[t.error_code] : void 0;
+  const steps = Array.isArray(t.steps) ? t.steps : [];
+  const stepRows = steps.map((x, i) => `<li class="step ${esc(x.status)}"><b>${i + 1}. ${esc(x.name)}</b> <span class="tag ${x.status === "success" ? "authorized" : "bad"}">${esc(x.status)}</span><small>${esc(x.durationMs ?? 0)} ms</small>${x.arguments ? `<pre>${esc(JSON.stringify(x.arguments, null, 2))}</pre>` : ""}${x.error ? `<pre class="errtxt">${esc(JSON.stringify(x.error, null, 2))}</pre>` : ""}</li>`).join("");
+  const kv = (k, v) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`;
+  return shell("problemas", problems, `<p><a href="/admin?v=problemas">\u2190 Problemas</a></p><h2>${esc(who(contacts, t.phone))} <span class="tag ${tone}">${esc(label)}${t.error_code ? ` \xB7 ${esc(t.error_code)}` : ""}</span></h2><p class="lead">${esc(fmtFull(t.created_at))} \xB7 ${esc(fmtPhone(t.phone))} \xB7 ${t.source === "audio" ? "\xE1udio" : "texto"}</p>${help ? `<p class="explain"><b>O que significa:</b> ${esc(help)}</p>` : ""}
+<div class="convo"><div class="bubble in"><small>O usu\xE1rio mandou</small>${esc(t.user_text ?? "(n\xE3o registrado)")}</div><div class="bubble out"><small>O Pulse respondeu</small>${esc(t.reply_text ?? "(n\xE3o registrado)")}</div></div>
+<h3>Detalhes</h3><dl class="kv">${kv("Inten\xE7\xE3o entendida", t.intent || "\u2014")}${kv("Confirma\xE7\xE3o", t.confirmation || "\u2014")}${kv("Modelo", t.model || "\u2014")}${kv("Chamadas ao modelo", String(t.model_calls ?? 0))}${kv("Tokens", `${fmtInt(t.input_tokens)} entrada \xB7 ${fmtInt(t.output_tokens)} sa\xEDda`)}${kv("Tempo total", t.duration_ms != null ? `${(t.duration_ms / 1e3).toFixed(1)} s` : "\u2014")}${kv("ID da mensagem", t.message_id)}</dl>
+<h3>O que o agente tentou fazer</h3>${stepRows ? `<ol class="steps">${stepRows}</ol>` : '<p class="empty">Nenhuma ferramenta foi chamada.</p>'}`);
 }
 function createAdmin(config, deps) {
   const token = config.password ? sessionToken(config.password) : "";
@@ -736,8 +792,21 @@ function createAdmin(config, deps) {
     }
     try {
       const now = deps.now?.() ?? Date.now();
-      const [contacts, usage] = await Promise.all([deps.source.contacts(), deps.source.usageSince(new Date(now - 30 * DAY2).toISOString())]);
-      return html(res, 200, dashboardPage(summarize(contacts, usage, now, deps.price), flash));
+      const since = new Date(now - 30 * DAY2).toISOString();
+      let q = new URLSearchParams();
+      try {
+        q = new URL(req.url ?? "", "https://x.invalid").searchParams;
+      } catch {
+      }
+      const view = q.get("v");
+      const contacts = await deps.source.contacts();
+      if (view === "turno") {
+        const [turn, problems2] = await Promise.all([deps.source.turn(q.get("id") ?? ""), deps.source.problemTurns(since)]);
+        return html(res, 200, turnPage(turn, contacts, problems2.length));
+      }
+      const [usage, problems] = await Promise.all([deps.source.usageSince(since), deps.source.problemTurns(since)]);
+      if (view === "problemas") return html(res, 200, problemsPage(problems, contacts));
+      return html(res, 200, homePage(summarize(contacts, usage, now, deps.price), problems, contacts, flash));
     } catch {
       return html(res, 502, page("Pulse \u2014 gest\xE3o", '<main><h1>Pulse \xB7 gest\xE3o</h1><p class="err">N\xE3o consegui ler o banco agora. Atualize a p\xE1gina em instantes.</p></main>'));
     }
@@ -769,7 +838,7 @@ async function entry(req, res) {
     log
   };
   return createAdmin({ password }, {
-    source: { contacts: () => store.listContacts(), usageSince: (since) => store.usageSince(since) },
+    source: { contacts: () => store.listContacts(), usageSince: (since) => store.usageSince(since), problemTurns: (since) => store.problemTurns(since), turn: (id) => store.turn(id) },
     run: async (command) => {
       const cmd = parseOwnerCommand(command);
       return cmd ? execOwnerCommand(ownerDeps, cmd) : "Comando inv\xE1lido.";
@@ -779,12 +848,17 @@ async function entry(req, res) {
 }
 export {
   COOKIE,
+  ERROR_HELP,
   MIN_PASSWORD,
   createAdmin,
-  dashboardPage,
   entry as default,
   esc,
+  fmtPhone,
+  homePage,
   loginPage,
+  problemsPage,
   sessionToken,
-  summarize
+  summarize,
+  turnKind,
+  turnPage
 };
