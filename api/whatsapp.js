@@ -105,25 +105,45 @@ var isConfirmation = (m) => /^(sim|s|isso|isso mesmo|pode|pode sim|pode registra
 var isCancellation = (m) => /^(nao|n|cancela|cancelar|cancelado|deixa|deixa pra la|deixa quieto|melhor nao|nao quero|esquece|nao,? deixa como estava|nao,? cancela)[.!, ]*$/.test(normalize(m.trim()));
 var isClear = (m) => /^(limpa|limpar|apaga|apagar) (nossa |a )?conversa[.!]*$/.test(normalize(m.trim()));
 var display = (v) => "type" in v ? `${v.description} \xB7 ${brl(Math.round(v.amount * 100))} \xB7 ${v.date} \xB7 ${v.category || "sem categoria"}` : `${v.description} \xB7 ${brl(Math.round(v.amount * 100))}${v.targetDate ? " \xB7 " + v.targetDate : ""}`;
-var closing = "Confirma? Responda \u201Csim\u201D ou \u201Ccancelar\u201D. Expira em 5 minutos.";
-function describeOperation(op, lead) {
-  if (op.kind === "create") {
-    const items = op.items.map((i) => `\u2022 ${i.type === "receita" ? "Receita" : "Despesa"} \xB7 ${display(i)}`).join("\n");
-    const hint = op.items.some((i) => i.type === "despesa" && !i.category) ? '\nQual categoria? Pode dizer junto com o sim (ex.: "sim, em Lazer").' : "";
-    return `${lead || "Confirma antes de registrar?"}
-${items}${hint}
-${closing}`;
+var cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+var addressed = (name, sentence) => name ? `${name}, ${sentence}` : cap(sentence);
+var dayOf = (date, today) => {
+  if (today && date === today) return "hoje";
+  if (today) {
+    const y = new Date(Date.parse(today + "T12:00:00Z") - 864e5).toISOString().slice(0, 10);
+    if (date === y) return "ontem";
   }
-  if (op.kind === "goal" && !op.before) return `Criar meta?
-Meta: ${display(op.after)}.
-${closing}`;
+  return `${date.slice(8, 10)}/${date.slice(5, 7)}`;
+};
+var when = (date, today) => {
+  const d = dayOf(date, today);
+  return d === "hoje" ? "" : `, ${d === "ontem" ? "ontem" : "dia " + d}`;
+};
+var bullet = (i, today) => `\u2022 ${i.type === "receita" ? "Receita" : "Despesa"} \xB7 ${i.description} \xB7 ${brl(Math.round(i.amount * 100))} \xB7 ${dayOf(i.date, today)} \xB7 ${i.category || "sem categoria"}`;
+var showRecord = (v, today) => "type" in v ? `${v.description} (${brl(Math.round(v.amount * 100))}${when(v.date, today)})` : `${v.description} (${brl(Math.round(v.amount * 100))})`;
+function describeOperation(op, lead, say = {}) {
+  const { name, today } = say;
+  if (op.kind === "create") {
+    const items = op.items;
+    const needsCategory = items.some((i) => i.type === "despesa" && !i.category);
+    const hint = needsCategory ? ' Se quiser, j\xE1 me diz a categoria junto com o sim (ex.: "sim, em Lazer").' : "";
+    if (items.length === 1) {
+      const i = items[0], value = brl(Math.round(i.amount * 100)), cat = i.category ? ` na categoria ${i.category}` : "";
+      const body = addressed(name, i.type === "receita" ? `${lead ? "" : "confirma pra mim: "}vou registrar a receita "${i.description}" de ${value}${cat}${when(i.date, today)}. Pode ser?` : `${lead ? "" : "confirma pra mim: "}vou lan\xE7ar "${i.description}" no valor de ${value}${cat}${when(i.date, today)}. Pode ser?`);
+      const joined = lead && lead.endsWith(":") && !name ? body.charAt(0).toLowerCase() + body.slice(1) : body;
+      return `${lead ? lead + " " : ""}${joined}${hint}`;
+    }
+    return `${lead ? lead + " " : ""}${addressed(name, `vou lan\xE7ar estes ${items.length} aqui, pode ser?`)}
+${items.map((i) => bullet(i, today)).join("\n")}${hint ? "\n" + hint.trim() : ""}`;
+  }
+  if (op.kind === "goal" && !op.before) return addressed(name, `vou criar a meta "${op.after.description}" de ${brl(Math.round(op.after.amount * 100))}${"targetDate" in op.after && op.after.targetDate ? " para " + op.after.targetDate : ""}. Pode ser?`);
   if (op.kind === "edit" && op.before && op.after && "type" in op.before && "type" in op.after && op.after.category && op.before.category !== op.after.category && op.before.amount === op.after.amount && op.before.description === op.after.description && op.before.date === op.after.date)
-    return `${lead || "Perfeito!"} Quer que eu coloque este lan\xE7amento na categoria ${op.after.category}?
-\u2022 ${op.before.type === "receita" ? "Receita" : "Despesa"} \xB7 ${op.before.description} \xB7 ${brl(Math.round(op.before.amount * 100))} \xB7 ${op.before.date}
-${closing}`;
-  return `${op.kind === "delete" ? "Excluir" : "Alterar"} ${op.kind === "goal" ? "meta" : "lan\xE7amento"}?
-Antes: ${display(op.before)}${op.after ? "\nDepois: " + display(op.after) : "\nDepois: lan\xE7amento exclu\xEDdo"}.
-${closing}`;
+    return `${lead ? lead + " " : ""}${addressed(name, `quer que eu coloque ${showRecord(op.before, today)} na categoria ${op.after.category}?`)}`;
+  if (op.kind === "delete") return addressed(name, `confirma que \xE9 pra apagar ${showRecord(op.before, today)}?`);
+  const what = op.kind === "goal" ? "a meta" : "esse lan\xE7amento";
+  return `${addressed(name, `quer que eu altere ${what}?`)}
+Antes: ${display(op.before)}
+Depois: ${op.after ? display(op.after) : "lan\xE7amento exclu\xEDdo"}`;
 }
 function clearContext(session) {
   session.history = [];
@@ -423,7 +443,7 @@ function knownCategory(description) {
   if (/\b(farmacia|remedio|medico|consulta|dentista|exame|plano de saude|hospital|psicologo|terapia|academia)\b/.test(text)) return "Sa\xFAde";
   if (/\b(curso|faculdade|escola|livro|matricula|apostila|mensalidade escolar)\b/.test(text)) return "Educa\xE7\xE3o";
   if (/\b(transporte|gasolina|combustivel|uber|99|taxi|onibus|metro|passagem|estacionamento|pedagio|oficina|etanol|diesel)\b/.test(text)) return "Transporte";
-  if (/\b(supermercado|mercado|restaurante|almoco|jantar|cafe|padaria|lanche|pizza|hamburguer|ifood|acougue|feira|hortifruti|sorvete|marmita|churrasco|refrigerante|suco|agua|cerveja|comida|sobremesa|bolo|pao|doce|salgado)\b/.test(text)) return "Alimenta\xE7\xE3o";
+  if (/\b(supermercado|mercado|restaurante|almoco|jantar|cafe|padaria|lanche|pizza|hamburguer|ifood|acougue|feira|hortifruti|sorvete|marmita|churrasco|refrigerante|suco|agua|cerveja|comida|sobremesa|bolo|pao|doce|salgado|tempero|temperos|condimento|condimentos|especiaria|especiarias)\b/.test(text)) return "Alimenta\xE7\xE3o";
   if (/\b(bar|cinema|lazer|show|ingresso|balada|viagem|festa|jogo|parque|teatro)\b/.test(text)) return "Lazer";
   if (/\b(roupa|camisa|calca|tenis|sapato|notebook|fone|eletronico|shopping)\b/.test(text)) return "Compras";
   if (/\b(salario|freela|freelance|pix recebido|dividendo|rendimento|comissao)\b/.test(text)) return "Renda";
@@ -445,7 +465,7 @@ var OLDEST_DAYS = 366;
 var cents2 = (n) => Math.round(n * 100);
 var squash = (s) => normalize(s).replace(/[^a-z0-9]+/g, " ").trim();
 function amountsIn(text) {
-  const t = text.replace(/\d{4}-\d{2}-\d{2}/g, " ").replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, " ");
+  const t = text.replace(/\d{4}-\d{2}-\d{2}/g, " ").replace(/\b(?:dia|no dia|até o dia|ate o dia)\s+(?:[12]?\d|3[01])\b(?!\s*(?:reais|real|r\$|,\d))/gi, " ").replace(/\b\d{1,2}\s*(?:x|vezes)\b/gi, " ").replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, " ");
   const out = [];
   for (const m of t.matchAll(/(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)(\s*(?:mil\b|k\b))?/gi)) {
     const raw = m[1];
@@ -628,23 +648,23 @@ function blockedMessage(reason) {
 function confirmLead(reason) {
   switch (reason) {
     case "REPEATED_MESSAGE":
-      return "Esta mensagem j\xE1 foi registrada nesta sess\xE3o. Quer registrar uma segunda despesa/receita igual?";
+      return "Essa mensagem \xE9 igual a uma que voc\xEA j\xE1 mandou, ent\xE3o vou confirmar antes de registrar de novo.";
     case "FROM_AUDIO":
-      return "Entendi pelo \xE1udio. Confirma antes de registrar?";
+      return "Entendi pelo \xE1udio.";
     case "MULTIPLE_ENTRIES":
-      return "Vou registrar estes lan\xE7amentos juntos:";
+      return "";
     case "CONFIRM_FROM_PREVIOUS_MESSAGE":
-      return "Confirma o registro do que voc\xEA me contou?";
+      return "Entendi!";
     case "TENTATIVE_LANGUAGE":
-      return "S\xF3 para confirmar: isso j\xE1 aconteceu e devo registrar?";
+      return "S\xF3 pra ter certeza de que isso j\xE1 aconteceu:";
     case "MULTIPLE_AMOUNTS":
-      return "Sua mensagem tem mais de um valor. Confirma este registro?";
+      return "Vi mais de um valor na sua mensagem, ent\xE3o quero ter certeza:";
     case "HIGH_VALUE":
-      return "\xC9 um valor alto, ent\xE3o confirmo antes de registrar:";
+      return "\xC9 um valor alto, ent\xE3o confirmo com voc\xEA:";
     case "RELATIVE_DATE":
-      return "Confirma a data antes de registrar?";
+      return "S\xF3 confirmando a data:";
     default:
-      return "Confirma antes de registrar?";
+      return "";
   }
 }
 
@@ -702,7 +722,9 @@ var RETRYABLE = /* @__PURE__ */ new Set(["VALIDATION_FAILED", "UNKNOWN_TOOL"]);
 var LIMITS = { steps: 4, tools: 8, timeoutMs: 35e3, tokens: 14e3 };
 var messageHash = async (text) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))).map((n) => n.toString(16).padStart(2, "0")).join("");
 var errorMessage = (code) => ({ OPENAI_AUTH_FAILED: "A chave OpenAI n\xE3o foi aceita. Verifique a configura\xE7\xE3o do laborat\xF3rio.", OPENAI_QUOTA_EXCEEDED: "A OpenAI informou falta de cr\xE9ditos ou limite de uso.", OPENAI_RATE_LIMITED: "A OpenAI est\xE1 limitando requisi\xE7\xF5es. Aguarde antes de tentar de novo.", MODEL_INCOMPATIBLE: "O modelo n\xE3o aceitou o contrato de ferramentas.", OPENAI_TIMEOUT: "A OpenAI n\xE3o respondeu no prazo.", REAL_AI_LOCKED: "IA real bloqueada na configura\xE7\xE3o do laborat\xF3rio.", INVALID_SESSION: "Esta sess\xE3o perdeu a validade. Inicie uma nova sess\xE3o.", STEP_LIMIT: "Parei no limite de etapas. Tente uma pergunta mais espec\xEDfica.", TOKEN_LIMIT: "Parei no limite de consumo desta intera\xE7\xE3o.", LOOP_DETECTED: "A consulta se repetiu. Parei para evitar um loop." })[code] || "N\xE3o consegui concluir esta intera\xE7\xE3o. Nenhum sucesso de ferramenta foi inventado.";
-function readable(step, detail, live = false) {
+function readable(step, detail, live = false, name) {
+  const hi = name ? `Pronto, ${name}!` : "Pronto!";
+  const noted = (t) => `${t.description} (${brl(Math.round(t.amount * 100))}${t.category ? `, ${t.category}` : ""})`;
   if (step.status !== "success") return step.error?.message || "Ferramenta n\xE3o executada.";
   const r = step.result;
   switch (step.name) {
@@ -711,15 +733,15 @@ function readable(step, detail, live = false) {
     case "simular_compra":
       return `Simula\xE7\xE3o: ${brl(r.availableCents)} dispon\xEDveis (${r.basis}) \u2212 ${brl(r.purchaseCents)} da compra = ${brl(r.remainingCents)} restantes. Nenhuma despesa registrada.`;
     case "editar_transacao":
-      return "Pronto. Lan\xE7amento corrigido conforme confirmado.";
+      return `${hi} J\xE1 corrigi o lan\xE7amento.`;
     case "excluir_transacao":
-      return "Pronto. Lan\xE7amento exclu\xEDdo conforme confirmado.";
+      return `${hi} Apaguei o lan\xE7amento.`;
     case "alterar_objetivo":
-      return "Pronto. Meta alterada conforme confirmado.";
+      return `${hi} Meta atualizada.`;
     case "registrar_confirmado":
-      return `${detail === "curto" ? "Registrado" : "Registro conclu\xEDdo"}: ${r.created.map((t) => `${t.description}, ${brl(Math.round(t.amount * 100))}`).join("; ")}.`;
+      return `${hi} Anotei ${r.created.map(noted).join("; ")}.`;
     case "registrar_transacao":
-      return `${detail === "curto" ? "Registrado" : "Registro conclu\xEDdo"}: ${r.transaction.description}, ${brl(Math.round(r.transaction.amount * 100))}.`;
+      return `${hi} Anotei ${noted(r.transaction)}.`;
     case "listar_transacoes":
       return r.totalCount ? `${r.totalCount} transa\xE7\xF5es no filtro.
 ` + r.transactions.map((t) => `${t.date} \xB7 ${t.description} \xB7 ${t.type === "receita" ? "+" : "\u2212"} ${brl(Math.round(t.amount * 100))} \xB7 ${t.category || "sem categoria"}`).join("\n") : "Nenhuma transa\xE7\xE3o neste filtro.";
@@ -743,7 +765,7 @@ var DATA_WRITES = /* @__PURE__ */ new Set(["registrar_transacao", "registrar_con
 var LOOKUPS = /* @__PURE__ */ new Set(["consultar_saldo", "listar_transacoes", "consultar_gastos_categoria"]);
 function renderAnswer(steps, draft, session, context = {}) {
   const success = steps.filter((s) => s.status === "success");
-  const facts = success.map((s) => readable(s, session.state.preferences.detail, context.live)).join("\n\n");
+  const facts = success.map((s) => readable(s, session.state.preferences.detail, context.live, context.name)).join("\n\n");
   const wroteData = success.some((s) => DATA_WRITES.has(s.name));
   const lookupOnly = success.length > 0 && success.every((s) => LOOKUPS.has(s.name));
   const grounding = { message: context.message || "", history: context.history ?? session.history.filter((h) => h.role === "user").map((h) => h.content), steps, wroteData };
@@ -770,7 +792,7 @@ function mergeCreates(calls) {
   return [merged, ...calls.filter((c) => !creates.includes(c))];
 }
 async function runConversation(provider, sessionInput, message, requestId, today, options = {}) {
-  const session = structuredClone(sessionSchema.parse(sessionInput || createSession())), limits = { ...LIMITS, ...options.limits }, started = performance.now(), steps = [];
+  const say = { name: options.userName, today }, session = structuredClone(sessionSchema.parse(sessionInput || createSession())), limits = { ...LIMITS, ...options.limits }, started = performance.now(), steps = [];
   const base = { requestId, mode: provider.mode, durationMs: 0 };
   const hash = await messageHash(message), previous = session.lastRequests.find((r) => r.id === requestId);
   if (previous) {
@@ -830,7 +852,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       }
       if (d.decision === "confirm") {
         const op = createOperation(d.entries);
-        hold(op, describeOperation(op, confirmLead(d.reason)), "execucao");
+        hold(op, describeOperation(op, confirmLead(d.reason), say), "execucao");
         step.status = "blocked";
         step.error = { code: "CONFIRMATION_REQUIRED", reason: d.reason, message: "Aguardando confirma\xE7\xE3o expl\xEDcita; nada foi registrado." };
         return;
@@ -840,7 +862,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
     if (call.name === "propor_edicao_transacao" || call.name === "propor_exclusao_transacao") {
       const r = prepareChange(call, ctx);
       if (r.operation) {
-        hold(r.operation, describeOperation(r.operation), "alteracao");
+        hold(r.operation, describeOperation(r.operation, void 0, say), "alteracao");
         step.status = "blocked";
         step.error = { code: "CONFIRMATION_REQUIRED", reason: "CHANGE_EXISTING_RECORD", message: "Aguardando confirma\xE7\xE3o expl\xEDcita; nada foi alterado." };
         return;
@@ -864,7 +886,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       }
       if (d.decision === "confirm") {
         const op = goalOperation(d.goal, core.snapshot());
-        hold(op, describeOperation(op), "alteracao");
+        hold(op, describeOperation(op, void 0, say), "alteracao");
         step.status = "blocked";
         step.error = { code: "CONFIRMATION_REQUIRED", reason: d.reason, message: "Aguardando confirma\xE7\xE3o expl\xEDcita; nada foi alterado." };
         return;
@@ -919,7 +941,7 @@ async function runConversation(provider, sessionInput, message, requestId, today
       directAnswer = yes ? "A confirma\xE7\xE3o expirou. Solicite a altera\xE7\xE3o novamente." : "Tudo bem. Nada foi alterado.";
     } else if (op && live && onlyCategory) {
       op.expiresAt = Date.now() + 5 * 6e4;
-      hold(op, describeOperation(op, `Certo, categoria ${pickedCategory}. Confirma o registro?`), "execucao");
+      hold(op, describeOperation(op, `Certo, categoria ${pickedCategory}!`, say), "execucao");
     } else if (op && live && no) {
       confirmation = "cancelled";
       kind = "confirmacao";
@@ -989,9 +1011,9 @@ async function runConversation(provider, sessionInput, message, requestId, today
   status = status;
   const success = steps.filter((s) => s.status === "success");
   if (command === void 0 && !risk && !steps.length && !pendingAnswer && !directAnswer) observeStyle(session, message);
-  let answer = directAnswer || pendingAnswer || blockedAnswer || renderAnswer(steps, draft, session, { message, history: session.history.filter((h) => h.role === "user").map((h) => h.content), live: options.realData });
+  let answer = directAnswer || pendingAnswer || blockedAnswer || renderAnswer(steps, draft, session, { message, history: session.history.filter((h) => h.role === "user").map((h) => h.content), live: options.realData, name: options.userName });
   if (status === "error") {
-    answer = [success.map((s) => readable(s, session.state.preferences.detail, options.realData)).join("\n\n"), errorMessage(errorCode || "EXECUTION_FAILED")].filter(Boolean).join("\n\n");
+    answer = [success.map((s) => readable(s, session.state.preferences.detail, options.realData, options.userName)).join("\n\n"), errorMessage(errorCode || "EXECUTION_FAILED")].filter(Boolean).join("\n\n");
     if (session.memory.operation && !pendingAnswer) session.memory.operation = void 0;
   }
   const analytic = success.some((s) => ["resumir_financas", "comparar_periodos", "projetar_despesas", "simular_compra"].includes(s.name));
@@ -1202,11 +1224,14 @@ Responda *autorizar* para liberar (ou *autorizar ${phone}*) ou *bloquear* para n
   ownerBadPhone: "N\xE3o entendi o n\xFAmero. Use o formato *autorizar 5511999999999* ou s\xF3 *autorizar* para liberar o \xFAltimo que pediu.",
   ownerEmptyList: "Ainda n\xE3o h\xE1 nenhum contato.",
   ownerHelp: "*Comandos do dono*\n\u2022 *autorizar* \u2014 libera o \xFAltimo n\xFAmero que pediu acesso\n\u2022 *autorizar 5511999999999 Nome* \u2014 libera um n\xFAmero\n\u2022 *bloquear* ou *bloquear 5511\u2026* \u2014 nega\n\u2022 *remover 5511\u2026* \u2014 apaga o contato e a conversa\n\u2022 *listar* \u2014 mostra todos os contatos",
-  welcome: (name) => `Oi${name ? `, ${name.split(/\s+/)[0]}` : ""}! Voc\xEA foi liberado para testar o *Pulse*, um assistente de finan\xE7as pelo WhatsApp.
+  welcome: (name) => `${name ? `Ei, ${name.split(/\s+/)[0]}!` : "Ei!"} Seja muito bem-vindo! \u{1F49C}
+Eu sou o Pulse, seu assistente pessoal de intelig\xEAncia artificial!
 
-Conte um gasto (ex.: "gastei 32 no almo\xE7o"), pergunte seu saldo ou mande um \xE1udio. Antes de gravar algo, eu confirmo com voc\xEA.
+T\xF4 aqui pra facilitar sua vida: posso te ajudar a organizar suas finan\xE7as, registrar seus gastos, acompanhar seu dinheiro, planejar seus objetivos e muito mais.
 
-\xC9 uma vers\xE3o de teste, ent\xE3o me avise se algo n\xE3o funcionar bem. \u{1F642}`,
+E o melhor: voc\xEA n\xE3o precisa decorar comandos nem preencher formul\xE1rios. \xC9 s\xF3 conversar comigo normalmente, por texto ou \xE1udio, como faria com qualquer pessoa. \u{1F399}\uFE0F
+
+Pra come\xE7ar, que tal me contar um pouquinho sobre voc\xEA? \u{1F604}`,
   loginCode: (code) => `Seu c\xF3digo de acesso ao Pulse \xE9 *${code}*.
 
 Digite na tela de login. Ele vale por poucos minutos e n\xE3o deve ser compartilhado. Se n\xE3o foi voc\xEA, \xE9 s\xF3 ignorar esta mensagem.`,
@@ -1820,7 +1845,7 @@ async function runAgent(deps, phone, message, messageId, source, name) {
       session.state.categories = before.customCategories;
       session.state.lastRecordId = before.lastRecordId;
     }
-    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws) });
+    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws), userName: name?.trim().split(/\s+/)[0] || void 0 });
     out.session.expiresAt = now + DAY;
     if (ws && deps.ledger && before && !out.trace.errorCode) {
       await deps.ledger.apply(ws, diffEntries(before.transactions, out.session.state.transactions), `wa:${messageId}`);
@@ -1919,7 +1944,7 @@ async function handleInbound(deps, input) {
       text = t.text;
       heard = t.text;
     } else text = input.text.slice(0, 2e3);
-    const out = await runAgent(deps, phone, text, messageId, input.kind === "audio" ? "audio" : "text", input.name);
+    const out = await runAgent(deps, phone, text, messageId, input.kind === "audio" ? "audio" : "text", contact?.name || input.name);
     if (out.trace.errorCode) {
       deps.log?.({ event: "whatsapp_agent_error", code: out.trace.errorCode });
       await deps.messenger.sendText(phone, messages.technicalProblem);

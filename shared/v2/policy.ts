@@ -11,7 +11,7 @@ export function knownCategory(description:string):string|undefined{
  if(/\b(farmacia|remedio|medico|consulta|dentista|exame|plano de saude|hospital|psicologo|terapia|academia)\b/.test(text))return 'Saúde';
  if(/\b(curso|faculdade|escola|livro|matricula|apostila|mensalidade escolar)\b/.test(text))return 'Educação';
  if(/\b(transporte|gasolina|combustivel|uber|99|taxi|onibus|metro|passagem|estacionamento|pedagio|oficina|etanol|diesel)\b/.test(text))return 'Transporte';
- if(/\b(supermercado|mercado|restaurante|almoco|jantar|cafe|padaria|lanche|pizza|hamburguer|ifood|acougue|feira|hortifruti|sorvete|marmita|churrasco|refrigerante|suco|agua|cerveja|comida|sobremesa|bolo|pao|doce|salgado)\b/.test(text))return 'Alimentação';
+ if(/\b(supermercado|mercado|restaurante|almoco|jantar|cafe|padaria|lanche|pizza|hamburguer|ifood|acougue|feira|hortifruti|sorvete|marmita|churrasco|refrigerante|suco|agua|cerveja|comida|sobremesa|bolo|pao|doce|salgado|tempero|temperos|condimento|condimentos|especiaria|especiarias)\b/.test(text))return 'Alimentação';
  if(/\b(bar|cinema|lazer|show|ingresso|balada|viagem|festa|jogo|parque|teatro)\b/.test(text))return 'Lazer';
  if(/\b(roupa|camisa|calca|tenis|sapato|notebook|fone|eletronico|shopping)\b/.test(text))return 'Compras';
  if(/\b(salario|freela|freelance|pix recebido|dividendo|rendimento|comissao)\b/.test(text))return 'Renda';
@@ -57,7 +57,7 @@ const squash=(s:string)=>normalize(s).replace(/[^a-z0-9]+/g,' ').trim();
 
 /** Every monetary-looking number in a text, in reais (BR formats, "3 mil", "2k"). Dates are ignored. */
 export function amountsIn(text:string):number[]{
- const t=text.replace(/\d{4}-\d{2}-\d{2}/g,' ').replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g,' ');
+ const t=text.replace(/\d{4}-\d{2}-\d{2}/g,' ').replace(/\b(?:dia|no dia|até o dia|ate o dia)\s+(?:[12]?\d|3[01])\b(?!\s*(?:reais|real|r\$|,\d))/gi,' ').replace(/\b\d{1,2}\s*(?:x|vezes)\b/gi,' ').replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g,' ');
  const out:number[]=[];
  for(const m of t.matchAll(/(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)(\s*(?:mil\b|k\b))?/gi)){
   const raw=m[1];let v=raw.includes(',')?Number(raw.replace(/\./g,'').replace(',','.')):/^\d{1,3}(?:\.\d{3})+$/.test(raw)?Number(raw.replace(/\./g,'')):Number(raw);
@@ -250,14 +250,14 @@ export function blockedMessage(reason:string|undefined):string{
 /** Lead line shown above a pending new-record confirmation. */
 export function confirmLead(reason:string|undefined):string{
  switch(reason){
-  case 'REPEATED_MESSAGE':return 'Esta mensagem já foi registrada nesta sessão. Quer registrar uma segunda despesa/receita igual?';
-  case 'FROM_AUDIO':return 'Entendi pelo áudio. Confirma antes de registrar?';
-  case 'MULTIPLE_ENTRIES':return 'Vou registrar estes lançamentos juntos:';
-  case 'CONFIRM_FROM_PREVIOUS_MESSAGE':return 'Confirma o registro do que você me contou?';
-  case 'TENTATIVE_LANGUAGE':return 'Só para confirmar: isso já aconteceu e devo registrar?';
-  case 'MULTIPLE_AMOUNTS':return 'Sua mensagem tem mais de um valor. Confirma este registro?';
-  case 'HIGH_VALUE':return 'É um valor alto, então confirmo antes de registrar:';
-  case 'RELATIVE_DATE':return 'Confirma a data antes de registrar?';
-  default:return 'Confirma antes de registrar?';
+  case 'REPEATED_MESSAGE':return 'Essa mensagem é igual a uma que você já mandou, então vou confirmar antes de registrar de novo.';
+  case 'FROM_AUDIO':return 'Entendi pelo áudio.';
+  case 'MULTIPLE_ENTRIES':return '';
+  case 'CONFIRM_FROM_PREVIOUS_MESSAGE':return 'Entendi!';
+  case 'TENTATIVE_LANGUAGE':return 'Só pra ter certeza de que isso já aconteceu:';
+  case 'MULTIPLE_AMOUNTS':return 'Vi mais de um valor na sua mensagem, então quero ter certeza:';
+  case 'HIGH_VALUE':return 'É um valor alto, então confirmo com você:';
+  case 'RELATIVE_DATE':return 'Só confirmando a data:';
+  default:return '';
  }
 }

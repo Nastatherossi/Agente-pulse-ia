@@ -23,11 +23,14 @@ Responda *autorizar* para liberar (ou *autorizar ${phone}*) ou *bloquear* para n
   ownerBadPhone: "N\xE3o entendi o n\xFAmero. Use o formato *autorizar 5511999999999* ou s\xF3 *autorizar* para liberar o \xFAltimo que pediu.",
   ownerEmptyList: "Ainda n\xE3o h\xE1 nenhum contato.",
   ownerHelp: "*Comandos do dono*\n\u2022 *autorizar* \u2014 libera o \xFAltimo n\xFAmero que pediu acesso\n\u2022 *autorizar 5511999999999 Nome* \u2014 libera um n\xFAmero\n\u2022 *bloquear* ou *bloquear 5511\u2026* \u2014 nega\n\u2022 *remover 5511\u2026* \u2014 apaga o contato e a conversa\n\u2022 *listar* \u2014 mostra todos os contatos",
-  welcome: (name) => `Oi${name ? `, ${name.split(/\s+/)[0]}` : ""}! Voc\xEA foi liberado para testar o *Pulse*, um assistente de finan\xE7as pelo WhatsApp.
+  welcome: (name) => `${name ? `Ei, ${name.split(/\s+/)[0]}!` : "Ei!"} Seja muito bem-vindo! \u{1F49C}
+Eu sou o Pulse, seu assistente pessoal de intelig\xEAncia artificial!
 
-Conte um gasto (ex.: "gastei 32 no almo\xE7o"), pergunte seu saldo ou mande um \xE1udio. Antes de gravar algo, eu confirmo com voc\xEA.
+T\xF4 aqui pra facilitar sua vida: posso te ajudar a organizar suas finan\xE7as, registrar seus gastos, acompanhar seu dinheiro, planejar seus objetivos e muito mais.
 
-\xC9 uma vers\xE3o de teste, ent\xE3o me avise se algo n\xE3o funcionar bem. \u{1F642}`,
+E o melhor: voc\xEA n\xE3o precisa decorar comandos nem preencher formul\xE1rios. \xC9 s\xF3 conversar comigo normalmente, por texto ou \xE1udio, como faria com qualquer pessoa. \u{1F399}\uFE0F
+
+Pra come\xE7ar, que tal me contar um pouquinho sobre voc\xEA? \u{1F604}`,
   loginCode: (code) => `Seu c\xF3digo de acesso ao Pulse \xE9 *${code}*.
 
 Digite na tela de login. Ele vale por poucos minutos e n\xE3o deve ser compartilhado. Se n\xE3o foi voc\xEA, \xE9 s\xF3 ignorar esta mensagem.`,
