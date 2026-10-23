@@ -111,7 +111,7 @@ export const messages = {
   ownerHelp:
     '*Comandos do dono*\n• *autorizar* — libera o último número que pediu acesso\n• *autorizar 5511999999999 Nome* — libera um número\n• *bloquear* ou *bloquear 5511…* — nega\n• *remover 5511…* — apaga o contato e a conversa\n• *listar* — mostra todos os contatos',
   welcome: (name?: string | null) =>
-    `Oi${name ? `, ${name.split(/\s+/)[0]}` : ''}! Você foi liberado para testar o *Pulse*, um assistente de finanças pelo WhatsApp.\n\nConte um gasto (ex.: "gastei 32 no almoço"), pergunte seu saldo ou mande um áudio. Antes de gravar algo, eu confirmo com você.\n\nÉ uma versão de teste, então me avise se algo não funcionar bem. 🙂`,
+    `${name ? `Ei, ${name.split(/\s+/)[0]}!` : 'Ei!'} Seja muito bem-vindo! 💜\nEu sou o Pulse, seu assistente pessoal de inteligência artificial!\n\nTô aqui pra facilitar sua vida: posso te ajudar a organizar suas finanças, registrar seus gastos, acompanhar seu dinheiro, planejar seus objetivos e muito mais.\n\nE o melhor: você não precisa decorar comandos nem preencher formulários. É só conversar comigo normalmente, por texto ou áudio, como faria com qualquer pessoa. 🎙️\n\nPra começar, que tal me contar um pouquinho sobre você? 😄`,
   loginCode: (code: string) => `Seu código de acesso ao Pulse é *${code}*.\n\nDigite na tela de login. Ele vale por poucos minutos e não deve ser compartilhado. Se não foi você, é só ignorar esta mensagem.`,
   loginNotAuthorized: 'Esse número ainda não foi liberado. Mande um oi para o Pulse no WhatsApp e aguarde a liberação.',
   technicalProblem: 'Tive um problema técnico agora e não consegui responder. Pode mandar de novo em instantes?',

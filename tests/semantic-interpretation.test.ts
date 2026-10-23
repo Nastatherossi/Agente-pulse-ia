@@ -22,13 +22,13 @@ describe('Registros: o modelo interpreta, o código autoriza',()=>{
  it('“Gastei 50 no mercado com cartão” registra R$ 50 sem confirmação nem conselho',async()=>{
   const r=await send(model({calls:[tc('registrar_transacao',expense(50,'mercado','Gastei 50 no mercado com cartão',{category:'Alimentação'}))]},{content:'Que tal revisar seu orçamento?'}),undefined,'Gastei 50 no mercado com cartão');
   expect(r.session.state.transactions).toHaveLength(1);expect(r.session.state.transactions[0]).toMatchObject({amount:50,description:'mercado',category:'Alimentação'});
-  expect(r.trace.message).toBe(`Registrado: mercado, ${brl(5000)}.`);expect(r.trace.status).toBe('success');
+  expect(r.trace.message).toBe(`Pronto! Anotei mercado (${brl(5000)}, Alimentação).`);expect(r.trace.status).toBe('success');
  });
  it('“Gastei 40 de Uber e 20 de café” vira dois lançamentos atômicos após uma confirmação',async()=>{
   let r=await send(model({calls:[tc('registrar_varios',{natureza:'fato_ocorrido',lancamentos:[{type:'despesa',amount:40,description:'Uber',date:today,category:'Transporte',evidencia:'40 de Uber'},{type:'despesa',amount:20,description:'café',date:today,evidencia:'20 de café'}]})]}),undefined,'Gastei 40 de Uber e 20 de café');
   expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.confirmation).toBe('pending');expect(r.trace.message).toContain(`Uber · ${brl(4000)}`);expect(r.trace.message).toContain(`café · ${brl(2000)}`);
   r=await send(model(),r.session,'pode');
-  expect(r.session.state.transactions.map(t=>t.amount)).toEqual([40,20]);expect(balanceCents(r.session.state)).toBe(244000);expect(r.trace.message).toBe(`Registrado: Uber, ${brl(4000)}; café, ${brl(2000)}.`);
+  expect(r.session.state.transactions.map(t=>t.amount)).toEqual([40,20]);expect(balanceCents(r.session.state)).toBe(244000);expect(r.trace.message).toBe(`Pronto! Anotei Uber (${brl(4000)}, Transporte); café (${brl(2000)}, Alimentação).`);
  });
  it('mesma mensagem com uma única ferramenta não registra parcialmente: pede confirmação',async()=>{
   const r=await send(model({calls:[tc('registrar_transacao',expense(40,'Uber','40 de Uber'))]}),undefined,'Gastei 40 de Uber e 20 de café');
@@ -49,7 +49,7 @@ describe('Registros: o modelo interpreta, o código autoriza',()=>{
  });
  it('“Comprei um celular por 1.900” registra R$ 1.900',async()=>{
   const r=await send(model({calls:[tc('registrar_transacao',expense(1900,'celular','celular por 1.900',{category:'Compras'}))]}),undefined,'Comprei um celular por 1.900');
-  expect(r.session.state.transactions[0]).toMatchObject({amount:1900,description:'celular'});expect(r.trace.message).toBe(`Registrado: celular, ${brl(190000)}.`);
+  expect(r.session.state.transactions[0]).toMatchObject({amount:1900,description:'celular'});expect(r.trace.message).toBe(`Pronto! Anotei celular (${brl(190000)}, Compras).`);
  });
  it('“Gastei 30 no iFood, não sei a categoria” registra sem categoria, mesmo que o modelo sugira uma',async()=>{
   const r=await send(model({calls:[tc('registrar_transacao',expense(30,'iFood','Gastei 30 no iFood',{category:'Alimentação'}))]}),undefined,'Gastei 30 no iFood, não sei a categoria');
@@ -161,7 +161,7 @@ describe('Segurança adversarial',()=>{
   ['múltiplos valores','Paguei 230 da luz e 15 de taxa',expense(230,'luz','230 da luz')]
  ])('%s: proposta plausível pede confirmação em vez de gravar',async(_,message,args)=>{
   const r=await send(model({calls:[tc('registrar_transacao',args)]}),undefined,message);
-  expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.confirmation).toBe('pending');expect(r.trace.message).toContain('Confirma');
+  expect(r.session.state.transactions).toHaveLength(0);expect(r.trace.confirmation).toBe('pending');expect(r.trace.message).toMatch(/Pode ser\?/);
  });
  it.each([
   ['valor inventado','Gastei um milhão no café kkk',expense(1000000,'café','Gastei um milhão')],
@@ -211,7 +211,7 @@ describe('Segurança adversarial',()=>{
  it('repetir a mesma mensagem pede confirmação antes de um segundo registro',async()=>{
   const m='Gastei 50 no mercado';let r=await send(model({calls:[tc('registrar_transacao',expense(50,'mercado',m))]}),undefined,m);
   r=await send(model({calls:[tc('registrar_transacao',expense(50,'mercado',m))]}),r.session,m);
-  expect(r.session.state.transactions).toHaveLength(1);expect(r.trace.message).toContain('segunda despesa/receita');
+  expect(r.session.state.transactions).toHaveLength(1);expect(r.trace.message).toContain('igual a uma que você já mandou');
  });
 });
 
