@@ -3,7 +3,10 @@ import {z} from 'zod';
 export const isoDate=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new Date(v+'T12:00:00Z');return !isNaN(d.getTime())&&d.toISOString().slice(0,10)===v;});
 export const money=z.number().finite().positive().max(1000000).refine(v=>Math.abs(v*100-Math.round(v*100))<0.00001);
 export const category=z.string().trim().min(1).max(50);
-export const transaction=z.object({type:z.enum(['receita','despesa']),amount:money,description:z.string().trim().min(1).max(120),date:isoDate,category:category.optional()}).strict();
+/** Compra no cartão de crédito: não mexe no saldo, entra na fatura. */
+export const cardRef=z.object({name:z.string().trim().min(1).max(30).optional(),installments:z.number().int().min(1).max(48).optional()}).strict();
+export const cardInfo=z.object({name:z.string().trim().min(1).max(30),closingDay:z.number().int().min(1).max(31),dueDay:z.number().int().min(1).max(31)}).strict();
+export const transaction=z.object({type:z.enum(['receita','despesa']),amount:money,description:z.string().trim().min(1).max(120),date:isoDate,category:category.optional(),card:cardRef.optional()}).strict();
 export const storedTransaction=transaction.extend({id:z.string().uuid()});
 export const period=z.object({start:isoDate,end:isoDate}).strict().refine(p=>p.start<=p.end,'Período invertido');
 export const preferences=z.object({style:z.enum(['direto','descontraido','neutro','formal']).default('neutro'),detail:z.enum(['curto','detalhado']).default('curto'),proactivity:z.enum(['discreto','equilibrado','proativo']).default('discreto'),explanation:z.enum(['minima','completa']).default('minima'),examples:z.boolean().default(false),emojis:z.boolean().default(false)}).strict();
@@ -19,7 +22,8 @@ export const schemas={
  projetar_despesas:z.object({period,asOf:isoDate}).strict(),
  atualizar_preferencias:preferences,
  simular_compra:z.object({amount:money,available:money.optional()}).strict(),
- definir_objetivo:goal
+ definir_objetivo:goal,
+ cadastrar_cartao:cardInfo
 };
 export type ToolName=keyof typeof schemas;
 /** Closed category taxonomy the model may choose from. Anything else is dropped, never invented. */
@@ -31,7 +35,8 @@ export const nature=z.preprocess(v=>{if(typeof v!=='string')return v;const k=v.n
 /** Exact excerpt of the CURRENT user message that supports a proposal. Checked by code, never trusted. */
 export const evidence=z.string().trim().min(1).max(300);
 const modelCategory=z.string().trim().max(50).nullable().optional();
-const entryFields={type:z.enum(['receita','despesa']),amount:money,description:z.string().trim().min(1).max(120),date:isoDate,category:modelCategory};
+const modelCard=z.object({nome:z.string().trim().max(30).nullable().optional(),parcelas:z.number().int().min(1).max(48).nullable().optional()}).nullable().optional();
+const entryFields={type:z.enum(['receita','despesa']),amount:money,description:z.string().trim().min(1).max(120),date:isoDate,category:modelCategory,cartao:modelCard};
 const target=z.object({transacao_id:z.string().uuid().optional(),descricao:z.string().trim().min(1).max(120).optional(),valor:money.optional(),data:isoDate.optional()}).strict().refine(t=>Object.keys(t).length>0,'TARGET_REQUIRED');
 /**
  * Model-facing tools: the model interprets and PROPOSES. Write proposals carry the model's reading
@@ -50,14 +55,15 @@ export const toolSchemas={
  propor_edicao_transacao:z.object({alvo:target,novo:z.object({amount:money.optional(),description:z.string().trim().min(1).max(120).optional(),category:z.string().trim().min(1).max(50).optional(),date:isoDate.optional()}).strict().refine(n=>Object.keys(n).length>0,'CHANGE_REQUIRED'),evidencia:evidence}).strict(),
  propor_exclusao_transacao:z.object({alvo:target,evidencia:evidence}).strict(),
  atualizar_preferencias:z.object({style:z.enum(['direto','descontraido','neutro','formal']).optional(),detail:z.enum(['curto','detalhado']).optional(),proactivity:z.enum(['discreto','equilibrado','proativo']).optional(),explanation:z.enum(['minima','completa']).optional(),examples:z.boolean().optional(),emojis:z.boolean().optional(),redefinir:z.boolean().optional(),evidencia:evidence}).strict(),
- definir_objetivo:goal.extend({evidencia:evidence}).strict()
+ definir_objetivo:goal.extend({evidencia:evidence}).strict(),
+ cadastrar_cartao:z.object({nome:z.string().trim().min(1).max(30),dia_fechamento:z.number().int().min(1).max(31),dia_vencimento:z.number().int().min(1).max(31),evidencia:evidence}).strict()
 };
 export type ModelToolName=keyof typeof toolSchemas;
-export const WRITE_TOOLS:ReadonlySet<string>=new Set(['registrar_transacao','registrar_varios','propor_edicao_transacao','propor_exclusao_transacao','atualizar_preferencias','definir_objetivo']);
+export const WRITE_TOOLS:ReadonlySet<string>=new Set(['registrar_transacao','registrar_varios','propor_edicao_transacao','propor_exclusao_transacao','atualizar_preferencias','definir_objetivo','cadastrar_cartao']);
 export type Call={id:string;name:string;arguments:unknown};
 export type ValidCall={id:string;name:ToolName;arguments:Record<string,unknown>};
 export type ModelCall={id:string;name:ModelToolName;arguments:Record<string,unknown>};
-export const financialState=z.object({initialBalanceCents:z.number().int().min(0).max(100000000),transactions:z.array(transaction.extend({id:z.string().uuid()})).max(300),preferences,goal:goal.optional(),/** The user's own categories (beyond CATEGORIES). Loaded from the ledger; the user may create more by asking. */categories:z.array(category.max(30)).max(40).optional(),/** The record registered most recently ("isso", "esse", "o último" refer to it). */lastRecordId:z.string().uuid().optional()}).strict();
+export const financialState=z.object({initialBalanceCents:z.number().int().min(0).max(100000000),transactions:z.array(transaction.extend({id:z.string().uuid()})).max(300),preferences,goal:goal.optional(),/** The user's own categories (beyond CATEGORIES). Loaded from the ledger; the user may create more by asking. */categories:z.array(category.max(30)).max(40).optional(),/** The record registered most recently ("isso", "esse", "o último" refer to it). */lastRecordId:z.string().uuid().optional(),/** Cartões cadastrados (vêm do banco a cada mensagem). */cards:z.array(cardInfo).max(10).optional(),/** Compras no cartão registradas NESTA mensagem; o servidor grava na fatura e esvazia. Não entram no saldo. */cardPurchases:z.array(transaction.extend({id:z.string().uuid()})).max(20).optional()}).strict();
 export type State=z.infer<typeof financialState>;
 export type Period=z.infer<typeof period>;
 export type Step={order:number;id:string;name:string;arguments?:unknown;status:'success'|'error'|'blocked';result?:unknown;error?:{code:string;message:string;reason?:string;issues?:{field:string;code:string}[]};durationMs:number};

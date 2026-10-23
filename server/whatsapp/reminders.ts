@@ -1,7 +1,7 @@
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { brl, sessionSchema, todayBR } from '../../shared/v2/contracts.js';
 import { type Contact } from '../../shared/whatsapp/access.js';
-import { SupabaseLedger, type DueItem, type Ledger } from './ledger.js';
+import { SupabaseLedger, type DueItem, type InvoiceNotice, type Ledger } from './ledger.js';
 import { SupabaseStore, type Store } from './store.js';
 import { ZApiClient, type Messenger } from './zapi.js';
 
@@ -29,7 +29,7 @@ export type ReminderDeps = {
 };
 
 const first = (name?: string | null) => name?.trim().split(/\s+/)[0] || undefined;
-const dm = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+export const dm = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
 const dayLabel = (item: DueItem, today: string) => (item.expectedDate === today ? 'pra hoje' : `pro dia ${dm(item.expectedDate)}`);
 const what = (i: DueItem) => `${brl(Math.round(i.amount * 100))} de ${i.description}${i.category && i.category !== i.description ? ` (${i.category})` : ''}`;
 
@@ -54,6 +54,22 @@ export function composeReminder(items: DueItem[], name: string | undefined, toda
   return firstEver ? `${body}\n\n${optOutNote}` : body;
 }
 
+export const MAX_NOTICES_PER_MESSAGE = 2;
+
+/** Avisos de fatura: "fechou" (informativo) e "vence" (pergunta se já pagou). */
+export function composeNotices(notices: InvoiceNotice[], name: string | undefined, today: string): string {
+  const shown = notices.slice(0, MAX_NOTICES_PER_MESSAGE);
+  const line = (n: InvoiceNotice) => {
+    const v = brl(Math.round(n.amount * 100));
+    if (n.kind === 'closed') return `a fatura do ${n.cardName} fechou${n.closingDate === today ? ' hoje' : ''}: ${v}. Ela vence dia ${dm(n.dueDate)}.`;
+    if (n.dueDate === today) return `hoje vence a fatura do ${n.cardName} (${v}). Já pagou? Me avisa aqui que eu dou baixa pra você.`;
+    return `a fatura do ${n.cardName} (${v}) venceu dia ${dm(n.dueDate)}. Já pagou? Me avisa aqui que eu dou baixa pra você.`;
+  };
+  const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+  const lines = shown.map(n => (name ? `${name}, ${line(n)}` : cap(line(n))));
+  return `${lines.join('\n\n')} 💜`;
+}
+
 export type RunResult = { sent: number; skipped: number; failed: number; messages: { phone: string; text: string }[] };
 
 /** Roda uma vez por dia. `dry` só calcula o que enviaria. */
@@ -71,17 +87,27 @@ export async function runReminders(deps: ReminderDeps, opts: { dry?: boolean } =
       if (last && last >= startOfDay) { out.skipped++; continue; }
       const ws = await deps.ledger.resolve(c.phone, c.name ?? undefined);
       const due = await deps.ledger.due(ws, today);
-      if (!due.length) { out.skipped++; continue; }
       const states = new Map((await deps.store.reminderStates(due.map(d => d.id))).map(s => [s.transaction_id, s]));
       const items = due.filter(d => (states.get(d.id)?.sent_count ?? 0) < MAX_ASKS_PER_ITEM);
-      if (!items.length) { out.skipped++; continue; }
+      const allNotices = await deps.ledger.invoiceNotices(ws, today);
+      const noticeStates = await deps.store.noticeStates(allNotices.map(n => n.invoiceId));
+      const notices = allNotices.filter(n => {
+        const sent = noticeStates.find(s => s.invoice_id === n.invoiceId && s.kind === n.kind)?.sent_count ?? 0;
+        return sent < (n.kind === 'closed' ? 1 : MAX_ASKS_PER_ITEM);
+      });
+      if (!items.length && !notices.length) { out.skipped++; continue; }
       const firstEver = !last;
-      const text = composeReminder(items, first(c.name), today, firstEver);
+      const nm = first(c.name);
+      const parts = [items.length ? composeReminder(items, nm, today, false) : '', notices.length ? composeNotices(notices, nm, today) : ''].filter(Boolean);
+      const text = parts.join('\n\n') + (firstEver ? `\n\n${optOutNote}` : '');
       out.messages.push({ phone: c.phone, text });
       if (opts.dry) continue;
       await deps.messenger.sendText(c.phone, text);
       const asked = items.slice(0, MAX_ITEMS_PER_MESSAGE).map(i => ({ id: i.id, workspaceId: ws.workspaceId }));
-      await deps.store.markReminded(asked, c.phone, new Date(nowMs).toISOString());
+      const at = new Date(nowMs).toISOString();
+      if (asked.length) await deps.store.markReminded(asked, c.phone, at);
+      const told = notices.slice(0, MAX_NOTICES_PER_MESSAGE).map(n => ({ invoiceId: n.invoiceId, kind: n.kind, workspaceId: ws.workspaceId }));
+      if (told.length) await deps.store.markNoticed(told, c.phone, at);
       await rememberInSession(deps.store, c.phone, text, nowMs).catch(() => undefined);
       out.sent++;
       await sleep(2500 + Math.floor(Math.random() * 2500));
@@ -126,19 +152,23 @@ export async function handleReminderReply(deps: ReminderDeps, phone: string, nam
   const yes = YES.test(t), no = NO.test(t);
   if (!yes && !no) return undefined;
   const nowMs = deps.now?.() ?? Date.now();
-  const waiting = await deps.store.awaitingReminders(phone, new Date(nowMs - REPLY_WINDOW_MS).toISOString());
-  if (!waiting.length) return undefined;
-  // Só o último lote perguntado.
-  const batch = waiting.filter(w => w.last_sent_at === waiting[0].last_sent_at);
+  const since = new Date(nowMs - REPLY_WINDOW_MS).toISOString();
+  const [waitingTx, waitingInv] = await Promise.all([deps.store.awaitingReminders(phone, since), deps.store.awaitingNotices(phone, since)]);
+  if (!waitingTx.length && !waitingInv.length) return undefined;
+  // Só o último lote perguntado (lançamentos e faturas mandados na mesma mensagem têm o mesmo horário).
+  const latest = [...waitingTx.map(w => w.last_sent_at ?? ''), ...waitingInv.map(w => w.last_sent_at ?? '')].sort().at(-1);
+  const batch = waitingTx.filter(w => w.last_sent_at === latest);
+  const batchInv = waitingInv.filter(w => w.last_sent_at === latest);
   if (no) return `Tranquilo${nm ? `, ${nm}` : ''}! Amanhã eu te pergunto de novo. 😉`;
   const today = deps.today?.() ?? todayBR();
   const ws = await deps.ledger.resolve(phone, name ?? undefined);
+  const at = new Date(nowMs).toISOString();
   const due = new Map((await deps.ledger.due(ws, today)).map(d => [d.id, d]));
   const done: DueItem[] = [];
   let failed = 0;
   for (const w of batch) {
     const item = due.get(w.transaction_id);
-    if (!item) { await deps.store.markAnswered([w.transaction_id], new Date(nowMs).toISOString()); continue; }
+    if (!item) { await deps.store.markAnswered([w.transaction_id], at); continue; }
     try {
       await deps.ledger.confirm(ws, item.id, today);
       done.push(item);
@@ -147,10 +177,26 @@ export async function handleReminderReply(deps: ReminderDeps, phone: string, nam
       deps.log?.({ event: 'reminder_confirm_failed', message: e instanceof Error ? e.message : 'unknown' });
     }
   }
-  await deps.store.markAnswered(done.map(d => d.id), new Date(nowMs).toISOString());
-  if (!done.length && failed) return 'Não consegui dar baixa agora. Tenta de novo daqui a pouco, ou dá uma olhada no dashboard. 🙏';
-  if (!done.length) return `Já estava tudo certo por aqui${nm ? `, ${nm}` : ''}! 😉`;
-  const list = done.map(d => `${d.description} (${brl(Math.round(d.amount * 100))})`).join(', ');
+  await deps.store.markAnswered(done.map(d => d.id), at);
+  const paid: InvoiceNotice[] = [];
+  if (batchInv.length) {
+    const open = new Map((await deps.ledger.invoiceNotices(ws, today)).filter(n => n.kind === 'due').map(n => [n.invoiceId, n]));
+    for (const w of batchInv) {
+      const inv = open.get(w.invoice_id);
+      if (!inv) { await deps.store.markNoticeAnswered([{ invoiceId: w.invoice_id, kind: 'due' }], at); continue; }
+      try {
+        await deps.ledger.payInvoice(ws, inv.invoiceId, today);
+        await deps.store.markNoticeAnswered([{ invoiceId: inv.invoiceId, kind: 'due' }], at);
+        paid.push(inv);
+      } catch (e) {
+        failed++;
+        deps.log?.({ event: 'invoice_pay_failed', message: e instanceof Error ? e.message : 'unknown' });
+      }
+    }
+  }
+  if (!done.length && !paid.length && failed) return 'Não consegui dar baixa agora. Tenta de novo daqui a pouco, ou dá uma olhada no dashboard. 🙏';
+  if (!done.length && !paid.length) return `Já estava tudo certo por aqui${nm ? `, ${nm}` : ''}! 😉`;
+  const list = [...done.map(d => `${d.description} (${brl(Math.round(d.amount * 100))})`), ...paid.map(p => `fatura do ${p.cardName} (${brl(Math.round(p.amount * 100))})`)].join(', ');
   return `Boa${nm ? `, ${nm}` : ''}! Dei baixa em ${list}. 🎉${failed ? ' Um deles não consegui agora, tenta de novo daqui a pouco.' : ''}`;
 }
 

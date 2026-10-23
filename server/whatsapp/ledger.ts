@@ -1,4 +1,5 @@
 import { CATEGORIES } from '../../shared/v2/contracts.js';
+import { cardKey, findCard, invoiceFor } from '../../shared/v2/cards.js';
 
 /**
  * Ponte entre o agente e o Financial Core (as mesmas tabelas que o dashboard lê).
@@ -12,14 +13,26 @@ import { CATEGORIES } from '../../shared/v2/contracts.js';
 
 export type Workspace = { userId: string; workspaceId: string; accountId: string };
 export type Entry = { id: string; type: 'receita' | 'despesa'; amount: number; description: string; date: string; category?: string };
-export type Snapshot = { initialBalanceCents: number; transactions: Entry[]; /** Categorias do usuário além das padrão do agente. */ customCategories: string[]; /** Lançamento criado mais recentemente (a que "isso" se refere). */ lastRecordId?: string };
-export type Changes = { create: Entry[]; update: Entry[]; remove: string[] };
+export type CardRow = { id: string; name: string; closingDay: number; dueDay: number };
+/** Compra no cartão feita nesta mensagem. `cardName` ausente = o usuário não disse o cartão. */
+export type CardPurchase = { id: string; amount: number; description: string; date: string; category?: string; installments: number; cardName?: string };
+export type CardUpsert = { name: string; closingDay: number; dueDay: number };
+/** O que aconteceu com o cartão ao gravar: compras que ficaram esperando o cadastro e as que foram encaixadas numa fatura. */
+export type ApplyResult = { waitingCard: number; placed: { count: number; total: number; dueDates: string[]; cardName: string } | null };
+/** Aviso de fatura: "fechou" (uma vez) ou "vence" (até 3 vezes, com pergunta se já pagou). */
+export type InvoiceNotice = { invoiceId: string; kind: 'closed' | 'due'; cardName: string; amount: number; closingDate: string; dueDate: string };
+export type Snapshot = { cards?: CardRow[]; initialBalanceCents: number; transactions: Entry[]; /** Categorias do usuário além das padrão do agente. */ customCategories: string[]; /** Lançamento criado mais recentemente (a que "isso" se refere). */ lastRecordId?: string };
+export type Changes = { create: Entry[]; update: Entry[]; remove: string[]; cardUpserts?: CardUpsert[]; cardPurchases?: CardPurchase[] };
 
 export interface Ledger {
   /** Acha (ou cria) a conta do número. Cada número tem seu workspace; criar a conta é o que o faz aparecer no login do dashboard. */
   resolve(phone: string, name?: string): Promise<Workspace>;
   load(ws: Workspace): Promise<Snapshot>;
-  apply(ws: Workspace, changes: Changes, key: string): Promise<void>;
+  apply(ws: Workspace, changes: Changes, key: string): Promise<ApplyResult | void>;
+  /** Faturas que fecharam ou venceram e ainda não foram pagas. */
+  invoiceNotices(ws: Workspace, today: string): Promise<InvoiceNotice[]>;
+  /** Paga a fatura (sai da conta principal) na data informada. */
+  payInvoice(ws: Workspace, invoiceId: string, date: string): Promise<void>;
   /** Lançamentos previstos que já deveriam ter acontecido (data prevista até hoje, últimos 30 dias), ainda sem baixa. */
   due(ws: Workspace, today: string): Promise<DueItem[]>;
   /** "Dar baixa": marca o lançamento previsto como realizado na data informada. */
@@ -62,6 +75,12 @@ export function diffEntries(before: Entry[], after: Entry[]): Changes {
   }
   for (const e of before) if (!seen.has(e.id)) changes.remove.push(e.id);
   return changes;
+}
+
+/** Cartões novos ou com dias alterados nesta mensagem. */
+export function diffCards(before: { name: string; closingDay: number; dueDay: number }[], after: { name: string; closingDay: number; dueDay: number }[]): CardUpsert[] {
+  const old = new Map(before.map(c => [cardKey(c.name), c]));
+  return after.filter(c => { const o = old.get(cardKey(c.name)); return !o || o.closingDay !== c.closingDay || o.dueDay !== c.dueDay; }).map(c => ({ name: c.name, closingDay: c.closingDay, dueDay: c.dueDay }));
 }
 
 type Fetch = typeof fetch;
@@ -153,13 +172,81 @@ export class SupabaseLedger implements Ledger {
     await this.rpc('finance_confirm_transaction', { target_transaction_id: transactionId, target_workspace_id: ws.workspaceId, target_effective_date: effectiveDate });
   }
 
+  private async cardRows(workspaceId: string): Promise<CardRow[]> {
+    const rows = await this.rest<{ id: string; name: string; closing_day: number; due_day: number }[]>(`finance_cards?workspace_id=eq.${workspaceId}&status=eq.active&select=id,name,closing_day,due_day&order=created_at.asc&limit=20`);
+    return rows.map(r => ({ id: r.id, name: r.name, closingDay: r.closing_day, dueDay: r.due_day }));
+  }
+
+  async invoiceNotices(ws: Workspace, today: string): Promise<InvoiceNotice[]> {
+    const back = (n: number) => new Date(Date.parse(`${today}T12:00:00Z`) - n * 86_400_000).toISOString().slice(0, 10);
+    const cols = 'id,card_id,amount,status,closing_date,due_date';
+    type Inv = { id: string; card_id: string; amount: number | string; status: string; closing_date: string; due_date: string };
+    const [closing, due, cards] = await Promise.all([
+      this.rest<Inv[]>(`finance_invoices?workspace_id=eq.${ws.workspaceId}&status=neq.paid&amount=gt.0&closing_date=lte.${today}&closing_date=gte.${back(3)}&select=${cols}&limit=20`),
+      this.rest<Inv[]>(`finance_invoices?workspace_id=eq.${ws.workspaceId}&status=in.(planned,overdue)&amount=gt.0&due_date=lte.${today}&due_date=gte.${back(30)}&select=${cols}&order=due_date.asc&limit=20`),
+      this.cardRows(ws.workspaceId),
+    ]);
+    const names = new Map(cards.map(c => [c.id, c.name]));
+    const mk = (kind: 'closed' | 'due') => (i: Inv): InvoiceNotice => ({ invoiceId: i.id, kind, cardName: names.get(i.card_id) ?? 'cartão', amount: Number(i.amount), closingDate: i.closing_date, dueDate: i.due_date });
+    return [...closing.map(mk('closed')), ...due.map(mk('due'))];
+  }
+
+  async payInvoice(ws: Workspace, invoiceId: string, date: string) {
+    await this.rpc('finance_pay_invoice', { target_invoice_id: invoiceId, target_workspace_id: ws.workspaceId, target_account_id: ws.accountId, target_payment_date: date, target_idempotency_key: `wa-invoice:${invoiceId}` });
+  }
+
+  /** Grava cartões e compras no cartão. Compra sem cartão cadastrado fica esperando; quando o cartão aparece, ela é encaixada na fatura. */
+  private async applyCards(ws: Workspace, changes: Changes, key: string, catId: (n?: string) => string | null): Promise<ApplyResult> {
+    const result: ApplyResult = { waitingCard: 0, placed: null };
+    const upserts = changes.cardUpserts ?? [], purchases = changes.cardPurchases ?? [];
+    let cards = await this.cardRows(ws.workspaceId);
+    for (const u of upserts) {
+      const existing = cards.find(c => cardKey(c.name) === cardKey(u.name));
+      if (existing) await this.rest(`finance_cards?id=eq.${existing.id}&workspace_id=eq.${ws.workspaceId}`, { method: 'PATCH', body: JSON.stringify({ closing_day: u.closingDay, due_day: u.dueDay }), prefer: 'return=minimal' });
+      else await this.rest('finance_cards', { method: 'POST', body: JSON.stringify({ workspace_id: ws.workspaceId, name: u.name, closing_day: u.closingDay, due_day: u.dueDay }), prefer: 'return=minimal' });
+    }
+    if (upserts.length) cards = await this.cardRows(ws.workspaceId);
+    const place = async (p: { description: string; amount: number; date: string; installments: number; categoryId: string | null; idem: string }, card: CardRow) => {
+      await this.rpc('finance_create_card_purchase', { target_workspace_id: ws.workspaceId, target_account_id: ws.accountId, target_card_id: card.id, target_description: p.description, target_amount: p.amount, target_purchase_date: p.date, target_installments: p.installments, target_category_id: p.categoryId, target_idempotency_key: p.idem });
+    };
+    let i = 0;
+    for (const p of purchases) {
+      const card = findCard(cards, p.cardName);
+      const idem = `${key}:cp${i++}`;
+      if (card) await place({ description: p.description, amount: p.amount, date: p.date, installments: p.installments, categoryId: catId(p.category), idem }, card);
+      else {
+        await this.rest('whatsapp_card_pending?on_conflict=workspace_id,idempotency_key', { method: 'POST', body: JSON.stringify({ workspace_id: ws.workspaceId, card_name: p.cardName ?? null, description: p.description, amount: p.amount, purchase_date: p.date, installments: p.installments, category_id: catId(p.category), idempotency_key: idem }), prefer: 'resolution=ignore-duplicates,return=minimal' });
+        result.waitingCard++;
+      }
+    }
+    // Encaixa o que estava esperando: compra com o nome do cartão que acabou de existir, ou sem nome quando só há um cartão.
+    if (cards.length && (upserts.length || purchases.length)) {
+      const waiting = await this.rest<{ id: string; card_name: string | null; description: string; amount: number | string; purchase_date: string; installments: number; category_id: string | null; idempotency_key: string }[]>(`whatsapp_card_pending?workspace_id=eq.${ws.workspaceId}&select=*&order=created_at.asc&limit=30`);
+      const target = upserts.length === 1 ? cards.find(c => cardKey(c.name) === cardKey(upserts[0].name)) : undefined;
+      let total = 0, count = 0, name = '';
+      const dueDates = new Set<string>();
+      for (const w of waiting) {
+        const card = w.card_name ? findCard(cards, w.card_name) : (target ?? (cards.length === 1 ? cards[0] : undefined));
+        if (!card) continue;
+        await place({ description: w.description, amount: Number(w.amount), date: w.purchase_date, installments: w.installments, categoryId: w.category_id, idem: w.idempotency_key }, card);
+        await this.rest(`whatsapp_card_pending?id=eq.${w.id}`, { method: 'DELETE' });
+        total += Number(w.amount); count++; name = card.name;
+        dueDates.add(invoiceFor(card, w.purchase_date).dueDate);
+      }
+      if (count) result.placed = { count, total, dueDates: [...dueDates].sort(), cardName: name };
+      result.waitingCard = waiting.length - count;
+    }
+    return result;
+  }
+
   async load(ws: Workspace): Promise<Snapshot> {
-    const [summary, rows, cats] = await Promise.all([
+    const [summary, rows, cats, cardRows] = await Promise.all([
       this.rpc<{ opening_cents: number | string; net_cents: number | string }[]>('whatsapp_ledger_summary', { p_workspace: ws.workspaceId }),
       this.rest<{ id: string; type: 'income' | 'expense'; amount: number | string; description: string; effective_date: string | null; category_id: string | null; created_at: string }[]>(
         `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=eq.confirmed&select=id,type,amount,description,effective_date,category_id,created_at&order=effective_date.desc,created_at.desc&limit=${MAX_STATE_TRANSACTIONS * 3}`
       ),
-      this.categoryMap(ws.workspaceId),
+ this.categoryMap(ws.workspaceId),
+      this.cardRows(ws.workspaceId),
     ]);
     // Sem "embed" do PostgREST: finance_transactions tem duas chaves para finance_categories e a junção automática é ambígua (HTTP 300).
     const nameOf = new Map([...cats].map(([name, id]) => [id, name]));
@@ -177,14 +264,15 @@ export class SupabaseLedger implements Ledger {
     visible.reverse(); // do mais antigo para o mais novo
     const builtIn = new Set<string>(CATEGORIES);
     const customCategories = [...cats.keys()].filter(name => !builtIn.has(name) && name.length <= 30).slice(0, 40);
-    return { initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...(newest ? { lastRecordId: newest } : {}) };
+    return { cards: cardRows, initialBalanceCents: initialBalanceFor(opening, net, visible), transactions: visible, customCategories, ...(newest ? { lastRecordId: newest } : {}) };
   }
 
   async apply(ws: Workspace, changes: Changes, key: string) {
-    if (!changes.create.length && !changes.update.length && !changes.remove.length) return;
+    const hasCards = Boolean(changes.cardUpserts?.length || changes.cardPurchases?.length);
+    if (!changes.create.length && !changes.update.length && !changes.remove.length && !hasCards) return;
     let cats = await this.categoryMap(ws.workspaceId);
     // Categoria nova pedida pelo usuário: cria no workspace (aparece também no dashboard).
-    const wanted = [...new Set([...changes.create, ...changes.update].map(e => e.category).filter((c): c is string => Boolean(c) && !cats.has(c as string)))];
+    const wanted = [...new Set([...changes.create, ...changes.update, ...(changes.cardPurchases ?? [])].map(e => e.category).filter((c): c is string => Boolean(c) && !cats.has(c as string)))];
     if (wanted.length) {
       await this.rest(`finance_categories?on_conflict=workspace_id,name`, {
         method: 'POST',
@@ -230,6 +318,7 @@ export class SupabaseLedger implements Ledger {
     for (const id of changes.remove) {
       await this.rest(`finance_transactions?id=eq.${id}&workspace_id=eq.${ws.workspaceId}`, { method: 'DELETE' });
     }
+    if (hasCards) return this.applyCards(ws, changes, key, catId);
   }
 }
 
@@ -241,6 +330,14 @@ export class MemoryLedger implements Ledger {
   /** Previstos de teste por workspace. */
   planned = new Map<string, DueItem[]>();
   confirmed: { id: string; date: string }[] = [];
+  /** Cartões, compras esperando cartão e faturas de teste por workspace. */
+  cards = new Map<string, CardRow[]>();
+  cardPlaced: { workspaceId: string; cardName: string; purchase: CardPurchase }[] = [];
+  cardWaiting: { workspaceId: string; purchase: CardPurchase }[] = [];
+  invoices = new Map<string, InvoiceNotice[]>();
+  paidInvoices: { id: string; date: string }[] = [];
+  async invoiceNotices(ws: Workspace, today: string) { return (this.invoices.get(ws.workspaceId) ?? []).filter(n => !this.paidInvoices.some(p => p.id === n.invoiceId) && (n.kind === 'closed' ? n.closingDate <= today : n.dueDate <= today)); }
+  async payInvoice(_ws: Workspace, id: string, date: string) { this.paidInvoices.push({ id, date }); }
   async due(ws: Workspace, today: string) { return (this.planned.get(ws.workspaceId) ?? []).filter(i => i.expectedDate <= today && !this.confirmed.some(c => c.id === i.id)); }
   async confirm(_ws: Workspace, id: string, date: string) { this.confirmed.push({ id, date }); }
   private seq = 0;
@@ -264,9 +361,9 @@ export class MemoryLedger implements Ledger {
     const w = this.of(ws);
     const visible = w.entries.filter(e => agentCanSee(e)).slice(-MAX_STATE_TRANSACTIONS);
     const net = w.entries.reduce((s, e) => s + signed(e), 0);
-    return { initialBalanceCents: initialBalanceFor(w.opening, net, visible), transactions: visible.map(({ idem: _idem, ...e }: Entry & { idem?: string }) => structuredClone(e)), customCategories: [...(w.categories ?? [])], ...(visible.length ? { lastRecordId: (w.entries[w.entries.length - 1] as Entry).id } : {}) };
+    return { cards: structuredClone(this.cards.get(ws.workspaceId) ?? []), initialBalanceCents: initialBalanceFor(w.opening, net, visible), transactions: visible.map(({ idem: _idem, ...e }: Entry & { idem?: string }) => structuredClone(e)), customCategories: [...(w.categories ?? [])], ...(visible.length ? { lastRecordId: (w.entries[w.entries.length - 1] as Entry).id } : {}) };
   }
-  async apply(ws: Workspace, changes: Changes, key: string) {
+  async apply(ws: Workspace, changes: Changes, key: string): Promise<ApplyResult | void> {
     if (this.failNextApply) {
       this.failNextApply = false;
       throw new Error('LEDGER_DOWN');
@@ -285,5 +382,27 @@ export class MemoryLedger implements Ledger {
       if (at >= 0) w.entries[at] = { ...w.entries[at], ...e };
     }
     w.entries = w.entries.filter(x => !changes.remove.includes(x.id));
+    if (!changes.cardUpserts?.length && !changes.cardPurchases?.length) return;
+    const list = this.cards.get(ws.workspaceId) ?? [];
+    for (const u of changes.cardUpserts ?? []) {
+      const at = list.findIndex(c => cardKey(c.name) === cardKey(u.name));
+      if (at >= 0) list[at] = { ...list[at], ...u };
+      else list.push({ id: `card-${list.length + 1}`, ...u });
+    }
+    this.cards.set(ws.workspaceId, list);
+    for (const p of changes.cardPurchases ?? []) this.cardWaiting.push({ workspaceId: ws.workspaceId, purchase: structuredClone(p) });
+    const upserts = changes.cardUpserts ?? [];
+    const target = upserts.length === 1 ? list.find(c => cardKey(c.name) === cardKey(upserts[0].name)) : undefined;
+    let count = 0, total = 0, name = '';
+    const dueDates = new Set<string>();
+    for (const w of [...this.cardWaiting.filter(x => x.workspaceId === ws.workspaceId)]) {
+      const card = w.purchase.cardName ? findCard(list, w.purchase.cardName) : (target ?? (list.length === 1 ? list[0] : undefined));
+      if (!card) continue;
+      this.cardPlaced.push({ workspaceId: ws.workspaceId, cardName: card.name, purchase: w.purchase });
+      this.cardWaiting.splice(this.cardWaiting.indexOf(w), 1);
+      count++; total += w.purchase.amount; name = card.name;
+      dueDates.add(invoiceFor(card, w.purchase.date).dueDate);
+    }
+    return { waitingCard: this.cardWaiting.filter(x => x.workspaceId === ws.workspaceId).length, placed: count ? { count, total, dueDates: [...dueDates].sort(), cardName: name } : null };
   }
 }

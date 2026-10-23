@@ -1,3 +1,4 @@
+import {installmentsIn,findCard} from './cards.js';
 import {CATEGORIES,storedTransaction,goal,normalize,defaultPreferences,type Session,type Period,type ModelCall,type PendingOperation,type State} from './contracts.js';
 export const dateOffset=(date:string,days:number)=>new Date(Date.parse(date+'T12:00:00Z')+days*86400000).toISOString().slice(0,10);
 export const monthPeriod=(today:string,offset=0):Period=>{const d=new Date(today+'T12:00:00Z');const start=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+offset,1)),end=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+offset+1,0));return {start:start.toISOString().slice(0,10),end:end.toISOString().slice(0,10)};};
@@ -57,7 +58,7 @@ const squash=(s:string)=>normalize(s).replace(/[^a-z0-9]+/g,' ').trim();
 
 /** Every monetary-looking number in a text, in reais (BR formats, "3 mil", "2k"). Dates are ignored. */
 export function amountsIn(text:string):number[]{
- const t=text.replace(/\d{4}-\d{2}-\d{2}/g,' ').replace(/\b(?:dia|no dia|até o dia|ate o dia)\s+(?:[12]?\d|3[01])\b(?!\s*(?:reais|real|r\$|,\d))/gi,' ').replace(/\b\d{1,2}\s*(?:x|vezes)\b/gi,' ').replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g,' ');
+ const t=text.replace(/\d{4}-\d{2}-\d{2}/g,' ').replace(/\b(?:dia|no dia|até o dia|ate o dia)\s+(?:[12]?\d|3[01])\b(?!\s*(?:reais|real|r\$|,\d))/gi,' ').replace(/\b\d{1,2}\s*(?:x|vezes|parcelas?)\b/gi,' ').replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g,' ');
  const out:number[]=[];
  for(const m of t.matchAll(/(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)(\s*(?:mil\b|k\b))?/gi)){
   const raw=m[1];let v=raw.includes(',')?Number(raw.replace(/\./g,'').replace(',','.')):/^\d{1,3}(?:\.\d{3})+$/.test(raw)?Number(raw.replace(/\./g,'')):Number(raw);
@@ -124,17 +125,31 @@ export function normalizeCategory(raw:unknown,message:string,description:string,
  if(type==='receita'&&guess!=='Renda')return undefined;
  return guess;
 }
-export type NewEntry={type:'receita'|'despesa';amount:number;description:string;date:string;category?:string};
-function entryFrom(a:Record<string,unknown>,message:string,custom:readonly string[]=[]):NewEntry{
+export type NewEntry={type:'receita'|'despesa';amount:number;description:string;date:string;category?:string;card?:{name?:string;installments?:number}};
+function entryFrom(a:Record<string,unknown>,message:string,custom:readonly string[]=[],cards:State['cards']=[]):NewEntry{
  const e:NewEntry={type:a.type as NewEntry['type'],amount:a.amount as number,description:String(a.description),date:String(a.date)};
  const category=normalizeCategory(a.category,message,e.description,e.type,custom);if(category)e.category=category;
+ const raw=a.cartao as {nome?:string;parcelas?:number}|undefined;
+ if(raw&&e.type==='despesa'){
+  const said=typeof raw.nome==='string'?raw.nome.replace(/[^\p{L}\p{N} &'\-]/gu,' ').replace(/\s+/g,' ').trim().slice(0,30):'';
+  // O nome vale se o usuário o disse (nesta mensagem) ou se é um cartão já cadastrado.
+  let name:string|undefined;
+  if(said){const known=findCard(cards,said);if(known)name=known.name;else if(normalize(message).includes(normalize(said)))name=said;}
+  else name=findCard(cards)?.name; // sem nome: o único cartão cadastrado, se houver só um
+  const parsed=installmentsIn(message);
+  const installments=Math.max(raw.parcelas??1,1)>1?raw.parcelas!:parsed&&parsed>1?parsed:1;
+  e.card={...(name?{name}:{}),...(installments>1?{installments}:{})};
+ }
  return e;
 }
 function blockForEntry(e:NewEntry,evidence:string,ctx:PolicyContext):string|undefined{
  if(e.date>ctx.today)return 'FUTURE_DATE';
  if(e.date<dateOffset(ctx.today,-OLDEST_DAYS))return 'DATE_TOO_OLD';
  const {text}=backing(ctx);
- if(!hasAmount(text,e.amount))return 'AMOUNT_NOT_IN_MESSAGE';
+ const n=e.card?.installments??1;
+ if(n>1&&installmentsIn(text)!==n)return 'INSTALLMENTS_NOT_IN_MESSAGE';
+ // "3x de 100": o usuário disse o valor da parcela; o total é parcela × número de parcelas.
+ if(!hasAmount(text,e.amount)&&!(n>1&&amountsIn(text).some(v=>cents(v*n)===cents(e.amount))))return 'AMOUNT_NOT_IN_MESSAGE';
  if(!contains(text,evidence))return 'EVIDENCE_NOT_IN_MESSAGE';
  return undefined;
 }
@@ -158,10 +173,13 @@ export function decideCreate(call:ModelCall,ctx:PolicyContext):CreateDecision{
  if(ctx.risk)return {decision:'block',reason:'RISK_CONTEXT'};
  if(a.natureza!=='fato_ocorrido')return {decision:'block',reason:'NOT_A_FACT'};
  const items=call.name==='registrar_varios'?(a.lancamentos as Record<string,unknown>[]):[a];
- const entries=items.map(i=>entryFrom(i,backing(ctx).text,ctx.session.state.categories??[]));
+ const cards=ctx.session.state.cards??[];
+ const entries=items.map(i=>entryFrom(i,backing(ctx).text,ctx.session.state.categories??[],cards));
  for(let i=0;i<entries.length;i++){const reason=blockForEntry(entries[i],String(items[i].evidencia),ctx);if(reason)return {decision:'block',reason};}
+ // Mais de um cartão cadastrado e o usuário não disse qual: pergunta antes de lançar na fatura errada.
+ if(entries.some(e=>e.card&&!e.card.name)&&cards.length>1)return {decision:'block',reason:'CARD_UNSPECIFIED'};
  if(entries.length>1)return {decision:'confirm',reason:'MULTIPLE_ENTRIES',entries};
- const reason=confirmForEntry(entries[0],ctx);
+ const reason=confirmForEntry(entries[0],ctx)??((entries[0].card?.installments??1)>1?'INSTALLMENTS':undefined);
  if(reason)return {decision:'confirm',reason,entries};
  return ctx.viaAudio?{decision:'confirm',reason:'FROM_AUDIO',entries}:{decision:'execute',entries};
 }
@@ -182,6 +200,20 @@ export function decideGoal(call:ModelCall,ctx:PolicyContext):WriteDecision&{goal
  if(ctx.viaAudio)return {decision:'confirm',reason:'FROM_AUDIO',goal:parsed};
  if(!/\b(meta|objetivo|defina|definir|crie|criar|registre|registrar)\b/.test(normalize(ctx.message))||tentative(ctx.message))return {decision:'confirm',reason:'GOAL_NOT_EXPLICIT',goal:parsed};
  return {decision:'execute',goal:parsed};
+}
+/** cadastrar_cartao: o nome e os dois dias precisam estar no que o usuário disse (nesta mensagem ou na conversa recente). */
+export function decideCard(call:ModelCall,ctx:PolicyContext):WriteDecision&{card?:{name:string;closingDay:number;dueDay:number}}{
+ const a=call.arguments;
+ if(ctx.risk)return {decision:'block',reason:'RISK_CONTEXT'};
+ if(!contains(ctx.message,String(a.evidencia)))return {decision:'block',reason:'EVIDENCE_NOT_IN_MESSAGE'};
+ const closingDay=a.dia_fechamento as number,dueDay=a.dia_vencimento as number;
+ const digits=(n:number)=>new RegExp(`(^|[^0-9])0?${n}([^0-9]|$)`).test(ctx.message);
+ if(!digits(closingDay)||!digits(dueDay))return {decision:'block',reason:'CARD_DAYS_NOT_IN_MESSAGE'};
+ const name=String(a.nome).replace(/[^\p{L}\p{N} &'\-]/gu,' ').replace(/\s+/g,' ').trim().slice(0,30);
+ const recent=[ctx.message,...ctx.session.history.slice(-4).map(h=>h.content)].map(normalize).join(' ');
+ const key=normalize(name).replace(/\bcartao\b/g,' ').replace(/\s+/g,' ').trim();
+ if(!key||!recent.includes(key))return {decision:'block',reason:'CARD_NAME_NOT_IN_MESSAGE'};
+ return {decision:'execute',card:{name,closingDay,dueDay}};
 }
 /** Resolves the record an edit/deletion refers to. Exactly one match, or nothing is prepared. */
 /** The record the user most likely means by "isso", "esse valor", "o último": the one registered most recently. */
@@ -243,6 +275,9 @@ export function blockedMessage(reason:string|undefined):string{
   case 'CHANGE_NOT_IN_MESSAGE':return 'Não entendi a correção com segurança, então não alterei nada. Me diz qual lançamento e o valor ou dado certo?';
   case 'TARGET_AMBIGUOUS':return 'Há mais de um lançamento possível. Informe a descrição e a data ou o valor original para identificar um único registro.';
   case 'TARGET_NOT_FOUND':return 'Não encontrei esse lançamento. Pode me dizer a descrição e a data ou o valor original?';
+  case 'INSTALLMENTS_NOT_IN_MESSAGE':return 'Não ficou claro em quantas parcelas foi. Me diz o valor total e quantas vezes?';
+  case 'CARD_DAYS_NOT_IN_MESSAGE':return 'Não peguei os dias com certeza. Me diz de novo: que dia a fatura fecha e que dia vence?';
+  case 'CARD_NAME_NOT_IN_MESSAGE':return 'Qual é o nome desse cartão?';
   case 'INVALID_CHANGE':return 'O novo dado é inválido. Informe um valor positivo com até duas casas decimais ou uma data ISO válida.';
   default:return 'Não consegui confirmar o valor e o lançamento pela sua mensagem, então não registrei nada. Pode me dizer o valor e o que foi?';
  }
@@ -256,6 +291,7 @@ export function confirmLead(reason:string|undefined):string{
   case 'CONFIRM_FROM_PREVIOUS_MESSAGE':return 'Entendi!';
   case 'TENTATIVE_LANGUAGE':return 'Só pra ter certeza de que isso já aconteceu:';
   case 'MULTIPLE_AMOUNTS':return 'Vi mais de um valor na sua mensagem, então quero ter certeza:';
+  case 'INSTALLMENTS':return 'Compra parcelada, então confirmo com você:';
   case 'HIGH_VALUE':return 'É um valor alto, então confirmo com você:';
   case 'RELATIVE_DATE':return 'Só confirmando a data:';
   default:return '';
