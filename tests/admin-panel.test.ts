@@ -105,3 +105,68 @@ describe('resumo de consumo',()=>{
   expect(s.cost30d).toBe(10);
  });
 });
+
+describe('central de gestão (redesign)',()=>{
+ const get=async(url:string,over:Partial<AdminDeps>={})=>{const {handler}=setup(over);const r=res();await handler({method:'GET',url,headers:authed},r);return r;};
+ it('todas as telas abrem, sem estilo inline e com o mesmo menu',async()=>{
+  for(const v of ['/admin','/admin?v=usuarios','/admin?v=ia','/admin?v=problemas','/admin?v=config','/admin?v=turno&id=T1']){
+   const r=await get(v);expect(r.code).toBe(200);expect(r.body).not.toMatch(/style=/);expect(r.body).toContain('aria-label="Menu principal"');expect(r.body).toContain('src="/admin.js"');
+  }
+ });
+ it('usuários: bloquear pede confirmação e volta para a mesma tela',async()=>{
+  const r=await get('/admin?v=usuarios');
+  expect(r.body).toContain('data-confirm=');expect(r.body).toContain('action="/admin?v=usuarios"');expect(r.body).toContain('Bloquear');expect(r.body).toContain('Autorizar');
+ });
+ it('ação feita na tela de usuários mostra o resultado nela',async()=>{
+  const {handler,run}=setup();const r=res();await handler({method:'POST',url:'/admin?v=usuarios',headers:authed,body:{action:'block',phone:'5511911110000'}},r);
+  expect(run).toHaveBeenCalledWith('bloquear 5511911110000');expect(r.body).toContain('Autorizado.');expect(r.body).toContain('data-table');
+ });
+ it('sem preço: custo aparece como indisponível, nunca como zero',async()=>{
+  const r=await get('/admin?v=ia');
+  expect(r.body).toContain('Custo indisponível — preços não configurados.');expect(r.body).not.toContain('US$ 0');
+ });
+ it('com preço: mostra custo estimado',async()=>{
+  const r=await get('/admin?v=ia',{price:{inputPerMTok:2,outputPerMTok:8}});
+  expect(r.body).toContain('Custo estimado em 30 dias');expect(r.body).not.toContain('preços não configurados');
+ });
+ it('dias antes do registro aparecem como "sem registro"',async()=>{
+  const r=await get('/admin');
+  expect(r.body).toContain('Sem registro');expect(r.body).toContain('sem registro');
+ });
+ it('visão geral destaca erros recentes e quem está pendente',async()=>{
+  const r=await get('/admin');
+  expect(r.body).toContain('Operando, com erros nesta semana');expect(r.body).toContain('Pessoas que precisam de você');expect(r.body).toContain('aguardando');
+ });
+ it('problemas: filtros por tipo e detalhes técnicos expansíveis',async()=>{
+  const r=await get('/admin?v=problemas');
+  expect(r.body).toContain('data-kind-filter="erro"');expect(r.body).toContain('<details');expect(r.body).toContain('registrar_transacao');
+ });
+ it('lista de problemas não mostra o telefone inteiro de quem não tem nome',async()=>{
+  const r=await get('/admin?v=problemas',{source:{contacts:async()=>[],usageSince:async()=>[],problemTurns:async()=>[turn('T1')],turn:async()=>null}});
+  expect(r.body).toContain('•••••-0000');expect(r.body).not.toContain('91111-0000');
+ });
+ it('configuração mostra o estado real, sem segredos',async()=>{
+  const r=await get('/admin?v=config');
+  expect(r.body).toContain('Não configurado');expect(r.body).not.toContain(PASS);
+ });
+});
+
+describe('resumo diário',()=>{
+ it('30 dias, marcando o que veio antes do registro',()=>{
+  const s=summarize([c('1','authorized')],[u('1',1),u('1',2,{status:'error',error_code:'X'})],NOW);
+  expect(s.daily).toHaveLength(30);
+  expect(s.daily.filter(d=>!d.tracked).length).toBeGreaterThan(0);
+  const today=s.daily[s.daily.length-1]!;expect(today.messages).toBe(2);expect(today.errors).toBe(1);expect(today.input).toBe(2000);
+  expect(s.messagesPrev7).toBeUndefined();
+  expect(s.activePeople7d).toBe(1);expect(s.errors1d).toBe(1);
+ });
+ it('compara com a semana anterior só quando o registro cobre o período',()=>{
+  const later=Date.parse('2026-11-20T12:00:00Z');
+  const s=summarize([c('1','authorized')],[u('1',1),{...u('1',1),created_at:new Date(later-10*86_400_000).toISOString()}],later);
+  expect(s.messagesPrev7).toBe(1);
+ });
+ it('agrupa por modelo',()=>{
+  const s=summarize([],[u('1',1,{model:'a'}),u('1',2,{model:'a'}),u('1',3,{model:null})],NOW);
+  expect(s.models[0]).toEqual({model:'a',messages:2,tokens:2200});
+ });
+});
