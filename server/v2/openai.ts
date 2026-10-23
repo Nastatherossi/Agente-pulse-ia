@@ -6,7 +6,7 @@ import {toolSchemas,type Provider,type ModelMessage,type Session,type ModelResul
 const descriptions:Record<keyof typeof toolSchemas,string>={
  simular_compra:'Calcula impacto hipotético de uma compra ou gasto; nunca registra despesa.',
  consultar_saldo:'Saldo consolidado em centavos.',
- registrar_transacao:'Propõe registrar UM gasto ou receita que o usuário afirma já ter acontecido. natureza="fato_ocorrido" só para fatos realizados; evidencia = trecho literal da mensagem atual que contém o valor. O código decide se registra, pede confirmação ou recusa.',
+ registrar_transacao:'Propõe registrar UM gasto ou receita que o usuário afirma já ter acontecido. natureza="fato_ocorrido" só para fatos realizados; evidencia = trecho literal da mensagem atual que contém o valor. Compra no crédito: preencha cartao (nome se o usuário disse; parcelas se parcelou). O código decide se registra, pede confirmação ou recusa.',
  registrar_varios:'Propõe registrar de 2 a 5 lançamentos citados na mesma mensagem (ex.: "40 de Uber e 20 de café"), cada um com evidencia literal. Sempre gera um pedido de confirmação ao usuário.',
  propor_edicao_transacao:'Propõe corrigir valor, descrição, categoria ou data de um lançamento existente. Identifique o alvo por transacao_id (de listar_transacoes) ou por descricao/valor/data originais. Nunca altera direto: gera pedido de confirmação.',
  propor_exclusao_transacao:'Propõe excluir um lançamento existente, identificado como em propor_edicao_transacao. Nunca exclui direto: gera pedido de confirmação.',
@@ -16,6 +16,7 @@ const descriptions:Record<keyof typeof toolSchemas,string>={
  consultar_gastos_categoria:'Total e registros de despesas de uma categoria no período.',
  projetar_despesas:'Estimativa calculada pelo core: média diária até asOf projetada até o fim do período.',
  atualizar_preferencias:'Altera apenas preferências de comunicação pedidas explicitamente; envie só os campos alterados (ou redefinir=true) e a evidencia literal. Não inferir personalidade.',
+ cadastrar_cartao:'Cadastra (ou atualiza) um cartão de crédito quando o usuário diz o nome, o dia que a fatura fecha e o dia que vence. Só com os três dados ditos por ele; evidencia = trecho literal da mensagem.',
  definir_objetivo:'Cria uma meta financeira pedida explicitamente, com valor dito pelo usuário. Substituir meta existente gera pedido de confirmação.'
 };
 type JsonSchema={[key:string]:unknown};

@@ -1,3 +1,4 @@
+import {cardKey} from './cards.js';
 import {financialState,goal,storedTransaction,validateCall,normalize,defaultPreferences,pendingOperation,type State,type Call,type Period,type PendingOperation} from './contracts.js';
 const cents=(n:number)=>Math.round(n*100);
 export const initialState=():State=>({initialBalanceCents:250000,transactions:[],preferences:defaultPreferences()});
@@ -29,8 +30,10 @@ export class FinancialCoreV2 {
   if(op.kind==='create'){
    // All-or-nothing: every item is validated and capacity checked before anything is written.
    const items=op.items!.map(item=>storedTransaction.parse({...item,id:crypto.randomUUID()}));
-   if(this.state.transactions.length+items.length>300)throw new Error('SESSION_FULL');
-   this.state.transactions.push(...items);
+   const cardItems=items.filter(i=>i.card),plain=items.filter(i=>!i.card);
+   if(this.state.transactions.length+plain.length>300||(this.state.cardPurchases?.length??0)+cardItems.length>20)throw new Error('SESSION_FULL');
+   this.state.transactions.push(...plain);
+   if(cardItems.length)this.state.cardPurchases=[...(this.state.cardPurchases??[]),...cardItems];
    const result={operationId:op.id,created:items,balanceCents:balanceCents(this.state)};this.completed.set(op.id,{payload:JSON.stringify(op),result});return structuredClone(result);
   }
   if(op.kind==='goal'){if(JSON.stringify(this.state.goal)!==JSON.stringify(op.before)||!op.after)throw new Error('STALE_CONFIRMATION');this.state.goal=goal.parse(op.after);}
@@ -44,7 +47,13 @@ export class FinancialCoreV2 {
   const a=call.arguments;let result:unknown;
   switch(call.name){
    case 'consultar_saldo':result={balanceCents:balanceCents(this.state),currency:'BRL'};break;
-   case 'registrar_transacao':{if(this.state.transactions.length>=300)throw new Error('SESSION_FULL');const transaction={...a,id:crypto.randomUUID()} as State['transactions'][number];this.state.transactions.push(transaction);result={transaction,balanceCents:balanceCents(this.state)};break;}
+   case 'registrar_transacao':{
+    const transaction={...a,id:crypto.randomUUID()} as State['transactions'][number];
+    // Compra no cartão não mexe no saldo: vai para a lista de compras da fatura, que o servidor grava no banco.
+    if(transaction.card){if((this.state.cardPurchases?.length??0)>=20)throw new Error('SESSION_FULL');this.state.cardPurchases=[...(this.state.cardPurchases??[]),transaction];}
+    else {if(this.state.transactions.length>=300)throw new Error('SESSION_FULL');this.state.transactions.push(transaction);}
+    result={transaction,balanceCents:balanceCents(this.state)};break;}
+   case 'cadastrar_cartao':{const card=a as unknown as NonNullable<State['cards']>[number];const key=cardKey(card.name);const rest=(this.state.cards??[]).filter(c=>cardKey(c.name)!==key);if(rest.length>=10)throw new Error('SESSION_FULL');this.state.cards=[...rest,card];result={card};break;}
    case 'listar_transacoes':{const p=a.period as Period|undefined;const items=this.state.transactions.filter(t=>(!a.type||t.type===a.type)&&(!p||(t.date>=p.start&&t.date<=p.end)));result={transactions:items.slice(-(a.limit as number)).reverse(),totalCount:items.length,returnedCount:Math.min(items.length,a.limit as number)};break;}
    case 'resumir_financas':result=summary(this.state,a.period as Period,a.type as 'receita'|'despesa'|undefined);break;
    case 'comparar_periodos':result=compare(this.state,a.periodA as Period,a.periodB as Period,a.metric as 'receitas'|'despesas'|'resultado');break;

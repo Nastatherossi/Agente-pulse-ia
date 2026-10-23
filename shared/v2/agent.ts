@@ -2,8 +2,10 @@ import {observeMemory,observeStyle,conversationTone,retrieveMemories,memoryConte
 import {z} from 'zod';
 import {createSession,sessionSchema,validateModelCall,brl,normalize,WRITE_TOOLS,type Session,type Trace,type Step,type Provider,type ModelMessage,type ModelCall,type PendingOperation} from './contracts.js';
 import {FinancialCoreV2} from './finance.js';
-import {isConfirmation,isCancellation,isClear,clearContext,describeOperation,type Intent} from './personality.js';
-import {categoryInReply,amountsIn,riskSignal,decideCreate,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
+import {isConfirmation,isRecordRequest,isCancellation,isClear,clearContext,describeOperation,type Intent} from './personality.js';
+import {findCard,type Card} from './cards.js';
+import {cardPhrase} from './personality.js';
+import {categoryInReply,amountsIn,riskSignal,decideCreate,decideCard,decidePreferences,decideGoal,prepareChange,goalOperation,createOperation,blockedMessage,confirmLead,type PolicyContext} from './policy.js';
 import {groundedText,withoutNumbers,asksToConfirmInText} from './grounding.js';
 /** Tool errors the model can fix by itself: the error (with the schema message) goes back to it for another try. */
 const RETRYABLE=new Set(['VALIDATION_FAILED','UNKNOWN_TOOL']);
@@ -11,19 +13,23 @@ export const LIMITS={steps:4,tools:8,timeoutMs:35000,tokens:30000};
 export const messageHash=async(text:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))).map(n=>n.toString(16).padStart(2,'0')).join('');
 export const errorMessage=(code:string)=>({OPENAI_AUTH_FAILED:'A chave OpenAI não foi aceita. Verifique a configuração do laboratório.',OPENAI_QUOTA_EXCEEDED:'A OpenAI informou falta de créditos ou limite de uso.',OPENAI_RATE_LIMITED:'A OpenAI está limitando requisições. Aguarde antes de tentar de novo.',MODEL_INCOMPATIBLE:'O modelo não aceitou o contrato de ferramentas.',OPENAI_TIMEOUT:'A OpenAI não respondeu no prazo.',REAL_AI_LOCKED:'IA real bloqueada na configuração do laboratório.',INVALID_SESSION:'Esta sessão perdeu a validade. Inicie uma nova sessão.',STEP_LIMIT:'Parei no limite de etapas. Tente uma pergunta mais específica.',TOKEN_LIMIT:'Parei no limite de consumo desta interação.',LOOP_DETECTED:'A consulta se repetiu. Parei para evitar um loop.'} as Record<string,string>)[code]||'Não consegui concluir esta interação. Nenhum sucesso de ferramenta foi inventado.';
 /** live=true: the data is the user's real ledger (WhatsApp), so lab wording ("fictício", "simulada") is dropped. */
-function readable(step:Step,detail:Session['state']['preferences']['detail'],live=false,name?:string):string {
+/** Pergunta leve, no mesmo recibo, quando o cartão da compra ainda não está cadastrado. */
+function cardAsk(t:{card?:{name?:string}}){return t.card?.name?`Vamos cadastrar o ${t.card.name}? Se você me contar que dia ele fecha e qual dia vence, deixo tudo organizado na fatura certa. 😉`:'Vamos cadastrar esse cartão? Se você me contar o nome, que dia ele fecha e qual dia vence, deixo tudo organizado na fatura certa. 😉';}
+function readable(step:Step,detail:Session['state']['preferences']['detail'],live=false,name?:string,cards:readonly Card[]=[]):string {
  const hi=name?`Pronto, ${name}!`:'Pronto!';
- const noted=(t:any)=>`${t.description} (${brl(Math.round(t.amount*100))}${t.category?`, ${t.category}`:''})`;
+ const noted=(t:any)=>`${t.description} (${brl(Math.round(t.amount*100))}${t.category?`, ${t.category}`:''})${cardPhrase(t,cards)}`;
+ const asks=(list:any[])=>{const unknown=list.filter(t=>t.card&&!findCard(cards,t.card.name));return unknown.length?'\n\n'+cardAsk(unknown[0]):'';};
  if(step.status!=='success')return step.error?.message||'Ferramenta não executada.';
  const r=step.result as Record<string,any>;
  switch(step.name){
   case 'consultar_saldo':return `Seu saldo ${live?'':'fictício '}é ${brl(r.balanceCents)}.`;
-  case 'simular_compra':return `Simulação: ${brl(r.availableCents)} disponíveis (${r.basis}) − ${brl(r.purchaseCents)} da compra = ${brl(r.remainingCents)} restantes. Nenhuma despesa registrada.`;
+  case 'simular_compra':return `Simulação: ${brl(r.availableCents)} disponíveis (${live?String(r.basis).replace('saldo fictício da sessão','seu saldo atual'):r.basis}) − ${brl(r.purchaseCents)} da compra = ${brl(r.remainingCents)} restantes. Nenhuma despesa registrada.`;
   case 'editar_transacao':return `${hi} Já corrigi o lançamento.`;
   case 'excluir_transacao':return `${hi} Apaguei o lançamento.`;
   case 'alterar_objetivo':return `${hi} Meta atualizada.`;
-  case 'registrar_confirmado':return `${hi} Anotei ${r.created.map(noted).join('; ')}.`;
-  case 'registrar_transacao':return `${hi} Anotei ${noted(r.transaction)}.`;
+  case 'registrar_confirmado':return `${hi} Anotei ${r.created.map(noted).join('; ')}.${asks(r.created)}`;
+  case 'registrar_transacao':return `${hi} Anotei ${noted(r.transaction)}.${asks([r.transaction])}`;
+  case 'cadastrar_cartao':return `${hi} Cartão ${r.card.name} cadastrado: fecha dia ${r.card.closingDay} e vence dia ${r.card.dueDay}.`;
   case 'listar_transacoes':return r.totalCount?`${r.totalCount} transações no filtro.\n`+r.transactions.map((t:any)=>`${t.date} · ${t.description} · ${t.type==='receita'?'+':'−'} ${brl(Math.round(t.amount*100))} · ${t.category||'sem categoria'}`).join('\n'):'Nenhuma transação neste filtro.';
   case 'resumir_financas':return `${r.period.start} a ${r.period.end}: receitas ${brl(r.incomeCents)}, despesas ${brl(r.expenseCents)} e resultado ${brl(r.netCents)} (${r.count} registros).`+(r.categories.length?'\n'+r.categories.filter((c:any)=>c.expenseCents).map((c:any)=>`${c.category}: ${brl(c.expenseCents)} (${c.expenseSharePercent}%).`).join('\n'):'')+(r.limitedData?'\nOs dados registrados ainda são limitados; isso não descreve toda a sua vida financeira.':'');
   case 'comparar_periodos':return `Comparando ${r.metric}: ${r.periodA.start}–${r.periodA.end}: ${brl(r.valueACents)}; ${r.periodB.start}–${r.periodB.end}: ${brl(r.valueBCents)}. Diferença (A − B): ${brl(r.differenceCents)}. ${r.percentChange===null?'Variação percentual indefinida porque o valor de B é zero.':`Variação: ${r.percentChange}%.`}`+(r.limitedData?' A amostra registrada é limitada.':'');
@@ -35,7 +41,7 @@ function readable(step:Step,detail:Session['state']['preferences']['detail'],liv
  }
 }
 /** Tools whose success means data changed this turn: the answer is the code-written receipt, nothing else. */
-const DATA_WRITES=new Set(['registrar_transacao','registrar_confirmado','editar_transacao','excluir_transacao','alterar_objetivo','definir_objetivo','atualizar_preferencias']);
+const DATA_WRITES=new Set(['cadastrar_cartao','registrar_transacao','registrar_confirmado','editar_transacao','excluir_transacao','alterar_objetivo','definir_objetivo','atualizar_preferencias']);
 /** Plain lookups: the code-written facts answer the question; model commentary is not appended (discreet by default). */
 const LOOKUPS=new Set(['consultar_saldo','listar_transacoes','consultar_gastos_categoria']);
 export type AnswerContext={message?:string;history?:string[];live?:boolean;name?:string};
@@ -45,7 +51,7 @@ export type AnswerContext={message?:string;history?:string[];live?:boolean;name?
  */
 export function renderAnswer(steps:Step[],draft:string,session:Session,context:AnswerContext={}):string {
  const success=steps.filter(s=>s.status==='success');
- const facts=success.map(s=>readable(s,session.state.preferences.detail,context.live,context.name)).join('\n\n');
+ const facts=success.map(s=>readable(s,session.state.preferences.detail,context.live,context.name,session.state.cards)).join('\n\n');
  const wroteData=success.some(s=>DATA_WRITES.has(s.name));
  const lookupOnly=success.length>0&&success.every(s=>LOOKUPS.has(s.name));
  const grounding={message:context.message||'',history:context.history??session.history.filter(h=>h.role==='user').map(h=>h.content),steps,wroteData};
@@ -74,7 +80,7 @@ function mergeCreates(calls:{id:string;name:string;arguments:unknown}[]){
  return [merged,...calls.filter(c=>!creates.includes(c))];
 }
 export async function runConversation(provider:Provider,sessionInput:Session|undefined,message:string,requestId:string,today:string,options:{failTools?:boolean;limits?:Partial<typeof LIMITS>;/** "audio": the message is a voice-note transcript (see audio.ts). */source?:'text'|'audio';/** true: state comes from the user's real ledger, not the lab simulation (drops "fictício" wording). */realData?:boolean;/** First name, used to talk to the user in confirmations. */userName?:string}={}){
- const say={name:options.userName,today},session=structuredClone(sessionSchema.parse(sessionInput||createSession())),limits={...LIMITS,...options.limits},started=performance.now(),steps:Step[]=[];
+ const session=structuredClone(sessionSchema.parse(sessionInput||createSession())),say={name:options.userName,today,cards:session.state.cards},limits={...LIMITS,...options.limits},started=performance.now(),steps:Step[]=[];
  const base={requestId,mode:provider.mode,durationMs:0};
  const hash=await messageHash(message),previous=session.lastRequests.find(r=>r.id===requestId);
  if(previous){if(previous.messageHash!==hash)throw new Error('IDEMPOTENCY_CONFLICT');return {session,trace:previous.trace as Trace};}
@@ -95,13 +101,13 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  // recorded (the model had asked in plain text). Otherwise "sim" after a receipt would propose a duplicate.
  const lastTrace=session.lastRequests.at(-1)?.trace as Trace|undefined;
  const previousTurnWrote=Boolean(lastTrace?.steps?.some(s=>s.status==='success'&&DATA_WRITES.has(s.name)));
- const previousUserMessage=previousTurnWrote?undefined:[...session.history].reverse().find(h=>h.role==='user')?.content;
- const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn,previousUserMessage,affirmation:isConfirmation(message),viaAudio:options.source==='audio'});
+ const previousUserMessage=previousTurnWrote?undefined:[...session.history].reverse().filter(h=>h.role==='user').slice(0,2).find(h=>amountsIn(h.content).length>0)?.content;
+ const policyContext=():PolicyContext=>({message,today,session:{...session,state:core.snapshot()},risk,repeatedMessage,writesThisTurn,previousUserMessage,affirmation:isConfirmation(message)||isRecordRequest(message),viaAudio:options.source==='audio'});
  const hold=(op:PendingOperation,text:string,label:Intent)=>{session.memory.operation=op;pendingAnswer=text;confirmation='pending';status='clarification';kind=label;};
  const refuse=(step:Step,reason:string|undefined)=>{step.status='blocked';step.error={code:'WRITE_NOT_AUTHORIZED',reason,message:blockedMessage(reason)};if(reason==='RISK_CONTEXT')return;
   // "sim" right after a receipt: the model tried to record it again. Nothing to do; say it is already there.
   if(previousTurnWrote&&isConfirmation(message)){blockedAnswer='Já está registrado. Quer anotar mais alguma coisa?';return;}
-  blockedAnswer=blockedMessage(reason);status='clarification';};
+  blockedAnswer=reason==='CARD_UNSPECIFIED'?`Em qual cartão foi? Você tem: ${(session.state.cards??[]).map(c=>c.name).join(', ')}.`:blockedMessage(reason);status='clarification';};
  const run=(name:string,args:Record<string,unknown>,step:Step,signature:string)=>{step.result=core.execute({id:step.id,name,arguments:args},`${requestId}:${signature}`);step.status='success';remember({name,arguments:args},session);};
  /** Model proposals are validated, then routed by the deterministic policy. Nothing is written because the model asked. */
  function handleWrite(call:ModelCall,step:Step,signature:string){
@@ -116,6 +122,11 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
    const r=prepareChange(call,ctx);
    if(r.operation){hold(r.operation,describeOperation(r.operation,undefined,say),'alteracao');step.status='blocked';step.error={code:'CONFIRMATION_REQUIRED',reason:'CHANGE_EXISTING_RECORD',message:'Aguardando confirmação explícita; nada foi alterado.'};return;}
    return refuse(step,r.reason);
+  }
+  if(call.name==='cadastrar_cartao'){
+   const d=decideCard(call,ctx);
+   if(d.decision==='execute'){run('cadastrar_cartao',{...d.card!},step,signature);return;}
+   return refuse(step,d.reason);
   }
   if(call.name==='atualizar_preferencias'){
    const d=decidePreferences(call,ctx);if(d.decision!=='execute')return refuse(step,d.reason);
@@ -205,7 +216,7 @@ export async function runConversation(provider:Provider,sessionInput:Session|und
  const success=steps.filter(s=>s.status==='success');
  if(command===undefined&&!risk&&!steps.length&&!pendingAnswer&&!directAnswer)observeStyle(session,message);
  let answer=directAnswer||pendingAnswer||blockedAnswer||renderAnswer(steps,draft,session,{message,history:session.history.filter(h=>h.role==='user').map(h=>h.content),live:options.realData,name:options.userName});
- if(status==='error'){answer=[success.map(s=>readable(s,session.state.preferences.detail,options.realData,options.userName)).join('\n\n'),errorMessage(errorCode||'EXECUTION_FAILED')].filter(Boolean).join('\n\n');if(session.memory.operation&&!pendingAnswer)session.memory.operation=undefined;}
+ if(status==='error'){answer=[success.map(s=>readable(s,session.state.preferences.detail,options.realData,options.userName,session.state.cards)).join('\n\n'),errorMessage(errorCode||'EXECUTION_FAILED')].filter(Boolean).join('\n\n');if(session.memory.operation&&!pendingAnswer)session.memory.operation=undefined;}
  // Trace label derived from what actually happened in the turn (no keyword classifier decides anything).
  const analytic=success.some(s=>['resumir_financas','comparar_periodos','projetar_despesas','simular_compra'].includes(s.name));
  kind=kind||(success.some(s=>DATA_WRITES.has(s.name)&&s.name!=='atualizar_preferencias')?'execucao':success.some(s=>s.name==='atualizar_preferencias')?'preferencias':analytic&&answer.length>success.map(s=>readable(s,session.state.preferences.detail,options.realData)).join('\n\n').length?'orientacao':success.length?'consulta':'conversa');
