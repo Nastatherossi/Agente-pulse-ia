@@ -34,6 +34,15 @@
     },
     "api/auth-sms-hook.js": {
       "maxDuration": 20
+    },
+    "api/reminders.js": {
+      "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/reminders",
+      "schedule": "0 12 * * *"
+    }
+  ]
 }

@@ -15,6 +15,8 @@ export type Contact = {
   name?: string | null;
   status: ContactStatus;
   owner_notified_at?: string | null;
+  /** false: a pessoa pediu para parar os lembretes. */
+  reminders_enabled?: boolean;
 };
 
 /** Só dígitos. Número brasileiro sem DDI (10 ou 11 dígitos) ganha o 55. Retorna undefined se não parecer um telefone. */

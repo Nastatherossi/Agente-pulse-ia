@@ -165,6 +165,32 @@ var SupabaseStore = class {
   async recordUsage(r) {
     await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
   }
+  async reminderStates(ids) {
+    if (!ids.length) return [];
+    return this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(",")})&select=*`);
+  }
+  async markReminded(items, phone, atIso) {
+    const have = new Map((await this.reminderStates(items.map((i) => i.id))).map((r) => [r.transaction_id, r.sent_count]));
+    await this.rest("whatsapp_reminders?on_conflict=transaction_id", {
+      method: "POST",
+      body: JSON.stringify(items.map((i) => ({ transaction_id: i.id, workspace_id: i.workspaceId, phone, sent_count: (have.get(i.id) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
+      prefer: "resolution=merge-duplicates,return=minimal"
+    });
+  }
+  awaitingReminders(phone, sinceIso) {
+    return this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
+  }
+  async markAnswered(ids, atIso) {
+    if (!ids.length) return;
+    await this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(",")})`, { method: "PATCH", body: JSON.stringify({ answered_at: atIso }), prefer: "return=minimal" });
+  }
+  async lastReminderAt(phone) {
+    const rows = await this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
+    return rows[0]?.last_sent_at ?? null;
+  }
+  async setRemindersEnabled(phone, enabled) {
+    await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify({ reminders_enabled: enabled }), prefer: "return=minimal" });
+  }
   async getSession(phone) {
     const rows = await this.rest(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&select=session,version&limit=1`);
     return rows[0] ?? null;

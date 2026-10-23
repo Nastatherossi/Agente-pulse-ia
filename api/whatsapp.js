@@ -1469,178 +1469,6 @@ var OpenAITranscriptionProvider = class {
   }
 };
 
-// server/whatsapp/zapi.ts
-function parseInbound(body, expectedInstanceId) {
-  const b = body && typeof body === "object" ? body : {};
-  if (b.type !== "ReceivedCallback") return { kind: "ignore", reason: "not_received_callback" };
-  if (expectedInstanceId && String(b.instanceId ?? "") !== expectedInstanceId) return { kind: "ignore", reason: "wrong_instance" };
-  if (b.fromMe === true) return { kind: "ignore", reason: "from_me" };
-  if (b.isGroup === true || b.participantPhone || b.participantLid) return { kind: "ignore", reason: "group" };
-  if (b.isNewsletter === true || b.broadcast === true || b.isStatusReply === true) return { kind: "ignore", reason: "not_direct" };
-  if (b.isEdit === true || b.waitingMessage === true) return { kind: "ignore", reason: "edit_or_waiting" };
-  if (b.reaction && typeof b.reaction === "object") return { kind: "ignore", reason: "reaction" };
-  const messageId = typeof b.messageId === "string" ? b.messageId.slice(0, 120) : "";
-  const phone = normalizePhone(typeof b.phone === "string" ? b.phone : void 0);
-  if (!messageId || !phone) return { kind: "ignore", reason: "missing_id_or_phone" };
-  const name = typeof b.senderName === "string" && b.senderName.trim() ? b.senderName.trim().slice(0, 80) : void 0;
-  const text = typeof b.text?.message === "string" ? b.text.message.trim() : "";
-  if (text && isEmojiOnly(text)) return { kind: "ignore", reason: "emoji_only" };
-  if (text) return { kind: "text", messageId, phone, name, text };
-  const audio = b.audio;
-  if (audio && typeof audio.audioUrl === "string") {
-    const seconds = Number(audio.seconds);
-    return { kind: "audio", messageId, phone, name, audioUrl: audio.audioUrl, mimeType: String(audio.mimeType || "audio/ogg; codecs=opus"), seconds: Number.isFinite(seconds) ? seconds : void 0 };
-  }
-  return { kind: "unsupported", messageId, phone, name };
-}
-function isEmojiOnly(text) {
-  const t = text.trim();
-  if (!t || /[\p{L}\p{N}]/u.test(t.replace(/[\u20e3]/g, ""))) return false;
-  return /^[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\ufe0f\u20e3\s]+$/u.test(t) && /[\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(t);
-}
-function isSafeMediaUrl(raw) {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== "https:" || u.username || u.password) return false;
-    const h = u.hostname.toLowerCase();
-    if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".internal") || h.endsWith(".local")) return false;
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(":")) return false;
-    return h.includes(".");
-  } catch {
-    return false;
-  }
-}
-var ZApiClient = class {
-  constructor(instanceId, token, clientToken, fetchImpl = fetch) {
-    this.instanceId = instanceId;
-    this.token = token;
-    this.clientToken = clientToken;
-    this.fetchImpl = fetchImpl;
-    if (!instanceId || !token || !clientToken) throw new Error("ZAPI_NOT_CONFIGURED");
-  }
-  instanceId;
-  token;
-  clientToken;
-  fetchImpl;
-  async sendText(phone, message) {
-    const res = await this.fetchImpl(`https://api.z-api.io/instances/${encodeURIComponent(this.instanceId)}/token/${encodeURIComponent(this.token)}/send-text`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Client-Token": this.clientToken },
-      // delayTyping: mostra "digitando…" por 2s, mais natural e mais seguro contra detecção de robô.
-      body: JSON.stringify({ phone, message: message.slice(0, 3800), delayTyping: 2 }),
-      signal: AbortSignal.timeout(15e3)
-    });
-    if (!res.ok) throw new Error(`ZAPI_SEND_${res.status}`);
-  }
-  async downloadAudio(url, maxBytes) {
-    if (!isSafeMediaUrl(url)) throw new Error("AUDIO_URL_NOT_ALLOWED");
-    const res = await this.fetchImpl(url, { signal: AbortSignal.timeout(2e4), redirect: "error" });
-    if (!res.ok) throw new Error(`AUDIO_DOWNLOAD_${res.status}`);
-    const declared = Number(res.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > maxBytes) throw new Error("AUDIO_TOO_LARGE");
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    if (bytes.byteLength > maxBytes) throw new Error("AUDIO_TOO_LARGE");
-    return bytes;
-  }
-};
-
-// server/whatsapp/store.ts
-var SupabaseStore = class {
-  constructor(url, serviceKey, fetchImpl = fetch) {
-    this.url = url;
-    this.serviceKey = serviceKey;
-    this.fetchImpl = fetchImpl;
-    if (!url || !serviceKey) throw new Error("SUPABASE_NOT_CONFIGURED");
-  }
-  url;
-  serviceKey;
-  fetchImpl;
-  async rest(path, init = {}) {
-    const { prefer, ...rest } = init;
-    const res = await this.fetchImpl(`${this.url.replace(/\/$/, "")}/rest/v1/${path}`, {
-      ...rest,
-      headers: {
-        apikey: this.serviceKey,
-        // Chave nova (sb_secret_…) vai só em apikey; a chave antiga (JWT service_role) também em Authorization.
-        ...this.serviceKey.startsWith("eyJ") ? { Authorization: `Bearer ${this.serviceKey}` } : {},
-        "Content-Type": "application/json",
-        ...prefer ? { Prefer: prefer } : {}
-      },
-      signal: AbortSignal.timeout(1e4)
-    });
-    if (!res.ok) throw new Error(`SUPABASE_${res.status}`);
-    const text = await res.text();
-    return text ? JSON.parse(text) : [];
-  }
-  async getContact(phone) {
-    const rows = await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}&select=*&limit=1`);
-    return rows[0] ?? null;
-  }
-  async upsertContact(c) {
-    const existing = await this.getContact(c.phone);
-    if (existing) {
-      const patch = {};
-      if (c.name && !existing.name) patch.name = c.name;
-      if (c.status && c.status !== existing.status) patch.status = c.status;
-      if (c.status === "authorized") patch.authorized_at = (/* @__PURE__ */ new Date()).toISOString();
-      if (Object.keys(patch).length) {
-        const rows2 = await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(c.phone)}`, { method: "PATCH", body: JSON.stringify(patch), prefer: "return=representation" });
-        return rows2[0] ?? existing;
-      }
-      return existing;
-    }
-    const row = { phone: c.phone, name: c.name ?? null, status: c.status ?? "pending", ...c.status === "authorized" ? { authorized_at: (/* @__PURE__ */ new Date()).toISOString() } : {} };
-    const rows = await this.rest("whatsapp_contacts", { method: "POST", body: JSON.stringify(row), prefer: "resolution=ignore-duplicates,return=representation" });
-    return rows[0] ?? await this.getContact(c.phone) ?? { phone: c.phone, status: row.status };
-  }
-  async setStatus(phone, status) {
-    const patch = { status, ...status === "authorized" ? { authorized_at: (/* @__PURE__ */ new Date()).toISOString() } : {} };
-    const rows = await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify(patch), prefer: "return=representation" });
-    return rows[0] ?? null;
-  }
-  async markOwnerNotified(phone) {
-    await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify({ owner_notified_at: (/* @__PURE__ */ new Date()).toISOString() }) });
-  }
-  listContacts() {
-    return this.rest("whatsapp_contacts?select=*&order=first_seen_at.asc&limit=200");
-  }
-  async latestPending() {
-    const rows = await this.rest("whatsapp_contacts?status=eq.pending&select=*&order=first_seen_at.desc&limit=1");
-    return rows[0] ?? null;
-  }
-  async deleteContact(phone) {
-    await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "DELETE" });
-  }
-  async claimMessage(messageId, phone, kind) {
-    const rows = await this.rest("whatsapp_messages", { method: "POST", body: JSON.stringify({ message_id: messageId, phone, kind }), prefer: "resolution=ignore-duplicates,return=representation" });
-    return rows.length > 0;
-  }
-  async recentMessageCount(phone, sinceMs) {
-    const since = new Date(Date.now() - sinceMs).toISOString();
-    const rows = await this.rest(`whatsapp_messages?phone=eq.${encodeURIComponent(phone)}&received_at=gte.${encodeURIComponent(since)}&select=message_id&limit=500`);
-    return rows.length;
-  }
-  async recordUsage(r) {
-    await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
-  }
-  async getSession(phone) {
-    const rows = await this.rest(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&select=session,version&limit=1`);
-    return rows[0] ?? null;
-  }
-  async saveSession(phone, session, expectedVersion) {
-    if (expectedVersion === null) {
-      const rows2 = await this.rest("whatsapp_sessions", { method: "POST", body: JSON.stringify({ phone, session, version: 1 }), prefer: "resolution=ignore-duplicates,return=representation" });
-      return rows2.length > 0;
-    }
-    const rows = await this.rest(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&version=eq.${expectedVersion}`, {
-      method: "PATCH",
-      body: JSON.stringify({ session, version: expectedVersion + 1, updated_at: (/* @__PURE__ */ new Date()).toISOString() }),
-      prefer: "return=representation"
-    });
-    return rows.length > 0;
-  }
-};
-
 // server/whatsapp/ledger.ts
 var MAX_STATE_TRANSACTIONS = 300;
 var MAX_INITIAL_CENTS = 1e8;
@@ -1730,6 +1558,18 @@ var SupabaseLedger = class {
       prefer: "resolution=ignore-duplicates,return=minimal"
     });
   }
+  async due(ws, today) {
+    const from = new Date(Date.parse(`${today}T12:00:00Z`) - 30 * 864e5).toISOString().slice(0, 10);
+    const rows = await this.rest(
+      `finance_transactions?workspace_id=eq.${ws.workspaceId}&status=in.(planned,overdue)&settled_at=is.null&origin=neq.card&expected_date=lte.${today}&expected_date=gte.${from}&select=id,type,amount,description,expected_date,category_id&order=expected_date.asc&limit=20`
+    );
+    if (!rows.length) return [];
+    const names = new Map([...await this.categoryMap(ws.workspaceId)].map(([name, id]) => [id, name]));
+    return rows.map((r) => ({ id: r.id, type: r.type === "income" ? "receita" : "despesa", amount: Number(r.amount), description: r.description, expectedDate: r.expected_date, category: r.category_id ? names.get(r.category_id) : void 0 }));
+  }
+  async confirm(ws, transactionId, effectiveDate) {
+    await this.rpc("finance_confirm_transaction", { target_transaction_id: transactionId, target_workspace_id: ws.workspaceId, target_effective_date: effectiveDate });
+  }
   async load(ws) {
     const [summary2, rows, cats] = await Promise.all([
       this.rpc("whatsapp_ledger_summary", { p_workspace: ws.workspaceId }),
@@ -1806,6 +1646,256 @@ var SupabaseLedger = class {
     }
   }
 };
+
+// server/whatsapp/store.ts
+var SupabaseStore = class {
+  constructor(url, serviceKey, fetchImpl = fetch) {
+    this.url = url;
+    this.serviceKey = serviceKey;
+    this.fetchImpl = fetchImpl;
+    if (!url || !serviceKey) throw new Error("SUPABASE_NOT_CONFIGURED");
+  }
+  url;
+  serviceKey;
+  fetchImpl;
+  async rest(path, init = {}) {
+    const { prefer, ...rest } = init;
+    const res = await this.fetchImpl(`${this.url.replace(/\/$/, "")}/rest/v1/${path}`, {
+      ...rest,
+      headers: {
+        apikey: this.serviceKey,
+        // Chave nova (sb_secret_…) vai só em apikey; a chave antiga (JWT service_role) também em Authorization.
+        ...this.serviceKey.startsWith("eyJ") ? { Authorization: `Bearer ${this.serviceKey}` } : {},
+        "Content-Type": "application/json",
+        ...prefer ? { Prefer: prefer } : {}
+      },
+      signal: AbortSignal.timeout(1e4)
+    });
+    if (!res.ok) throw new Error(`SUPABASE_${res.status}`);
+    const text = await res.text();
+    return text ? JSON.parse(text) : [];
+  }
+  async getContact(phone) {
+    const rows = await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}&select=*&limit=1`);
+    return rows[0] ?? null;
+  }
+  async upsertContact(c) {
+    const existing = await this.getContact(c.phone);
+    if (existing) {
+      const patch = {};
+      if (c.name && !existing.name) patch.name = c.name;
+      if (c.status && c.status !== existing.status) patch.status = c.status;
+      if (c.status === "authorized") patch.authorized_at = (/* @__PURE__ */ new Date()).toISOString();
+      if (Object.keys(patch).length) {
+        const rows2 = await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(c.phone)}`, { method: "PATCH", body: JSON.stringify(patch), prefer: "return=representation" });
+        return rows2[0] ?? existing;
+      }
+      return existing;
+    }
+    const row = { phone: c.phone, name: c.name ?? null, status: c.status ?? "pending", ...c.status === "authorized" ? { authorized_at: (/* @__PURE__ */ new Date()).toISOString() } : {} };
+    const rows = await this.rest("whatsapp_contacts", { method: "POST", body: JSON.stringify(row), prefer: "resolution=ignore-duplicates,return=representation" });
+    return rows[0] ?? await this.getContact(c.phone) ?? { phone: c.phone, status: row.status };
+  }
+  async setStatus(phone, status) {
+    const patch = { status, ...status === "authorized" ? { authorized_at: (/* @__PURE__ */ new Date()).toISOString() } : {} };
+    const rows = await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify(patch), prefer: "return=representation" });
+    return rows[0] ?? null;
+  }
+  async markOwnerNotified(phone) {
+    await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify({ owner_notified_at: (/* @__PURE__ */ new Date()).toISOString() }) });
+  }
+  listContacts() {
+    return this.rest("whatsapp_contacts?select=*&order=first_seen_at.asc&limit=200");
+  }
+  async latestPending() {
+    const rows = await this.rest("whatsapp_contacts?status=eq.pending&select=*&order=first_seen_at.desc&limit=1");
+    return rows[0] ?? null;
+  }
+  async deleteContact(phone) {
+    await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "DELETE" });
+  }
+  async claimMessage(messageId, phone, kind) {
+    const rows = await this.rest("whatsapp_messages", { method: "POST", body: JSON.stringify({ message_id: messageId, phone, kind }), prefer: "resolution=ignore-duplicates,return=representation" });
+    return rows.length > 0;
+  }
+  async recentMessageCount(phone, sinceMs) {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const rows = await this.rest(`whatsapp_messages?phone=eq.${encodeURIComponent(phone)}&received_at=gte.${encodeURIComponent(since)}&select=message_id&limit=500`);
+    return rows.length;
+  }
+  async recordUsage(r) {
+    await this.rest("whatsapp_usage", { method: "POST", body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null }), prefer: "resolution=ignore-duplicates,return=minimal" });
+  }
+  async reminderStates(ids) {
+    if (!ids.length) return [];
+    return this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(",")})&select=*`);
+  }
+  async markReminded(items, phone, atIso) {
+    const have = new Map((await this.reminderStates(items.map((i) => i.id))).map((r) => [r.transaction_id, r.sent_count]));
+    await this.rest("whatsapp_reminders?on_conflict=transaction_id", {
+      method: "POST",
+      body: JSON.stringify(items.map((i) => ({ transaction_id: i.id, workspace_id: i.workspaceId, phone, sent_count: (have.get(i.id) ?? 0) + 1, last_sent_at: atIso, answered_at: null }))),
+      prefer: "resolution=merge-duplicates,return=minimal"
+    });
+  }
+  awaitingReminders(phone, sinceIso) {
+    return this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&answered_at=is.null&last_sent_at=gte.${encodeURIComponent(sinceIso)}&select=*&order=last_sent_at.desc&limit=10`);
+  }
+  async markAnswered(ids, atIso) {
+    if (!ids.length) return;
+    await this.rest(`whatsapp_reminders?transaction_id=in.(${ids.map(encodeURIComponent).join(",")})`, { method: "PATCH", body: JSON.stringify({ answered_at: atIso }), prefer: "return=minimal" });
+  }
+  async lastReminderAt(phone) {
+    const rows = await this.rest(`whatsapp_reminders?phone=eq.${encodeURIComponent(phone)}&last_sent_at=not.is.null&select=last_sent_at&order=last_sent_at.desc&limit=1`);
+    return rows[0]?.last_sent_at ?? null;
+  }
+  async setRemindersEnabled(phone, enabled) {
+    await this.rest(`whatsapp_contacts?phone=eq.${encodeURIComponent(phone)}`, { method: "PATCH", body: JSON.stringify({ reminders_enabled: enabled }), prefer: "return=minimal" });
+  }
+  async getSession(phone) {
+    const rows = await this.rest(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&select=session,version&limit=1`);
+    return rows[0] ?? null;
+  }
+  async saveSession(phone, session, expectedVersion) {
+    if (expectedVersion === null) {
+      const rows2 = await this.rest("whatsapp_sessions", { method: "POST", body: JSON.stringify({ phone, session, version: 1 }), prefer: "resolution=ignore-duplicates,return=representation" });
+      return rows2.length > 0;
+    }
+    const rows = await this.rest(`whatsapp_sessions?phone=eq.${encodeURIComponent(phone)}&version=eq.${expectedVersion}`, {
+      method: "PATCH",
+      body: JSON.stringify({ session, version: expectedVersion + 1, updated_at: (/* @__PURE__ */ new Date()).toISOString() }),
+      prefer: "return=representation"
+    });
+    return rows.length > 0;
+  }
+};
+
+// server/whatsapp/zapi.ts
+function parseInbound(body, expectedInstanceId) {
+  const b = body && typeof body === "object" ? body : {};
+  if (b.type !== "ReceivedCallback") return { kind: "ignore", reason: "not_received_callback" };
+  if (expectedInstanceId && String(b.instanceId ?? "") !== expectedInstanceId) return { kind: "ignore", reason: "wrong_instance" };
+  if (b.fromMe === true) return { kind: "ignore", reason: "from_me" };
+  if (b.isGroup === true || b.participantPhone || b.participantLid) return { kind: "ignore", reason: "group" };
+  if (b.isNewsletter === true || b.broadcast === true || b.isStatusReply === true) return { kind: "ignore", reason: "not_direct" };
+  if (b.isEdit === true || b.waitingMessage === true) return { kind: "ignore", reason: "edit_or_waiting" };
+  if (b.reaction && typeof b.reaction === "object") return { kind: "ignore", reason: "reaction" };
+  const messageId = typeof b.messageId === "string" ? b.messageId.slice(0, 120) : "";
+  const phone = normalizePhone(typeof b.phone === "string" ? b.phone : void 0);
+  if (!messageId || !phone) return { kind: "ignore", reason: "missing_id_or_phone" };
+  const name = typeof b.senderName === "string" && b.senderName.trim() ? b.senderName.trim().slice(0, 80) : void 0;
+  const text = typeof b.text?.message === "string" ? b.text.message.trim() : "";
+  if (text && isEmojiOnly(text)) return { kind: "ignore", reason: "emoji_only" };
+  if (text) return { kind: "text", messageId, phone, name, text };
+  const audio = b.audio;
+  if (audio && typeof audio.audioUrl === "string") {
+    const seconds = Number(audio.seconds);
+    return { kind: "audio", messageId, phone, name, audioUrl: audio.audioUrl, mimeType: String(audio.mimeType || "audio/ogg; codecs=opus"), seconds: Number.isFinite(seconds) ? seconds : void 0 };
+  }
+  return { kind: "unsupported", messageId, phone, name };
+}
+function isEmojiOnly(text) {
+  const t = text.trim();
+  if (!t || /[\p{L}\p{N}]/u.test(t.replace(/[\u20e3]/g, ""))) return false;
+  return /^[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\ufe0f\u20e3\s]+$/u.test(t) && /[\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(t);
+}
+function isSafeMediaUrl(raw) {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" || u.username || u.password) return false;
+    const h = u.hostname.toLowerCase();
+    if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".internal") || h.endsWith(".local")) return false;
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(":")) return false;
+    return h.includes(".");
+  } catch {
+    return false;
+  }
+}
+var ZApiClient = class {
+  constructor(instanceId, token, clientToken, fetchImpl = fetch) {
+    this.instanceId = instanceId;
+    this.token = token;
+    this.clientToken = clientToken;
+    this.fetchImpl = fetchImpl;
+    if (!instanceId || !token || !clientToken) throw new Error("ZAPI_NOT_CONFIGURED");
+  }
+  instanceId;
+  token;
+  clientToken;
+  fetchImpl;
+  async sendText(phone, message) {
+    const res = await this.fetchImpl(`https://api.z-api.io/instances/${encodeURIComponent(this.instanceId)}/token/${encodeURIComponent(this.token)}/send-text`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Client-Token": this.clientToken },
+      // delayTyping: mostra "digitando…" por 2s, mais natural e mais seguro contra detecção de robô.
+      body: JSON.stringify({ phone, message: message.slice(0, 3800), delayTyping: 2 }),
+      signal: AbortSignal.timeout(15e3)
+    });
+    if (!res.ok) throw new Error(`ZAPI_SEND_${res.status}`);
+  }
+  async downloadAudio(url, maxBytes) {
+    if (!isSafeMediaUrl(url)) throw new Error("AUDIO_URL_NOT_ALLOWED");
+    const res = await this.fetchImpl(url, { signal: AbortSignal.timeout(2e4), redirect: "error" });
+    if (!res.ok) throw new Error(`AUDIO_DOWNLOAD_${res.status}`);
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) throw new Error("AUDIO_TOO_LARGE");
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.byteLength > maxBytes) throw new Error("AUDIO_TOO_LARGE");
+    return bytes;
+  }
+};
+
+// server/whatsapp/reminders.ts
+var REPLY_WINDOW_MS = 48 * 36e5;
+var first = (name) => name?.trim().split(/\s+/)[0] || void 0;
+var YES = /^(sim|s|caiu|ja caiu|caiu sim|ja foi|foi|foi sim|recebi|recebi sim|ja recebi|paguei|ja paguei|pago|ja ta pago|ta na conta|ja ta na conta|entrou|ja entrou|pode dar baixa|da baixa|dar baixa|pode dar|confirmo|isso|isso mesmo|ok|certo|beleza)[.! ]*$/;
+var NO = /^(nao|n|ainda nao|ainda n|nao caiu|ainda nao caiu|nao foi|ainda nao foi|nao recebi|ainda nao recebi|nao paguei|ainda nao paguei|amanha|depois|mais tarde)[.! ]*$/;
+var OFF = /^(parar|pare|para|desativar|desligar|cancelar)( os| as)? lembretes?( por favor)?[.! ]*$/;
+var ON = /^(ativar|voltar|religar|ligar|retomar)( os| as)? lembretes?[.! ]*$/;
+var plain = (t) => t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+async function handleReminderReply(deps, phone, name, text) {
+  const t = plain(text);
+  const nm = first(name);
+  if (OFF.test(t)) {
+    await deps.store.setRemindersEnabled(phone, false);
+    return `Combinado${nm ? `, ${nm}` : ""}! N\xE3o te mando mais lembretes. Se quiser de volta, \xE9 s\xF3 dizer "ativar lembretes". \u{1F609}`;
+  }
+  if (ON.test(t)) {
+    await deps.store.setRemindersEnabled(phone, true);
+    return `Fechado${nm ? `, ${nm}` : ""}! Os lembretes voltaram. \u{1F49C}`;
+  }
+  const yes = YES.test(t), no = NO.test(t);
+  if (!yes && !no) return void 0;
+  const nowMs = deps.now?.() ?? Date.now();
+  const waiting = await deps.store.awaitingReminders(phone, new Date(nowMs - REPLY_WINDOW_MS).toISOString());
+  if (!waiting.length) return void 0;
+  const batch = waiting.filter((w) => w.last_sent_at === waiting[0].last_sent_at);
+  if (no) return `Tranquilo${nm ? `, ${nm}` : ""}! Amanh\xE3 eu te pergunto de novo. \u{1F609}`;
+  const today = deps.today?.() ?? todayBR();
+  const ws = await deps.ledger.resolve(phone, name ?? void 0);
+  const due = new Map((await deps.ledger.due(ws, today)).map((d) => [d.id, d]));
+  const done = [];
+  let failed = 0;
+  for (const w of batch) {
+    const item = due.get(w.transaction_id);
+    if (!item) {
+      await deps.store.markAnswered([w.transaction_id], new Date(nowMs).toISOString());
+      continue;
+    }
+    try {
+      await deps.ledger.confirm(ws, item.id, today);
+      done.push(item);
+    } catch (e) {
+      failed++;
+      deps.log?.({ event: "reminder_confirm_failed", message: e instanceof Error ? e.message : "unknown" });
+    }
+  }
+  await deps.store.markAnswered(done.map((d) => d.id), new Date(nowMs).toISOString());
+  if (!done.length && failed) return "N\xE3o consegui dar baixa agora. Tenta de novo daqui a pouco, ou d\xE1 uma olhada no dashboard. \u{1F64F}";
+  if (!done.length) return `J\xE1 estava tudo certo por aqui${nm ? `, ${nm}` : ""}! \u{1F609}`;
+  const list = done.map((d) => `${d.description} (${brl(Math.round(d.amount * 100))})`).join(", ");
+  return `Boa${nm ? `, ${nm}` : ""}! Dei baixa em ${list}. \u{1F389}${failed ? " Um deles n\xE3o consegui agora, tenta de novo daqui a pouco." : ""}`;
+}
 
 // server/whatsapp/handler.ts
 var DAY = 365 * 24 * 60 * 60 * 1e3;
@@ -1944,6 +2034,13 @@ async function handleInbound(deps, input) {
       text = t.text;
       heard = t.text;
     } else text = input.text.slice(0, 2e3);
+    if (deps.ledger) {
+      const reminderReply = await handleReminderReply({ store: deps.store, ledger: deps.ledger, messenger: deps.messenger, today: deps.today, now: deps.now, log: deps.log }, phone, contact?.name || input.name, text).catch(() => void 0);
+      if (reminderReply) {
+        await deps.messenger.sendText(phone, reminderReply);
+        return;
+      }
+    }
     const out = await runAgent(deps, phone, text, messageId, input.kind === "audio" ? "audio" : "text", contact?.name || input.name);
     if (out.trace.errorCode) {
       deps.log?.({ event: "whatsapp_agent_error", code: out.trace.errorCode });
