@@ -85,7 +85,7 @@ const dayTip = (d: Day, extra: string[] = [], last = false) =>
 function axisLabels(days: Day[]) {
   const step = days.length <= 7 ? 1 : days.length <= 14 ? 2 : 5;
   const narrow = days.length <= 7 ? 2 : days.length <= 14 ? 4 : 10;
-  return `<div class="x-axis" aria-hidden="true">${days.map((d, i) => { const k = days.length - 1 - i; return `<span${k % narrow === 0 ? ' class="keep"' : ''}>${k % step === 0 ? esc(dayLabel(d.day)) : ''}</span>`; }).join('')}</div>`;
+  return `<div class="x-axis" aria-hidden="true">${days.map((d, i) => { const k = days.length - 1 - i; return `<span${k % narrow === 0 ? ' class="keep"' : ''}>${k % step === 0 ? `<i class="long">${esc(dayLabel(d.day))}</i><i class="short">${esc(`${Number(d.day.slice(8))}/${Number(d.day.slice(5, 7))}`)}</i>` : ''}</span>`; }).join('')}</div>`;
 }
 
 function columns(days: Day[], tips: string[]) {
