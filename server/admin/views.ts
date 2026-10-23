@@ -1,13 +1,13 @@
 import type { Contact } from '../../shared/whatsapp/access.js';
-import type { TurnDetail } from '../whatsapp/store.js';
-import type { Summary, AdminDeps } from './panel.js';
+import type { TurnDetail, ReminderState } from '../whatsapp/store.js';
+import type { Summary, AdminDeps, ReminderPreview } from './panel.js';
 import { TRACKING_SINCE, esc, fmtDate, fmtFull, fmtTime, fmtInt, fmtUsd, fmtShort, fmtPhone, maskPhone, relTime, dayLabel, weekday, STATUS, ERROR_HELP, problemKind } from './format.js';
 import { icon, mark } from './icons.js';
 
 /* Telas do painel. Regras: nada de estilo inline (a CSP bloqueia), todo texto vindo do banco passa por esc(),
    e ausência de dado aparece como "sem registro" ou "—", nunca como zero. */
 
-export type ViewCtx = { now: number; contacts: Contact[]; problems: number; pending: number; flash?: string; price?: AdminDeps['price'] };
+export type ViewCtx = { now: number; contacts: Contact[]; problems: number; pending: number; flash?: string; price?: AdminDeps['price']; can?: { resolve: boolean; reminders: boolean } };
 
 const trackingLabel = dayLabel(TRACKING_SINCE);
 const plural = (n: number, one: string, many: string) => `${fmtInt(n)} ${n === 1 ? one : many}`;
@@ -33,20 +33,21 @@ export const loginPage = (error?: string) =>
 export const plainPage = (title: string, text: string) =>
   doc('Pulse — gestão', `<main class="login"><div class="login-card"><div class="login-brand">${mark()}<div><strong>Pulse</strong><span>Central de gestão</span></div></div><h1 class="plain-title">${esc(title)}</h1><p class="login-note">${esc(text)}</p><p><a class="btn ghost" href="/admin">${icon('refresh')}Tentar de novo</a></p></div></main>`, 'is-login');
 
-type View = 'home' | 'usuarios' | 'ia' | 'problemas' | 'config';
-const NAV: [View, string, string, string][] = [
-  ['home', '/admin', 'overview', 'Visão geral'],
-  ['usuarios', '/admin?v=usuarios', 'users', 'Usuários'],
-  ['ia', '/admin?v=ia', 'ai', 'IA e custos'],
-  ['problemas', '/admin?v=problemas', 'alert', 'Problemas'],
-  ['config', '/admin?v=config', 'settings', 'Configuração'],
+type View = 'home' | 'usuarios' | 'ia' | 'problemas' | 'lembretes' | 'config';
+const NAV: [View, string, string, string, string][] = [
+  ['home', '/admin', 'overview', 'Visão geral', 'Início'],
+  ['usuarios', '/admin?v=usuarios', 'users', 'Usuários', 'Usuários'],
+  ['ia', '/admin?v=ia', 'ai', 'IA e custos', 'IA'],
+  ['problemas', '/admin?v=problemas', 'alert', 'Problemas', 'Problemas'],
+  ['lembretes', '/admin?v=lembretes', 'bell', 'Lembretes', 'Lembretes'],
+  ['config', '/admin?v=config', 'settings', 'Configuração', 'Ajustes'],
 ];
 
 function shell(view: View, ctx: ViewCtx, head: { title: string; lead?: string; back?: string }, inner: string) {
   const badge = (v: View) =>
-    v === 'problemas' && ctx.problems ? `<b class="count bad" aria-label="${ctx.problems} problemas">${ctx.problems}</b>` : v === 'usuarios' && ctx.pending ? `<b class="count warn" aria-label="${ctx.pending} aguardando">${ctx.pending}</b>` : '';
+    v === 'problemas' && ctx.problems ? `<b class="count bad" aria-label="${ctx.problems} problemas abertos">${ctx.problems}</b>` : v === 'usuarios' && ctx.pending ? `<b class="count warn" aria-label="${ctx.pending} aguardando">${ctx.pending}</b>` : '';
   const links = (cls: string) =>
-    NAV.map(([v, href, ic, label]) => `<a class="${cls}" href="${href}"${v === view ? ' aria-current="page"' : ''}>${icon(ic)}<span class="label">${label}</span>${badge(v)}</a>`).join('');
+    NAV.map(([v, href, ic, label, short]) => `<a class="${cls}" href="${href}"${v === view ? ' aria-current="page"' : ''}${cls === 'tab' && short !== label ? ` aria-label="${label}"` : ''}>${icon(ic)}<span class="label">${cls === 'tab' ? short : label}</span>${badge(v)}</a>`).join('');
   const here = NAV.find(n => n[0] === view)!;
   const flashBad = ctx.flash && /inválido|não consegui|erro/i.test(ctx.flash);
   const flash = ctx.flash ? `<div class="flash ${flashBad ? 'bad' : 'ok'}" role="status">${icon(flashBad ? 'error' : 'check')}<span>${esc(ctx.flash)}</span></div>` : '';
@@ -160,8 +161,15 @@ function personName(contacts: Contact[], phone: string, masked = true) {
   return name ? esc(name) : esc(masked ? maskPhone(phone) : fmtPhone(phone));
 }
 
+function resolveForm(t: TurnDetail, back: string, big = false) {
+  const resolved = Boolean(t.resolved_at);
+  return `<form method="post" action="${back}" data-busy="${resolved ? 'Reabrindo…' : 'Salvando…'}"><input type="hidden" name="action" value="${resolved ? 'reopen' : 'resolve'}"><input type="hidden" name="id" value="${esc(t.message_id)}"><button type="submit" class="btn ${big ? '' : 'sm '}${resolved ? 'ghost' : 'ok'}">${icon(resolved ? 'undo' : 'check')}${resolved ? 'Reabrir' : 'Marcar como resolvido'}</button></form>`;
+}
+
 function incident(t: TurnDetail, ctx: ViewCtx, compact = false) {
-  const [label, tone, key] = sev(t);
+  const [label, tone0, key] = sev(t);
+  const resolved = Boolean(t.resolved_at);
+  const tone = resolved ? `${tone0} resolved` : tone0;
   const href = `/admin?v=turno&amp;id=${encodeURIComponent(t.message_id)}`;
   const steps = Array.isArray(t.steps) ? (t.steps as any[]) : [];
   const meta = [t.model ? esc(t.model) : '', `${fmtInt(t.input_tokens + t.output_tokens)} tokens`, t.duration_ms != null ? `${(t.duration_ms / 1000).toFixed(1)} s` : '', t.source === 'audio' ? 'áudio' : ''].filter(Boolean);
@@ -169,11 +177,11 @@ function incident(t: TurnDetail, ctx: ViewCtx, compact = false) {
   const details = !compact && (steps.length || (t.error_code && ERROR_HELP[t.error_code]))
     ? `<details class="more"><summary>${icon('down')}Detalhes técnicos${steps.length ? ` (${plural(steps.length, 'passo', 'passos')})` : ''}</summary>${t.error_code && ERROR_HELP[t.error_code] ? `<p class="explain">${esc(ERROR_HELP[t.error_code])}</p>` : ''}${steps.length ? `<ol class="mini-steps">${steps.map(x => `<li class="${x?.status === 'success' ? 'ok' : 'bad'}"><code>${esc(x?.name)}</code><span>${esc(x?.status)}</span></li>`).join('')}</ol>` : ''}</details>`
     : '';
-  return `<article class="incident ${tone}" data-kind="${key}"><div class="inc-rail" aria-hidden="true">${icon(sevIcon[key] ?? 'alert')}</div><div class="inc-body">
- <header><span class="sev ${tone}">${esc(label)}${t.error_code ? `<code>${esc(t.error_code)}</code>` : ''}</span><time datetime="${esc(t.created_at)}" title="${esc(fmtFull(t.created_at))}">${esc(relTime(t.created_at, ctx.now))}</time></header>
+  return `<article class="incident ${tone}" data-kind="${key}"><div class="inc-rail" aria-hidden="true">${icon(resolved ? 'check' : sevIcon[key] ?? 'alert')}</div><div class="inc-body">
+ <header><span class="tags"><span class="sev ${tone0}">${esc(label)}${t.error_code ? `<code>${esc(t.error_code)}</code>` : ''}</span>${resolved ? `<span class="sev ok" title="${esc(fmtFull(t.resolved_at))}">${icon('check')}Resolvido ${esc(relTime(t.resolved_at, ctx.now))}</span>` : ''}</span><time datetime="${esc(t.created_at)}" title="${esc(fmtFull(t.created_at))}">${esc(relTime(t.created_at, ctx.now))}</time></header>
  <h3><a href="${href}">${personName(ctx.contacts, t.phone)}</a></h3>
  ${convo}
- ${compact ? '' : `<footer><span class="meta">${meta.join('<i aria-hidden="true"></i>')}</span><a class="link" href="${href}">Abrir incidente</a></footer>`}
+ ${compact ? '' : `<footer><span class="meta">${meta.join('<i aria-hidden="true"></i>')}</span><span class="inc-actions">${ctx.can?.resolve ? resolveForm(t, `/admin?v=problemas${resolved ? '&amp;estado=resolvidos' : ''}`) : ''}<a class="link" href="${href}">Abrir incidente</a></span></footer>`}
  ${details}
 </div></article>`;
 }
@@ -189,7 +197,7 @@ export function homePage(s: Summary, problems: TurnDetail[], ctx: ViewCtx) {
   const errLine = s.errors1d ? ` ${plural(s.errors1d, 'mensagem falhou', 'mensagens falharam')} hoje.` : s.errors7d ? ` ${plural(s.errors7d, 'mensagem falhou', 'mensagens falharam')} na semana.` : '';
   const chips = [
     ctx.pending ? `<a class="chip warn" href="/admin?v=usuarios">${icon('users')}${plural(ctx.pending, 'pessoa aguardando', 'pessoas aguardando')} autorização</a>` : '',
-    problems.length ? `<a class="chip ${tone === 'ok' ? '' : tone}" href="/admin?v=problemas">${icon('alert')}${plural(problems.length, 'problema', 'problemas')} em 30 dias</a>` : '',
+    problems.length ? `<a class="chip ${tone === 'ok' ? '' : tone}" href="/admin?v=problemas">${icon('alert')}${plural(problems.length, 'problema aberto', 'problemas abertos')}</a>` : '',
   ].join('');
 
   const delta = (() => {
@@ -243,7 +251,7 @@ export function homePage(s: Summary, problems: TurnDetail[], ctx: ViewCtx) {
 </section>
 <section class="kpis" aria-label="Indicadores">${kpis}</section>
 <div class="split">
- <section class="block"><div class="block-head"><h2>Precisa de atenção</h2>${problems.length ? `<a class="link" href="/admin?v=problemas">Ver todos (${problems.length})</a>` : ''}</div>${recent ? `<div class="incidents compact">${recent}</div>` : emptyState('check', 'Nada pendente', 'Nenhum erro, recusa ou mensagem não entendida nos últimos 30 dias.')}</section>
+ <section class="block"><div class="block-head"><h2>Precisa de atenção</h2>${problems.length ? `<a class="link" href="/admin?v=problemas">Ver todos (${problems.length})</a>` : ''}</div>${recent ? `<div class="incidents compact">${recent}</div>` : emptyState('check', 'Nada pendente', 'Nenhum problema aberto nos últimos 30 dias.')}</section>
  <div class="stack">${needyBlock}<section class="block"><div class="block-head"><h2>Quem mais usa</h2><a class="link" href="/admin?v=ia">Consumo por pessoa</a></div>${topRows ? `<ol class="rank">${topRows}</ol>` : emptyState('users', 'Ninguém usou ainda', 'Quando alguém conversar com o Pulse, o consumo aparece aqui.')}<p class="note">Tokens dos últimos 30 dias.</p></section></div>
 </div>
 <p class="foot">Consumo registrado desde ${trackingLabel}/2026. O texto da conversa só fica guardado nos turnos com problema (erro, não entendeu, recusado), para você depurar.</p>`
@@ -278,6 +286,7 @@ export function usersPage(s: Summary, ctx: ViewCtx) {
 <td data-l="Tokens" class="num">${tk ? fmtInt(tk) : '<span class="na">—</span>'}</td>
 <td data-l="Custo" class="num">${p.cost === undefined ? '<span class="na" title="Preços não configurados">—</span>' : p.messages30d ? esc(fmtUsd(p.cost)) : '<span class="na">—</span>'}</td>
 <td data-l="Erros" class="num">${p.errors ? `<span class="err-count">${icon('alert')}${p.errors}</span>` : '<span class="na">—</span>'}</td>
+${ctx.can?.reminders ? `<td data-l="Lembretes">${reminderToggle(c, 'usuarios')}</td>` : ''}
 <td class="actions">${actionForm(p, 'usuarios')}</td></tr>`;
     })
     .join('');
@@ -290,7 +299,7 @@ export function usersPage(s: Summary, ctx: ViewCtx) {
       ? `<section class="block flush">
  <div class="toolbar needs-js"><label class="search">${icon('search')}<span class="sr-only">Buscar por nome ou telefone</span><input type="search" data-search placeholder="Buscar por nome ou telefone" autocomplete="off"></label>
  <div class="filters" role="group" aria-label="Filtrar por status">${chip('all', 'Todos', total, true)}${chip('authorized', 'Autorizados', s.counts.authorized)}${chip('pending', 'Pendentes', s.counts.pending)}${chip('blocked', 'Bloqueados', s.counts.blocked)}${withErr ? chip('err', 'Com erros', withErr) : ''}</div></div>
- <div class="table-wrap"><table class="data users" data-table><caption class="sr-only">Usuários do Pulse</caption><thead><tr>${th('Pessoa', 'name')}<th scope="col">Status</th>${th('Última mensagem', 'last', true).replace(' class="num"', '')}${th('Mensagens', 'msgs', true)}${th('Tokens', 'tokens', true)}${th('Custo', 'cost', true)}${th('Erros', 'err', true)}<th scope="col"><span class="sr-only">Ações</span></th></tr></thead><tbody>${rows}</tbody></table>
+ <div class="table-wrap"><table class="data users" data-table><caption class="sr-only">Usuários do Pulse</caption><thead><tr>${th('Pessoa', 'name')}<th scope="col">Status</th>${th('Última mensagem', 'last', true).replace(' class="num"', '')}${th('Mensagens', 'msgs', true)}${th('Tokens', 'tokens', true)}${th('Custo', 'cost', true)}${th('Erros', 'err', true)}${ctx.can?.reminders ? '<th scope="col">Lembretes</th>' : ''}<th scope="col"><span class="sr-only">Ações</span></th></tr></thead><tbody>${rows}</tbody></table>
  <div class="empty filtered" data-noresults hidden>${icon('search')}<div><strong>Nenhum usuário encontrado</strong><p>Mude a busca ou o filtro.</p></div></div></div>
 </section>
 <p class="foot">Autorizar e bloquear têm o mesmo efeito dos comandos do dono no WhatsApp. Custos são estimativas a partir do preço configurado.</p>`
@@ -342,7 +351,10 @@ ${priced ? '' : `<div class="notice">${icon('info')}<p><strong>Custo indisponív
 
 /* ------------------------------------------------------------------ problemas */
 
-export function problemsPage(problems: TurnDetail[], ctx: ViewCtx) {
+export function problemsPage(all: TurnDetail[], ctx: ViewCtx, mode: 'open' | 'resolved' = 'open') {
+  const canResolve = Boolean(ctx.can?.resolve);
+  const openN = all.filter(t => !t.resolved_at).length, doneN = all.length - openN;
+  const problems = canResolve ? all.filter(t => (mode === 'resolved' ? t.resolved_at : !t.resolved_at)) : all;
   const by = (k: string) => problems.filter(t => sev(t)[2] === k).length;
   const chip = (f: string, label: string, n: number, on = false) => (n || f === 'all' ? `<button type="button" class="filter" data-kind-filter="${f}" aria-pressed="${on}">${label}<span>${n}</span></button>` : '');
   const groups = new Map<string, TurnDetail[]>();
@@ -354,13 +366,19 @@ export function problemsPage(problems: TurnDetail[], ctx: ViewCtx) {
   const yesterday = new Date(ctx.now - 27 * 3_600_000).toISOString().slice(0, 10);
   const dayName = (k: string) => (k === today ? 'Hoje' : k === yesterday ? 'Ontem' : `${weekday(k)}, ${dayLabel(k)}`);
   const list = [...groups.entries()].map(([k, items]) => `<section class="day-group" data-group><h2 class="day-title">${esc(dayName(k))}<span>${items.length}</span></h2><div class="incidents">${items.map(t => incident(t, ctx)).join('')}</div></section>`).join('');
+  const tabs = canResolve
+    ? `<nav class="seg" aria-label="Estado dos problemas"><a href="/admin?v=problemas"${mode === 'open' ? ' aria-current="page"' : ''}>Abertos<span>${openN}</span></a><a href="/admin?v=problemas&amp;estado=resolvidos"${mode === 'resolved' ? ' aria-current="page"' : ''}>Resolvidos<span>${doneN}</span></a></nav>`
+    : '';
+  const empty = mode === 'resolved'
+    ? emptyState('check', 'Nenhum problema resolvido ainda', 'Quando você marcar um problema como resolvido, ele aparece aqui.')
+    : all.length
+      ? emptyState('check', 'Tudo resolvido', 'Não há problemas abertos. Os resolvidos continuam na aba ao lado.')
+      : emptyState('check', 'Nenhum problema registrado', 'Nos últimos 30 dias o Pulse não teve erros, recusas nem mensagens que não entendeu.');
   return shell(
     'problemas',
     ctx,
     { title: 'Problemas', lead: 'Mensagens dos últimos 30 dias em que o Pulse deu erro, não entendeu ou recusou uma ação.' },
-    problems.length
-      ? `<div class="toolbar needs-js"><div class="filters" role="group" aria-label="Filtrar por tipo">${chip('all', 'Todos', problems.length, true)}${chip('erro', 'Erros', by('erro'))}${chip('duvida', 'Não entendeu', by('duvida'))}${chip('recusado', 'Recusado', by('recusado'))}</div></div>${list}<div class="empty filtered" data-noresults hidden>${icon('search')}<div><strong>Nada deste tipo</strong><p>Escolha outro filtro.</p></div></div>`
-      : emptyState('check', 'Nenhum problema registrado', 'Nos últimos 30 dias o Pulse não teve erros, recusas nem mensagens que não entendeu.')
+    `<div class="toolbar">${tabs}${problems.length ? `<div class="filters needs-js" role="group" aria-label="Filtrar por tipo">${chip('all', 'Todos', problems.length, true)}${chip('erro', 'Erros', by('erro'))}${chip('duvida', 'Não entendeu', by('duvida'))}${chip('recusado', 'Recusado', by('recusado'))}</div>` : ''}</div>${problems.length ? `${list}<div class="empty filtered" data-noresults hidden>${icon('search')}<div><strong>Nada deste tipo</strong><p>Escolha outro filtro.</p></div></div>` : empty}`
   );
 }
 
@@ -381,7 +399,7 @@ export function turnPage(t: TurnDetail | null, ctx: ViewCtx) {
     'problemas',
     ctx,
     { title: name || fmtPhone(t.phone), back: '/admin?v=problemas', lead: `<span class="sev ${tone}">${icon(sevIcon[key] ?? 'alert')}${esc(label)}${t.error_code ? `<code>${esc(t.error_code)}</code>` : ''}</span> ${esc(fmtFull(t.created_at))}` },
-    `${help ? `<div class="notice ${tone}">${icon('info')}<p><strong>O que significa:</strong> ${esc(help)}</p></div>` : ''}
+    `${ctx.can?.resolve ? `<div class="state-bar ${t.resolved_at ? 'done' : ''}">${t.resolved_at ? `${icon('check')}<p><strong>Resolvido</strong> ${esc(fmtFull(t.resolved_at))}</p>` : `${icon('clock')}<p><strong>Aberto.</strong> Quando você corrigir a causa ou decidir que não precisa de ação, marque como resolvido.</p>`}${resolveForm(t, `/admin?v=turno&amp;id=${encodeURIComponent(t.message_id)}`, true)}</div>` : ''}${help ? `<div class="notice ${tone}">${icon('info')}<p><strong>O que significa:</strong> ${esc(help)}</p></div>` : ''}
 <div class="split wide-left">
  <section class="block"><div class="block-head"><h2>Conversa</h2><span class="meta">${t.source === 'audio' ? `${icon('mic')}áudio transcrito` : 'texto'}</span></div>
   <div class="thread"><div class="msg in"><span>O usuário mandou</span><p>${esc(t.user_text ?? '(não registrado)')}</p></div><div class="msg out"><span>O Pulse respondeu</span><p>${esc(t.reply_text ?? '(não registrado)')}</p></div></div></section>
@@ -405,7 +423,64 @@ ${row('lock', 'Acesso ao painel', 'Ativo', 'authorized', 'Senha com 16 ou mais c
 ${row('coin', 'Preço do modelo', p ? 'Configurado' : 'Não configurado', p ? 'authorized' : 'pending', p ? `US$ ${esc(p.inputPerMTok)} por 1 milhão de tokens de entrada e US$ ${esc(p.outputPerMTok)} de saída (<code>OPENAI_PRICE_IN_PER_MTOK</code>, <code>OPENAI_PRICE_OUT_PER_MTOK</code>).` : 'Sem preço, o painel mostra tokens mas não custo. Defina <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> em dólares por 1 milhão de tokens.')}
 ${row('pulse', 'Registro de consumo', 'Ativo', 'authorized', `Cada mensagem do WhatsApp grava tokens, modelo e status desde ${trackingLabel}/2026. O painel lê os últimos 30 dias.`)}
 ${row('message', 'Texto das conversas', 'Só em problemas', 'neutral', 'O texto da mensagem e da resposta só é guardado quando o agente erra, não entende ou recusa, para você depurar.')}
+${row('bell', 'Lembretes proativos', 'Todo dia às 9h', 'authorized', 'Agendados no <code>vercel.json</code> (cron da Vercel). Ligue ou desligue por pessoa em <a href="/admin?v=lembretes">Lembretes</a>. As regras (1 mensagem por dia, até 3 perguntas por lançamento) ficam no código.')}
 </ul></section>
-<p class="foot">Lembretes proativos e outras configurações do agente ainda não têm controle por aqui.</p>`
+<p class="foot">Horário e regras dos lembretes ainda não são editáveis pelo painel.</p>`
+  );
+}
+
+/* ------------------------------------------------------------------ lembretes */
+
+function reminderToggle(c: Contact, view: string) {
+  if (c.status !== 'authorized') return '<span class="na">—</span>';
+  const on = c.reminders_enabled !== false;
+  const name = c.name || fmtPhone(c.phone);
+  return `<form method="post" action="/admin?v=${view}" class="toggle-form" data-busy="${on ? 'Desligando…' : 'Ligando…'}"><input type="hidden" name="action" value="reminders"><input type="hidden" name="phone" value="${esc(c.phone)}"><input type="hidden" name="enabled" value="${on ? '0' : '1'}"><button type="submit" class="switch" role="switch" aria-checked="${on}" aria-label="${esc(`Lembretes para ${name}`)}"><span class="knob" aria-hidden="true"></span><span class="switch-label">${on ? 'Ligados' : 'Desligados'}</span></button></form>`;
+}
+
+export function remindersPage(history: ReminderState[] | undefined, preview: ReminderPreview | undefined, ctx: ViewCtx) {
+  const authorized = ctx.contacts.filter(c => c.status === 'authorized');
+  const enabled = authorized.filter(c => c.reminders_enabled !== false).length;
+  const h = history ?? [];
+  const asked = h.filter(r => r.last_sent_at).length;
+  const answered = h.filter(r => r.answered_at).length;
+  const waiting = h.filter(r => r.last_sent_at && !r.answered_at && ctx.now - Date.parse(r.last_sent_at) <= 48 * 3_600_000).length;
+  const stat = (label: string, value: string, sub: string) => `<div class="stat"><span class="stat-label">${esc(label)}</span><strong class="figure">${value}</strong><p>${sub}</p></div>`;
+  const stats = [
+    stat('Lembretes ligados', `${fmtInt(enabled)}<small class="of">/${fmtInt(authorized.length)}</small>`, 'pessoas autorizadas'),
+    stat('Lançamentos perguntados', history ? fmtInt(asked) : '<span class="na">—</span>', history ? 'nos últimos 30 dias' : 'histórico indisponível'),
+    stat('Respondidos', history ? fmtInt(answered) : '<span class="na">—</span>', history && asked ? `${Math.round((answered / asked) * 100)}% dos perguntados` : 'nenhuma pergunta ainda'),
+    stat('Aguardando resposta', history ? fmtInt(waiting) : '<span class="na">—</span>', 'perguntados nas últimas 48 h'),
+  ].join('');
+  const byPhone = new Map<string, ReminderState[]>();
+  for (const r of h) byPhone.set(r.phone, [...(byPhone.get(r.phone) ?? []), r]);
+  const rows = authorized
+    .map(c => {
+      const mine = byPhone.get(c.phone) ?? [];
+      const last = mine.map(r => r.last_sent_at ?? '').sort().at(-1) || null;
+      const got = mine.filter(r => r.answered_at).length;
+      return `<tr><td class="who-cell"><div class="person">${avatar(c.name, c.phone)}<div><span class="pname">${esc(c.name || 'Sem nome')}</span><span class="phone">${esc(fmtPhone(c.phone))}</span></div></div></td>
+<td data-l="Último lembrete">${last ? `<time datetime="${esc(last)}" title="${esc(fmtDate(last))}">${esc(relTime(last, ctx.now))}</time>` : '<span class="na">nunca</span>'}</td>
+<td data-l="Perguntados" class="num">${mine.length ? fmtInt(mine.length) : '<span class="na">—</span>'}</td>
+<td data-l="Respondidos" class="num">${mine.length ? fmtInt(got) : '<span class="na">—</span>'}</td>
+<td data-l="Lembretes">${ctx.can?.reminders ? reminderToggle(c, 'lembretes') : esc(c.reminders_enabled === false ? 'Desligados' : 'Ligados')}</td></tr>`;
+    })
+    .join('');
+  const name = (phone: string) => ctx.contacts.find(c => c.phone === phone)?.name || maskPhone(phone);
+  const previewBlock = preview === undefined
+    ? `<div class="notice warn">${icon('info')}<p><strong>Não consegui montar a prévia agora.</strong> O envio diário não é afetado; tente atualizar a página.</p></div>`
+    : preview.length
+      ? `<ul class="previews">${preview.map(m => `<li><div class="person">${avatar(name(m.phone), m.phone)}<span class="pname">${esc(name(m.phone))}</span></div><div class="msg out wa"><span>Pulse</span><p>${esc(m.text)}</p></div></li>`).join('')}</ul>`
+      : emptyState('check', 'Ninguém para lembrar agora', 'Ou não há lançamentos previstos vencendo, ou o lembrete de hoje já saiu para quem tinha.');
+  return shell(
+    'lembretes',
+    ctx,
+    { title: 'Lembretes', lead: 'Todo dia às 9h o Pulse pergunta no WhatsApp se o que estava previsto já aconteceu, e dá baixa quando a pessoa confirma.' },
+    `<section class="stats" aria-label="Resumo dos lembretes">${stats}</section>
+<div class="split wide-left">
+ <section class="block flush"><div class="block-head pad"><h2>Por pessoa</h2></div>${rows ? `<div class="table-wrap"><table class="data users reminders"><caption class="sr-only">Lembretes por pessoa</caption><thead><tr><th scope="col">Pessoa</th><th scope="col">Último lembrete</th><th scope="col" class="num">Perguntados</th><th scope="col" class="num">Respondidos</th><th scope="col">Lembretes</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="pad-b">${emptyState('users', 'Ninguém autorizado ainda', 'Lembretes só vão para números autorizados.')}</div>`}</section>
+ <section class="block"><div class="block-head"><h2>Se rodasse agora</h2><span class="meta">${icon('lock')}prévia, nada é enviado</span></div>${previewBlock}</section>
+</div>
+<p class="foot">Regras fixas no código: no máximo 1 mensagem proativa por pessoa por dia, cada lançamento é perguntado até 3 vezes e a pessoa pode pedir "parar lembretes" a qualquer momento; nesse caso o lembrete dela aparece aqui como desligado.</p>`
   );
 }

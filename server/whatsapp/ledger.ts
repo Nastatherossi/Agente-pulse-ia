@@ -95,6 +95,11 @@ export class SupabaseLedger implements Ledger {
     return this.rest<T>(`rpc/${name}`, { method: 'POST', body: JSON.stringify(args) });
   }
 
+  /** Só procura a conta do número; nunca cria (usado pela prévia de lembretes do painel). */
+  lookup(phone: string): Promise<Workspace | null> {
+    return this.find(phone);
+  }
+
   private async find(phone: string): Promise<Workspace | null> {
     const rows = await this.rpc<{ user_id: string; workspace_id: string; account_id: string }[]>('whatsapp_workspace_for_phone', { p_phone: phone });
     const r = rows[0];

@@ -4,7 +4,7 @@ export type UsageRow = { phone: string; messageId: string; source: 'text' | 'aud
   /** Só preenchidos em turnos com problema (erro, não entendeu, ferramenta bloqueada), para o dono depurar no painel. */
   userText?: string; replyText?: string; intent?: string; durationMs?: number; confirmation?: string; steps?: unknown };
 
-export type TurnDetail = UsageRecord & { message_id: string; source?: string; model_calls?: number; user_text: string | null; reply_text: string | null; intent: string | null; duration_ms: number | null; confirmation: string | null; steps: unknown };
+export type TurnDetail = UsageRecord & { message_id: string; source?: string; model_calls?: number; user_text: string | null; reply_text: string | null; intent: string | null; duration_ms: number | null; confirmation: string | null; steps: unknown; resolved_at?: string | null };
 
 export type UsageRecord = { phone: string; model: string | null; input_tokens: number; output_tokens: number; status: string; error_code: string | null; created_at: string };
 
@@ -131,6 +131,17 @@ export class SupabaseStore implements Store {
 
   async problemTurns(iso: string, limit = 100) {
     return this.rest<TurnDetail[]>(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
+  }
+
+  /** Painel de gestão: marca (ou desmarca, com null) um problema como resolvido. */
+  async setResolved(messageId: string, atIso: string | null) {
+    await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}`, { method: 'PATCH', body: JSON.stringify({ resolved_at: atIso }), prefer: 'return=minimal' });
+  }
+
+  /** Painel de gestão: lembretes enviados ou criados desde `iso` (histórico, só leitura). */
+  remindersSince(iso: string) {
+    const t = encodeURIComponent(iso);
+    return this.rest<ReminderState[]>(`whatsapp_reminders?or=(last_sent_at.gte.${t},created_at.gte.${t})&select=*&order=last_sent_at.desc.nullslast&limit=1000`);
   }
 
   async turn(messageId: string) {

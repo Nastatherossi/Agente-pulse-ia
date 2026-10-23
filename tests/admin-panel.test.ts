@@ -1,5 +1,5 @@
 import {describe,it,expect,vi} from 'vitest';
-import {createAdmin,summarize,sessionToken,esc,COOKIE,type AdminDeps} from '../server/admin/panel';
+import entry,{createAdmin,summarize,sessionToken,esc,COOKIE,backTo,type AdminDeps} from '../server/admin/panel';
 import type {UsageRecord,TurnDetail} from '../server/whatsapp/store';
 import {fmtPhone} from '../server/admin/panel';
 import type {Contact} from '../shared/whatsapp/access';
@@ -15,6 +15,8 @@ const setup=(over:Partial<AdminDeps>={})=>{
  return {run,handler:createAdmin({password:PASS},deps)};
 };
 const authed={cookie:`${COOKIE}=${sessionToken(PASS)}`};
+/** Segue o redirecionamento depois de uma ação (POST/Redirect/GET), levando o cookie de aviso. */
+const follow=async(handler:any,r:any)=>{const flash=String(r.headers['Set-Cookie']??'').split(';')[0];const r2=res();await handler({method:'GET',url:r.headers.Location,headers:{cookie:`${authed.cookie}; ${flash}`}},r2);return r2;};
 
 describe('painel de gestão',()=>{
  it('sem senha configurada fica desativado',async()=>{
@@ -48,11 +50,11 @@ describe('painel de gestão',()=>{
  });
  it('autorizar chama o mesmo comando do dono e mostra o resultado',async()=>{
   const {handler,run}=setup();const r=res();await handler({method:'POST',headers:authed,body:{action:'authorize',phone:'+55 11 92222-0000'}},r);
-  expect(run).toHaveBeenCalledWith('autorizar 5511922220000');expect(r.body).toContain('Autorizado.');
+  expect(run).toHaveBeenCalledWith('autorizar 5511922220000');expect(r.code).toBe(303);expect((await follow(handler,r)).body).toContain('Autorizado.');
  });
  it('telefone inválido não executa',async()=>{
   const {handler,run}=setup();const r=res();await handler({method:'POST',headers:authed,body:{action:'block',phone:'12'}},r);
-  expect(run).not.toHaveBeenCalled();expect(r.body).toContain('Número inválido');
+  expect(run).not.toHaveBeenCalled();expect((await follow(handler,r)).body).toContain('Número inválido');
  });
  it('erro do banco vira mensagem, sem vazar detalhe',async()=>{
   const {handler}=setup({source:{contacts:async()=>{throw new Error('SUPABASE_500 secret');},usageSince:async()=>[],problemTurns:async()=>[],turn:async()=>null}});const r=res();await handler({method:'GET',headers:authed},r);
@@ -119,7 +121,7 @@ describe('central de gestão (redesign)',()=>{
  });
  it('ação feita na tela de usuários mostra o resultado nela',async()=>{
   const {handler,run}=setup();const r=res();await handler({method:'POST',url:'/admin?v=usuarios',headers:authed,body:{action:'block',phone:'5511911110000'}},r);
-  expect(run).toHaveBeenCalledWith('bloquear 5511911110000');expect(r.body).toContain('Autorizado.');expect(r.body).toContain('data-table');
+  expect(run).toHaveBeenCalledWith('bloquear 5511911110000');expect(r.headers.Location).toBe('/admin?v=usuarios');const r2=await follow(handler,r);expect(r2.body).toContain('Autorizado.');expect(r2.body).toContain('data-table');
  });
  it('sem preço: custo aparece como indisponível, nunca como zero',async()=>{
   const r=await get('/admin?v=ia');
@@ -168,5 +170,66 @@ describe('resumo diário',()=>{
  it('agrupa por modelo',()=>{
   const s=summarize([],[u('1',1,{model:'a'}),u('1',2,{model:'a'}),u('1',3,{model:null})],NOW);
   expect(s.models[0]).toEqual({model:'a',messages:2,tokens:2200});
+ });
+});
+
+describe('ajustes de backend do painel',()=>{
+ const full=(over:Partial<AdminDeps['source']>={})=>{
+  const setResolved=vi.fn().mockResolvedValue(undefined),setReminders=vi.fn().mockResolvedValue(undefined);
+  const turns=[turn('T1'),turn('T2',{status:'clarification',error_code:null,resolved_at:new Date(NOW-600_000).toISOString(),user_text:'aquele lá'})];
+  const source:AdminDeps['source']={contacts:async()=>[c('5511911110000','authorized','Ana'),{...c('5511933330000','authorized','Bia'),reminders_enabled:false}],usageSince:async()=>[u('5511911110000',1)],problemTurns:async()=>turns,turn:async id=>turns.find(t=>t.message_id===id)??null,setResolved,setReminders,
+   reminders:async()=>[{transaction_id:'x1',workspace_id:'w',phone:'5511911110000',sent_count:1,last_sent_at:new Date(NOW-3600_000).toISOString(),answered_at:null}],
+   reminderPreview:async()=>[{phone:'5511911110000',text:'Ana, você tinha R$ 50,00 de <luz> previsto pra hoje.'}],...over};
+  const run=vi.fn().mockResolvedValue('ok');
+  return {setResolved,setReminders,run,handler:createAdmin({password:PASS},{source,run,now:()=>NOW})};
+ };
+ const get=async(h:any,url:string,cookie=authed.cookie)=>{const r=res();await h({method:'GET',url,headers:{cookie}},r);return r;};
+ it('ação redireciona (atualizar a página não repete) e o aviso aparece uma vez só',async()=>{
+  const {handler,run}=setup();const r=res();await handler({method:'POST',url:'/admin?v=usuarios',headers:authed,body:{action:'block',phone:'5511911110000'}},r);
+  expect(r.code).toBe(303);expect(r.headers['Set-Cookie']).toMatch(/pulse_admin_flash=.*HttpOnly; Secure; SameSite=Strict/);
+  const r2=await follow(handler,r);expect(r2.body).toContain('Autorizado.');expect(r2.headers['Set-Cookie']).toMatch(/pulse_admin_flash=; .*Max-Age=0/);
+  expect(run).toHaveBeenCalledTimes(1);
+ });
+ it('o retorno depois da ação nunca sai do /admin',()=>{
+  expect(backTo('https://evil.example/x')).toBe('/admin');expect(backTo('/admin?v=//evil')).toBe('/admin');
+  expect(backTo('/admin?v=turno&id=T1&x=1')).toBe('/admin?v=turno&id=T1');expect(backTo('/admin?v=problemas&estado=resolvidos')).toBe('/admin?v=problemas&estado=resolvidos');
+ });
+ it('resolver e reabrir gravam a data (ou nulo) e voltam para a mesma tela',async()=>{
+  const {handler,setResolved}=full();const r=res();await handler({method:'POST',url:'/admin?v=turno&id=T1',headers:authed,body:{action:'resolve',id:'T1'}},r);
+  expect(setResolved).toHaveBeenCalledWith('T1',new Date(NOW).toISOString());expect(r.headers.Location).toBe('/admin?v=turno&id=T1');
+  expect((await follow(handler,r)).body).toContain('Problema marcado como resolvido.');
+  const r3=res();await handler({method:'POST',url:'/admin?v=problemas&estado=resolvidos',headers:authed,body:{action:'reopen',id:'T2'}},r3);
+  expect(setResolved).toHaveBeenCalledWith('T2',null);
+ });
+ it('problemas: abertos por padrão, resolvidos na outra aba, contador só dos abertos',async()=>{
+  const {handler}=full();
+  const open=await get(handler,'/admin?v=problemas');expect(open.body).toContain('gastei 50 no mercado');expect(open.body).not.toContain('aquele lá');expect(open.body).toContain('aria-label="1 problemas abertos"');expect(open.body).toContain('Marcar como resolvido');
+  const done=await get(handler,'/admin?v=problemas&estado=resolvidos');expect(done.body).toContain('aquele lá');expect(done.body).toContain('Reabrir');
+  const home=await get(handler,'/admin');expect(home.body).not.toContain('aquele lá');
+ });
+ it('sem suporte a resolver no banco, os botões não aparecem',async()=>{
+  const {handler}=setup();const r=await get(handler,'/admin?v=problemas');expect(r.body).not.toContain('Marcar como resolvido');
+ });
+ it('liga e desliga lembretes por pessoa; telefone inválido não chama nada',async()=>{
+  const {handler,setReminders}=full();
+  const r=res();await handler({method:'POST',url:'/admin?v=lembretes',headers:authed,body:{action:'reminders',phone:'5511911110000',enabled:'0'}},r);
+  expect(setReminders).toHaveBeenCalledWith('5511911110000',false);expect((await follow(handler,r)).body).toContain('Lembretes desligados');
+  const r2=res();await handler({method:'POST',headers:authed,body:{action:'reminders',phone:'12',enabled:'1'}},r2);expect(setReminders).toHaveBeenCalledTimes(1);
+ });
+ it('tela de lembretes: prévia escapada, histórico e chave por pessoa',async()=>{
+  const {handler}=full();const r=await get(handler,'/admin?v=lembretes');
+  expect(r.code).toBe(200);expect(r.body).toContain('&lt;luz&gt;');expect(r.body).not.toContain('<luz>');expect(r.body).toContain('nada é enviado');
+  expect(r.body).toContain('role="switch" aria-checked="true"');expect(r.body).toContain('role="switch" aria-checked="false"');expect(r.body).not.toMatch(/style=/);
+ });
+ it('prévia com falha não derruba a tela',async()=>{
+  const {handler}=full({reminderPreview:async()=>{throw new Error('boom');}});const r=await get(handler,'/admin?v=lembretes');
+  expect(r.code).toBe(200);expect(r.body).toContain('Não consegui montar a prévia');expect(r.body).not.toContain('boom');
+ });
+ it('na Vercel, sem senha o painel fica desativado em vez de quebrar',async()=>{
+  vi.stubEnv('ADMIN_PASSWORD','');vi.stubEnv('SUPABASE_URL','');vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY','');
+  const r=res();await entry({method:'GET',url:'/admin',headers:{}},r);expect(r.code).toBe(503);expect(r.body).toContain('Painel desativado');
+  vi.stubEnv('ADMIN_PASSWORD',PASS);const r2=res();await entry({method:'GET',url:'/admin',headers:{}},r2);
+  expect(r2.code).toBe(503);expect(r2.body).toContain('SUPABASE_URL');expect(r2.body).not.toContain(PASS);
+  vi.unstubAllEnvs();
  });
 });

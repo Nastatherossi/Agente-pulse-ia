@@ -167,6 +167,15 @@ var SupabaseStore = class {
   async problemTurns(iso, limit = 100) {
     return this.rest(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
   }
+  /** Painel de gestão: marca (ou desmarca, com null) um problema como resolvido. */
+  async setResolved(messageId, atIso) {
+    await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}`, { method: "PATCH", body: JSON.stringify({ resolved_at: atIso }), prefer: "return=minimal" });
+  }
+  /** Painel de gestão: lembretes enviados ou criados desde `iso` (histórico, só leitura). */
+  remindersSince(iso) {
+    const t = encodeURIComponent(iso);
+    return this.rest(`whatsapp_reminders?or=(last_sent_at.gte.${t},created_at.gte.${t})&select=*&order=last_sent_at.desc.nullslast&limit=1000`);
+  }
   async turn(messageId) {
     const rows = await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}&select=*&limit=1`);
     return rows[0] ?? null;
@@ -299,6 +308,8 @@ var pendingOperation = z2.object({ id: z2.string().uuid(), kind: z2.enum(["edit"
 var memory = z2.object({ topic: z2.enum(["saldo", "despesas", "receitas", "analise"]).optional(), periods: z2.array(period).max(2).default([]), transactionDate: isoDate.optional(), pending: transaction.optional(), operation: pendingOperation.optional() }).strict();
 var historyEntry = z2.object({ role: z2.enum(["user", "assistant"]), content: z2.string().max(1800) }).strict();
 var sessionSchema = z2.object({ version: z2.literal(2), narrative: narrativeSchema.default(() => createNarrative()), id: z2.string().uuid(), state: financialState, memory, history: z2.array(historyEntry).max(10), lastRequests: z2.array(z2.object({ id: z2.string().uuid(), messageHash: z2.string().max(64), trace: z2.unknown() })).max(8), expiresAt: z2.number().int() }).strict().refine((s) => s.narrative.records.every((r) => r.ownerId === s.id), "MEMORY_OWNER_MISMATCH");
+var brl = (cents2) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents2 / 100);
+var todayBR = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
 
 // server/whatsapp/ledger.ts
 var MAX_STATE_TRANSACTIONS = 300;
@@ -341,6 +352,10 @@ var SupabaseLedger = class {
   }
   rpc(name, args) {
     return this.rest(`rpc/${name}`, { method: "POST", body: JSON.stringify(args) });
+  }
+  /** Só procura a conta do número; nunca cria (usado pela prévia de lembretes do painel). */
+  lookup(phone) {
+    return this.find(phone);
   }
   async find(phone) {
     const rows = await this.rpc("whatsapp_workspace_for_phone", { p_phone: phone });
@@ -648,7 +663,88 @@ var toolDefinitions = Object.entries(toolSchemas).map(([name, schema]) => ({ typ
 var resultSchema = z4.object({ model: z4.string().optional(), usage: z4.object({ prompt_tokens: z4.number().int().nonnegative(), completion_tokens: z4.number().int().nonnegative(), total_tokens: z4.number().int().nonnegative() }).optional(), choices: z4.array(z4.object({ finish_reason: z4.string().nullish(), message: z4.object({ content: z4.string().nullish(), refusal: z4.string().nullish(), tool_calls: z4.array(z4.object({ id: z4.string().min(1).max(100), type: z4.literal("function"), function: z4.object({ name: z4.string().min(1).max(80), arguments: z4.string().max(1e4) }) })).max(8).optional() }) })).min(1) });
 
 // server/whatsapp/reminders.ts
+var MAX_ASKS_PER_ITEM = 3;
+var MAX_ITEMS_PER_MESSAGE = 3;
 var REPLY_WINDOW_MS = 48 * 36e5;
+var MAX_MESSAGES_PER_RUN = 60;
+var first = (name) => name?.trim().split(/\s+/)[0] || void 0;
+var dm = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+var dayLabel = (item, today) => item.expectedDate === today ? "pra hoje" : `pro dia ${dm(item.expectedDate)}`;
+var what = (i) => `${brl(Math.round(i.amount * 100))} de ${i.description}${i.category && i.category !== i.description ? ` (${i.category})` : ""}`;
+var optOutNote = 'Se preferir n\xE3o receber esses lembretes, \xE9 s\xF3 me dizer "parar lembretes". \u{1F609}';
+function composeReminder(items, name, today, firstEver) {
+  const nm = name ? `${name}, ` : "";
+  const shown = items.slice(0, MAX_ITEMS_PER_MESSAGE);
+  let body;
+  if (shown.length === 1) {
+    const i = shown[0];
+    body = i.type === "receita" ? `${name ? `Fala, ${name}, blz?` : "Oi, tudo bem?"} Aqueles ${what(i)} que estavam previstos ${dayLabel(i, today)} j\xE1 ca\xEDram? Me avisa aqui que eu dou baixa pra voc\xEA. \u{1F49C}` : `${nm}${name ? "v" : "V"}oc\xEA tinha ${what(i)} previsto ${dayLabel(i, today)}. J\xE1 foi pago? Me avisa aqui que eu dou baixa pra voc\xEA. \u{1F49C}`;
+  } else {
+    const lines = shown.map((i) => `\u2022 ${i.type === "receita" ? "Receber" : "Pagar"} ${what(i)} (${i.expectedDate === today ? "hoje" : dm(i.expectedDate)})`).join("\n");
+    const more = items.length > shown.length ? `
+\u2026e mais ${items.length - shown.length}.` : "";
+    body = `${name ? `Fala, ${name}, blz?` : "Oi, tudo bem?"} Hoje tem umas pend\xEAncias por aqui:
+${lines}${more}
+J\xE1 aconteceram? Me conta aqui que eu dou baixa pra voc\xEA. \u{1F49C}`;
+  }
+  return firstEver ? `${body}
+
+${optOutNote}` : body;
+}
+async function runReminders(deps, opts = {}) {
+  const today = deps.today?.() ?? todayBR();
+  const nowMs = deps.now?.() ?? Date.now();
+  const startOfDay = (/* @__PURE__ */ new Date(`${today}T00:00:00-03:00`)).toISOString();
+  const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const out = { sent: 0, skipped: 0, failed: 0, messages: [] };
+  const contacts = (await deps.store.listContacts()).filter((c) => c.status === "authorized" && c.reminders_enabled !== false);
+  for (const c of contacts) {
+    if (out.sent >= MAX_MESSAGES_PER_RUN) break;
+    try {
+      const last = await deps.store.lastReminderAt(c.phone);
+      if (last && last >= startOfDay) {
+        out.skipped++;
+        continue;
+      }
+      const ws = await deps.ledger.resolve(c.phone, c.name ?? void 0);
+      const due = await deps.ledger.due(ws, today);
+      if (!due.length) {
+        out.skipped++;
+        continue;
+      }
+      const states = new Map((await deps.store.reminderStates(due.map((d) => d.id))).map((s) => [s.transaction_id, s]));
+      const items = due.filter((d) => (states.get(d.id)?.sent_count ?? 0) < MAX_ASKS_PER_ITEM);
+      if (!items.length) {
+        out.skipped++;
+        continue;
+      }
+      const firstEver = !last;
+      const text = composeReminder(items, first(c.name), today, firstEver);
+      out.messages.push({ phone: c.phone, text });
+      if (opts.dry) continue;
+      await deps.messenger.sendText(c.phone, text);
+      const asked = items.slice(0, MAX_ITEMS_PER_MESSAGE).map((i) => ({ id: i.id, workspaceId: ws.workspaceId }));
+      await deps.store.markReminded(asked, c.phone, new Date(nowMs).toISOString());
+      await rememberInSession(deps.store, c.phone, text, nowMs).catch(() => void 0);
+      out.sent++;
+      await sleep(2500 + Math.floor(Math.random() * 2500));
+    } catch (e) {
+      out.failed++;
+      deps.log?.({ event: "reminder_failed", message: e instanceof Error ? e.message : "unknown" });
+    }
+  }
+  return out;
+}
+async function rememberInSession(store, phone, text, nowMs) {
+  const stored = await store.getSession(phone);
+  if (!stored) return;
+  const parsed = sessionSchema.safeParse(stored.session);
+  if (!parsed.success) return;
+  const s = parsed.data;
+  s.history = [...s.history, { role: "assistant", content: text.slice(0, 1800) }].slice(-10);
+  s.expiresAt = nowMs + 365 * 864e5;
+  await store.saveSession(phone, s, stored.version);
+}
 
 // server/whatsapp/handler.ts
 var DAY = 365 * 24 * 60 * 60 * 1e3;
@@ -702,7 +798,7 @@ function relTime(iso, nowMs) {
   if (d < 7) return `h\xE1 ${d} dias`;
   return new Date(iso).toLocaleDateString("pt-BR", { timeZone: TZ, day: "2-digit", month: "short" });
 }
-var dayLabel = (key) => (/* @__PURE__ */ new Date(`${key}T12:00:00Z`)).toLocaleDateString("pt-BR", { timeZone: "UTC", day: "numeric", month: "short" }).replace(".", "");
+var dayLabel2 = (key) => (/* @__PURE__ */ new Date(`${key}T12:00:00Z`)).toLocaleDateString("pt-BR", { timeZone: "UTC", day: "numeric", month: "short" }).replace(".", "");
 var weekday = (key) => (/* @__PURE__ */ new Date(`${key}T12:00:00Z`)).toLocaleDateString("pt-BR", { timeZone: "UTC", weekday: "short" }).replace(".", "");
 var STATUS = { authorized: "Autorizado", pending: "Pendente", blocked: "Bloqueado" };
 var ERROR_HELP = {
@@ -756,13 +852,15 @@ var P = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
   sort: '<path d="M8 9l4-4 4 4M8 15l4 4 4-4"/>',
   pulse: '<path d="M3 12h4l2.5-6 4 12 2.5-6H21"/>',
+  bell: '<path d="M6 16v-5a6 6 0 0 1 12 0v5l1.5 2.5h-15z"/><path d="M10 21h4"/>',
+  undo: '<path d="M9 14l-5-5 5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
   cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>'
 };
 var icon = (name, cls = "") => `<svg class="ico${cls ? ` ${cls}` : ""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${P[name] ?? ""}</svg>`;
 var mark = () => '<svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="9" fill="currentColor"/><path d="M6 17h5l3-8 4.5 14 3-6H26" fill="none" stroke="#0A0D16" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 // server/admin/views.ts
-var trackingLabel = dayLabel(TRACKING_SINCE);
+var trackingLabel = dayLabel2(TRACKING_SINCE);
 var plural = (n, one, many) => `${fmtInt(n)} ${n === 1 ? one : many}`;
 var clip = (t, n) => t ? t.length > n ? `${t.slice(0, n)}\u2026` : t : "";
 var who = (contacts, phone) => contacts.find((c) => c.phone === phone)?.name || "";
@@ -778,15 +876,16 @@ var loginPage = (error) => doc(
 );
 var plainPage = (title, text) => doc("Pulse \u2014 gest\xE3o", `<main class="login"><div class="login-card"><div class="login-brand">${mark()}<div><strong>Pulse</strong><span>Central de gest\xE3o</span></div></div><h1 class="plain-title">${esc(title)}</h1><p class="login-note">${esc(text)}</p><p><a class="btn ghost" href="/admin">${icon("refresh")}Tentar de novo</a></p></div></main>`, "is-login");
 var NAV = [
-  ["home", "/admin", "overview", "Vis\xE3o geral"],
-  ["usuarios", "/admin?v=usuarios", "users", "Usu\xE1rios"],
-  ["ia", "/admin?v=ia", "ai", "IA e custos"],
-  ["problemas", "/admin?v=problemas", "alert", "Problemas"],
-  ["config", "/admin?v=config", "settings", "Configura\xE7\xE3o"]
+  ["home", "/admin", "overview", "Vis\xE3o geral", "In\xEDcio"],
+  ["usuarios", "/admin?v=usuarios", "users", "Usu\xE1rios", "Usu\xE1rios"],
+  ["ia", "/admin?v=ia", "ai", "IA e custos", "IA"],
+  ["problemas", "/admin?v=problemas", "alert", "Problemas", "Problemas"],
+  ["lembretes", "/admin?v=lembretes", "bell", "Lembretes", "Lembretes"],
+  ["config", "/admin?v=config", "settings", "Configura\xE7\xE3o", "Ajustes"]
 ];
 function shell(view, ctx, head, inner) {
-  const badge = (v) => v === "problemas" && ctx.problems ? `<b class="count bad" aria-label="${ctx.problems} problemas">${ctx.problems}</b>` : v === "usuarios" && ctx.pending ? `<b class="count warn" aria-label="${ctx.pending} aguardando">${ctx.pending}</b>` : "";
-  const links = (cls) => NAV.map(([v, href, ic, label]) => `<a class="${cls}" href="${href}"${v === view ? ' aria-current="page"' : ""}>${icon(ic)}<span class="label">${label}</span>${badge(v)}</a>`).join("");
+  const badge = (v) => v === "problemas" && ctx.problems ? `<b class="count bad" aria-label="${ctx.problems} problemas abertos">${ctx.problems}</b>` : v === "usuarios" && ctx.pending ? `<b class="count warn" aria-label="${ctx.pending} aguardando">${ctx.pending}</b>` : "";
+  const links = (cls) => NAV.map(([v, href, ic, label, short]) => `<a class="${cls}" href="${href}"${v === view ? ' aria-current="page"' : ""}${cls === "tab" && short !== label ? ` aria-label="${label}"` : ""}>${icon(ic)}<span class="label">${cls === "tab" ? short : label}</span>${badge(v)}</a>`).join("");
   const here = NAV.find((n) => n[0] === view);
   const flashBad = ctx.flash && /inválido|não consegui|erro/i.test(ctx.flash);
   const flash = ctx.flash ? `<div class="flash ${flashBad ? "bad" : "ok"}" role="status">${icon(flashBad ? "error" : "check")}<span>${esc(ctx.flash)}</span></div>` : "";
@@ -813,37 +912,37 @@ function shell(view, ctx, head, inner) {
 <div class="tip" role="tooltip" id="tip" hidden></div>`
   );
 }
-var dayTip = (d, extra = [], last = false) => d.tracked ? [`${weekday(d.day)}, ${dayLabel(d.day)}${last ? " (hoje, at\xE9 agora)" : ""}`, plural(d.messages, "mensagem", "mensagens"), `${fmtInt(d.input + d.output)} tokens`, ...extra, d.errors ? plural(d.errors, "erro", "erros") : "Sem erros"].join("\n") : `${weekday(d.day)}, ${dayLabel(d.day)}
+var dayTip = (d, extra = [], last = false) => d.tracked ? [`${weekday(d.day)}, ${dayLabel2(d.day)}${last ? " (hoje, at\xE9 agora)" : ""}`, plural(d.messages, "mensagem", "mensagens"), `${fmtInt(d.input + d.output)} tokens`, ...extra, d.errors ? plural(d.errors, "erro", "erros") : "Sem erros"].join("\n") : `${weekday(d.day)}, ${dayLabel2(d.day)}
 Sem registro: o consumo passou a ser registrado em ${trackingLabel}`;
 function axisLabels(days) {
   const step = days.length <= 7 ? 1 : days.length <= 14 ? 2 : 5;
   const narrow = days.length <= 7 ? 2 : days.length <= 14 ? 4 : 10;
   return `<div class="x-axis" aria-hidden="true">${days.map((d, i) => {
     const k = days.length - 1 - i;
-    return `<span${k % narrow === 0 ? ' class="keep"' : ""}>${k % step === 0 ? `<i class="long">${esc(dayLabel(d.day))}</i><i class="short">${esc(`${Number(d.day.slice(8))}/${Number(d.day.slice(5, 7))}`)}</i>` : ""}</span>`;
+    return `<span${k % narrow === 0 ? ' class="keep"' : ""}>${k % step === 0 ? `<i class="long">${esc(dayLabel2(d.day))}</i><i class="short">${esc(`${Number(d.day.slice(8))}/${Number(d.day.slice(5, 7))}`)}</i>` : ""}</span>`;
   }).join("")}</div>`;
 }
 function columns(days, tips) {
   return `<div class="cols" aria-hidden="true">${days.map((d, i) => `<span class="col${d.tracked ? "" : " off"}" data-tip="${esc(tips[i])}">${d.errors ? '<i class="err-mark"></i>' : ""}</span>`).join("")}</div>`;
 }
 function srTable(caption, days, cols) {
-  return `<table class="sr-only"><caption>${esc(caption)}</caption><thead><tr><th>Dia</th>${cols.map((c) => `<th>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>${days.map((d) => `<tr><td>${esc(dayLabel(d.day))}</td>${cols.map((c) => `<td>${d.tracked ? esc(c[1](d)) : "sem registro"}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+  return `<table class="sr-only"><caption>${esc(caption)}</caption><thead><tr><th>Dia</th>${cols.map((c) => `<th>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>${days.map((d) => `<tr><td>${esc(dayLabel2(d.day))}</td>${cols.map((c) => `<td>${d.tracked ? esc(c[1](d)) : "sem registro"}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
 }
 function pulseChart(days, id) {
   const W = days.length * 10, top = 10, base = 94;
   const max = Math.max(1, ...days.filter((d) => d.tracked).map((d) => d.messages));
   const y = (v) => base - v / max * (base - top);
-  const first = days.findIndex((d) => d.tracked);
-  const tracked = first < 0 ? [] : days.slice(first);
-  const pts = tracked.map((d, i) => `${(first + i) * 10 + 5},${y(d.messages).toFixed(2)}`);
-  const line = pts.length ? `M${first * 10},${y(tracked[0].messages).toFixed(2)} L${pts.join(" L")} L${W},${y(tracked[tracked.length - 1].messages).toFixed(2)}` : "";
-  const area = line ? `${line} L${W},${base} L${first * 10},${base} Z` : "";
-  const hatch = first !== 0 ? `<rect x="0" y="0" width="${(first < 0 ? days.length : first) * 10}" height="100" fill="url(#h-${id})"/><line x1="0" x2="${(first < 0 ? days.length : first) * 10}" y1="${base}" y2="${base}" class="base-off" vector-effect="non-scaling-stroke"/>` : "";
+  const first2 = days.findIndex((d) => d.tracked);
+  const tracked = first2 < 0 ? [] : days.slice(first2);
+  const pts = tracked.map((d, i) => `${(first2 + i) * 10 + 5},${y(d.messages).toFixed(2)}`);
+  const line = pts.length ? `M${first2 * 10},${y(tracked[0].messages).toFixed(2)} L${pts.join(" L")} L${W},${y(tracked[tracked.length - 1].messages).toFixed(2)}` : "";
+  const area = line ? `${line} L${W},${base} L${first2 * 10},${base} Z` : "";
+  const hatch = first2 !== 0 ? `<rect x="0" y="0" width="${(first2 < 0 ? days.length : first2) * 10}" height="100" fill="url(#h-${id})"/><line x1="0" x2="${(first2 < 0 ? days.length : first2) * 10}" y1="${base}" y2="${base}" class="base-off" vector-effect="non-scaling-stroke"/>` : "";
   return `<div class="chart pulse" data-chart tabindex="0" role="group" aria-label="Mensagens por dia, ${days.length} dias. Use as setas para ver cada dia.">
  <div class="y-axis" aria-hidden="true"><span>${fmtInt(max)}</span><span>${fmtInt(Math.round(max / 2))}</span><span>0</span></div>
  <div class="plot"><svg viewBox="0 0 ${W} 100" preserveAspectRatio="none" aria-hidden="true" focusable="false"><defs><pattern id="h-${id}" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" class="hatch"/></pattern><linearGradient id="g-${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="fill-a"/><stop offset="1" class="fill-b"/></linearGradient></defs>
  <line x1="0" x2="${W}" y1="${top}" y2="${top}" class="grid" vector-effect="non-scaling-stroke"/><line x1="0" x2="${W}" y1="${(top + base) / 2}" y2="${(top + base) / 2}" class="grid" vector-effect="non-scaling-stroke"/><line x1="0" x2="${W}" y1="${base}" y2="${base}" class="grid base" vector-effect="non-scaling-stroke"/>
- ${hatch}${area ? `<path d="${area}" fill="url(#g-${id})"/><path d="${line}" class="trace" vector-effect="non-scaling-stroke"/>` : ""}</svg>${first !== 0 ? `<span class="off-note">Sem registro antes de ${esc(trackingLabel)}</span>` : ""}${columns(days, days.map((d, i) => dayTip(d, [], i === days.length - 1)))}</div>
+ ${hatch}${area ? `<path d="${area}" fill="url(#g-${id})"/><path d="${line}" class="trace" vector-effect="non-scaling-stroke"/>` : ""}</svg>${first2 !== 0 ? `<span class="off-note">Sem registro antes de ${esc(trackingLabel)}</span>` : ""}${columns(days, days.map((d, i) => dayTip(d, [], i === days.length - 1)))}</div>
  ${axisLabels(days)}
  ${srTable("Mensagens por dia", days, [["Mensagens", (d) => fmtInt(d.messages)], ["Erros", (d) => fmtInt(d.errors)]])}
 </div>`;
@@ -852,8 +951,8 @@ function tokenChart(days, id, withCost) {
   const W = days.length * 10, top = 10, base = 94;
   const max = Math.max(1, ...days.filter((d) => d.tracked).map((d) => d.input + d.output));
   const h = (v) => v / max * (base - top);
-  const first = days.findIndex((d) => d.tracked);
-  const offW = (first < 0 ? days.length : first) * 10;
+  const first2 = days.findIndex((d) => d.tracked);
+  const offW = (first2 < 0 ? days.length : first2) * 10;
   const bars = days.map((d, i) => {
     if (!d.tracked || d.input + d.output === 0) return "";
     const hi = h(d.input), ho = h(d.output);
@@ -864,7 +963,7 @@ function tokenChart(days, id, withCost) {
  <div class="y-axis" aria-hidden="true"><span>${fmtShort(max)}</span><span>${fmtShort(Math.round(max / 2))}</span><span>0</span></div>
  <div class="plot"><svg viewBox="0 0 ${W} 100" preserveAspectRatio="none" aria-hidden="true" focusable="false"><defs><pattern id="h-${id}" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" class="hatch"/></pattern></defs>
  <line x1="0" x2="${W}" y1="${top}" y2="${top}" class="grid" vector-effect="non-scaling-stroke"/><line x1="0" x2="${W}" y1="${(top + base) / 2}" y2="${(top + base) / 2}" class="grid" vector-effect="non-scaling-stroke"/><line x1="0" x2="${W}" y1="${base}" y2="${base}" class="grid base" vector-effect="non-scaling-stroke"/>
- ${first !== 0 ? `<rect x="0" y="0" width="${offW}" height="100" fill="url(#h-${id})"/>` : ""}${bars}</svg>${first !== 0 ? `<span class="off-note">Sem registro antes de ${esc(trackingLabel)}</span>` : ""}${columns(days, tips)}</div>
+ ${first2 !== 0 ? `<rect x="0" y="0" width="${offW}" height="100" fill="url(#h-${id})"/>` : ""}${bars}</svg>${first2 !== 0 ? `<span class="off-note">Sem registro antes de ${esc(trackingLabel)}</span>` : ""}${columns(days, tips)}</div>
  ${axisLabels(days)}
  ${srTable("Tokens por dia", days, [["Entrada", (d) => fmtInt(d.input)], ["Sa\xEDda", (d) => fmtInt(d.output)], ["Mensagens", (d) => fmtInt(d.messages)]])}
 </div>`;
@@ -881,18 +980,24 @@ function personName(contacts, phone, masked = true) {
   const name = who(contacts, phone);
   return name ? esc(name) : esc(masked ? maskPhone(phone) : fmtPhone(phone));
 }
+function resolveForm(t, back, big = false) {
+  const resolved = Boolean(t.resolved_at);
+  return `<form method="post" action="${back}" data-busy="${resolved ? "Reabrindo\u2026" : "Salvando\u2026"}"><input type="hidden" name="action" value="${resolved ? "reopen" : "resolve"}"><input type="hidden" name="id" value="${esc(t.message_id)}"><button type="submit" class="btn ${big ? "" : "sm "}${resolved ? "ghost" : "ok"}">${icon(resolved ? "undo" : "check")}${resolved ? "Reabrir" : "Marcar como resolvido"}</button></form>`;
+}
 function incident(t, ctx, compact = false) {
-  const [label, tone, key] = sev(t);
+  const [label, tone0, key] = sev(t);
+  const resolved = Boolean(t.resolved_at);
+  const tone = resolved ? `${tone0} resolved` : tone0;
   const href = `/admin?v=turno&amp;id=${encodeURIComponent(t.message_id)}`;
   const steps = Array.isArray(t.steps) ? t.steps : [];
   const meta = [t.model ? esc(t.model) : "", `${fmtInt(t.input_tokens + t.output_tokens)} tokens`, t.duration_ms != null ? `${(t.duration_ms / 1e3).toFixed(1)} s` : "", t.source === "audio" ? "\xE1udio" : ""].filter(Boolean);
   const convo = `<div class="exchange"><p class="said"><span>Usu\xE1rio</span>${t.user_text ? esc(clip(t.user_text, compact ? 120 : 260)) : "<em>texto n\xE3o registrado</em>"}</p><p class="reply"><span>Pulse</span>${t.reply_text ? esc(clip(t.reply_text, compact ? 120 : 260)) : "<em>resposta n\xE3o registrada</em>"}</p></div>`;
   const details = !compact && (steps.length || t.error_code && ERROR_HELP[t.error_code]) ? `<details class="more"><summary>${icon("down")}Detalhes t\xE9cnicos${steps.length ? ` (${plural(steps.length, "passo", "passos")})` : ""}</summary>${t.error_code && ERROR_HELP[t.error_code] ? `<p class="explain">${esc(ERROR_HELP[t.error_code])}</p>` : ""}${steps.length ? `<ol class="mini-steps">${steps.map((x) => `<li class="${x?.status === "success" ? "ok" : "bad"}"><code>${esc(x?.name)}</code><span>${esc(x?.status)}</span></li>`).join("")}</ol>` : ""}</details>` : "";
-  return `<article class="incident ${tone}" data-kind="${key}"><div class="inc-rail" aria-hidden="true">${icon(sevIcon[key] ?? "alert")}</div><div class="inc-body">
- <header><span class="sev ${tone}">${esc(label)}${t.error_code ? `<code>${esc(t.error_code)}</code>` : ""}</span><time datetime="${esc(t.created_at)}" title="${esc(fmtFull(t.created_at))}">${esc(relTime(t.created_at, ctx.now))}</time></header>
+  return `<article class="incident ${tone}" data-kind="${key}"><div class="inc-rail" aria-hidden="true">${icon(resolved ? "check" : sevIcon[key] ?? "alert")}</div><div class="inc-body">
+ <header><span class="tags"><span class="sev ${tone0}">${esc(label)}${t.error_code ? `<code>${esc(t.error_code)}</code>` : ""}</span>${resolved ? `<span class="sev ok" title="${esc(fmtFull(t.resolved_at))}">${icon("check")}Resolvido ${esc(relTime(t.resolved_at, ctx.now))}</span>` : ""}</span><time datetime="${esc(t.created_at)}" title="${esc(fmtFull(t.created_at))}">${esc(relTime(t.created_at, ctx.now))}</time></header>
  <h3><a href="${href}">${personName(ctx.contacts, t.phone)}</a></h3>
  ${convo}
- ${compact ? "" : `<footer><span class="meta">${meta.join('<i aria-hidden="true"></i>')}</span><a class="link" href="${href}">Abrir incidente</a></footer>`}
+ ${compact ? "" : `<footer><span class="meta">${meta.join('<i aria-hidden="true"></i>')}</span><span class="inc-actions">${ctx.can?.resolve ? resolveForm(t, `/admin?v=problemas${resolved ? "&amp;estado=resolvidos" : ""}`) : ""}<a class="link" href="${href}">Abrir incidente</a></span></footer>`}
  ${details}
 </div></article>`;
 }
@@ -904,7 +1009,7 @@ function homePage(s, problems, ctx) {
   const errLine = s.errors1d ? ` ${plural(s.errors1d, "mensagem falhou", "mensagens falharam")} hoje.` : s.errors7d ? ` ${plural(s.errors7d, "mensagem falhou", "mensagens falharam")} na semana.` : "";
   const chips = [
     ctx.pending ? `<a class="chip warn" href="/admin?v=usuarios">${icon("users")}${plural(ctx.pending, "pessoa aguardando", "pessoas aguardando")} autoriza\xE7\xE3o</a>` : "",
-    problems.length ? `<a class="chip ${tone === "ok" ? "" : tone}" href="/admin?v=problemas">${icon("alert")}${plural(problems.length, "problema", "problemas")} em 30 dias</a>` : ""
+    problems.length ? `<a class="chip ${tone === "ok" ? "" : tone}" href="/admin?v=problemas">${icon("alert")}${plural(problems.length, "problema aberto", "problemas abertos")}</a>` : ""
   ].join("");
   const delta = (() => {
     if (s.messagesPrev7 === void 0 || s.messagesPrev7 === 0) return "";
@@ -944,7 +1049,7 @@ function homePage(s, problems, ctx) {
 </section>
 <section class="kpis" aria-label="Indicadores">${kpis}</section>
 <div class="split">
- <section class="block"><div class="block-head"><h2>Precisa de aten\xE7\xE3o</h2>${problems.length ? `<a class="link" href="/admin?v=problemas">Ver todos (${problems.length})</a>` : ""}</div>${recent ? `<div class="incidents compact">${recent}</div>` : emptyState("check", "Nada pendente", "Nenhum erro, recusa ou mensagem n\xE3o entendida nos \xFAltimos 30 dias.")}</section>
+ <section class="block"><div class="block-head"><h2>Precisa de aten\xE7\xE3o</h2>${problems.length ? `<a class="link" href="/admin?v=problemas">Ver todos (${problems.length})</a>` : ""}</div>${recent ? `<div class="incidents compact">${recent}</div>` : emptyState("check", "Nada pendente", "Nenhum problema aberto nos \xFAltimos 30 dias.")}</section>
  <div class="stack">${needyBlock}<section class="block"><div class="block-head"><h2>Quem mais usa</h2><a class="link" href="/admin?v=ia">Consumo por pessoa</a></div>${topRows ? `<ol class="rank">${topRows}</ol>` : emptyState("users", "Ningu\xE9m usou ainda", "Quando algu\xE9m conversar com o Pulse, o consumo aparece aqui.")}<p class="note">Tokens dos \xFAltimos 30 dias.</p></section></div>
 </div>
 <p class="foot">Consumo registrado desde ${trackingLabel}/2026. O texto da conversa s\xF3 fica guardado nos turnos com problema (erro, n\xE3o entendeu, recusado), para voc\xEA depurar.</p>`
@@ -973,6 +1078,7 @@ function usersPage(s, ctx) {
 <td data-l="Tokens" class="num">${tk ? fmtInt(tk) : '<span class="na">\u2014</span>'}</td>
 <td data-l="Custo" class="num">${p.cost === void 0 ? '<span class="na" title="Pre\xE7os n\xE3o configurados">\u2014</span>' : p.messages30d ? esc(fmtUsd(p.cost)) : '<span class="na">\u2014</span>'}</td>
 <td data-l="Erros" class="num">${p.errors ? `<span class="err-count">${icon("alert")}${p.errors}</span>` : '<span class="na">\u2014</span>'}</td>
+${ctx.can?.reminders ? `<td data-l="Lembretes">${reminderToggle(c, "usuarios")}</td>` : ""}
 <td class="actions">${actionForm(p, "usuarios")}</td></tr>`;
   }).join("");
   const th = (label, key, num = false) => `<th scope="col"${num ? ' class="num"' : ""} aria-sort="none"><button type="button" class="sort" data-sort="${key}"${num ? ' data-num="1"' : ""}>${label}${icon("sort")}</button></th>`;
@@ -983,7 +1089,7 @@ function usersPage(s, ctx) {
     total ? `<section class="block flush">
  <div class="toolbar needs-js"><label class="search">${icon("search")}<span class="sr-only">Buscar por nome ou telefone</span><input type="search" data-search placeholder="Buscar por nome ou telefone" autocomplete="off"></label>
  <div class="filters" role="group" aria-label="Filtrar por status">${chip("all", "Todos", total, true)}${chip("authorized", "Autorizados", s.counts.authorized)}${chip("pending", "Pendentes", s.counts.pending)}${chip("blocked", "Bloqueados", s.counts.blocked)}${withErr ? chip("err", "Com erros", withErr) : ""}</div></div>
- <div class="table-wrap"><table class="data users" data-table><caption class="sr-only">Usu\xE1rios do Pulse</caption><thead><tr>${th("Pessoa", "name")}<th scope="col">Status</th>${th("\xDAltima mensagem", "last", true).replace(' class="num"', "")}${th("Mensagens", "msgs", true)}${th("Tokens", "tokens", true)}${th("Custo", "cost", true)}${th("Erros", "err", true)}<th scope="col"><span class="sr-only">A\xE7\xF5es</span></th></tr></thead><tbody>${rows}</tbody></table>
+ <div class="table-wrap"><table class="data users" data-table><caption class="sr-only">Usu\xE1rios do Pulse</caption><thead><tr>${th("Pessoa", "name")}<th scope="col">Status</th>${th("\xDAltima mensagem", "last", true).replace(' class="num"', "")}${th("Mensagens", "msgs", true)}${th("Tokens", "tokens", true)}${th("Custo", "cost", true)}${th("Erros", "err", true)}${ctx.can?.reminders ? '<th scope="col">Lembretes</th>' : ""}<th scope="col"><span class="sr-only">A\xE7\xF5es</span></th></tr></thead><tbody>${rows}</tbody></table>
  <div class="empty filtered" data-noresults hidden>${icon("search")}<div><strong>Nenhum usu\xE1rio encontrado</strong><p>Mude a busca ou o filtro.</p></div></div></div>
 </section>
 <p class="foot">Autorizar e bloquear t\xEAm o mesmo efeito dos comandos do dono no WhatsApp. Custos s\xE3o estimativas a partir do pre\xE7o configurado.</p>` : emptyState("users", "Ningu\xE9m falou com o Pulse ainda", "Quando algu\xE9m mandar mensagem para o n\xFAmero do Pulse no WhatsApp, a pessoa aparece aqui para voc\xEA autorizar.")
@@ -1022,7 +1128,10 @@ ${priced ? "" : `<div class="notice">${icon("info")}<p><strong>Custo indispon\xE
 <p class="foot">Consumo registrado desde ${trackingLabel}/2026. Valores de custo s\xE3o estimativas; a fatura oficial est\xE1 no painel da OpenAI.</p>`
   );
 }
-function problemsPage(problems, ctx) {
+function problemsPage(all, ctx, mode = "open") {
+  const canResolve = Boolean(ctx.can?.resolve);
+  const openN = all.filter((t) => !t.resolved_at).length, doneN = all.length - openN;
+  const problems = canResolve ? all.filter((t) => mode === "resolved" ? t.resolved_at : !t.resolved_at) : all;
   const by = (k) => problems.filter((t) => sev(t)[2] === k).length;
   const chip = (f, label, n, on = false) => n || f === "all" ? `<button type="button" class="filter" data-kind-filter="${f}" aria-pressed="${on}">${label}<span>${n}</span></button>` : "";
   const groups = /* @__PURE__ */ new Map();
@@ -1032,13 +1141,15 @@ function problemsPage(problems, ctx) {
   }
   const today = new Date(ctx.now - 3 * 36e5).toISOString().slice(0, 10);
   const yesterday = new Date(ctx.now - 27 * 36e5).toISOString().slice(0, 10);
-  const dayName = (k) => k === today ? "Hoje" : k === yesterday ? "Ontem" : `${weekday(k)}, ${dayLabel(k)}`;
+  const dayName = (k) => k === today ? "Hoje" : k === yesterday ? "Ontem" : `${weekday(k)}, ${dayLabel2(k)}`;
   const list = [...groups.entries()].map(([k, items]) => `<section class="day-group" data-group><h2 class="day-title">${esc(dayName(k))}<span>${items.length}</span></h2><div class="incidents">${items.map((t) => incident(t, ctx)).join("")}</div></section>`).join("");
+  const tabs = canResolve ? `<nav class="seg" aria-label="Estado dos problemas"><a href="/admin?v=problemas"${mode === "open" ? ' aria-current="page"' : ""}>Abertos<span>${openN}</span></a><a href="/admin?v=problemas&amp;estado=resolvidos"${mode === "resolved" ? ' aria-current="page"' : ""}>Resolvidos<span>${doneN}</span></a></nav>` : "";
+  const empty = mode === "resolved" ? emptyState("check", "Nenhum problema resolvido ainda", "Quando voc\xEA marcar um problema como resolvido, ele aparece aqui.") : all.length ? emptyState("check", "Tudo resolvido", "N\xE3o h\xE1 problemas abertos. Os resolvidos continuam na aba ao lado.") : emptyState("check", "Nenhum problema registrado", "Nos \xFAltimos 30 dias o Pulse n\xE3o teve erros, recusas nem mensagens que n\xE3o entendeu.");
   return shell(
     "problemas",
     ctx,
     { title: "Problemas", lead: "Mensagens dos \xFAltimos 30 dias em que o Pulse deu erro, n\xE3o entendeu ou recusou uma a\xE7\xE3o." },
-    problems.length ? `<div class="toolbar needs-js"><div class="filters" role="group" aria-label="Filtrar por tipo">${chip("all", "Todos", problems.length, true)}${chip("erro", "Erros", by("erro"))}${chip("duvida", "N\xE3o entendeu", by("duvida"))}${chip("recusado", "Recusado", by("recusado"))}</div></div>${list}<div class="empty filtered" data-noresults hidden>${icon("search")}<div><strong>Nada deste tipo</strong><p>Escolha outro filtro.</p></div></div>` : emptyState("check", "Nenhum problema registrado", "Nos \xFAltimos 30 dias o Pulse n\xE3o teve erros, recusas nem mensagens que n\xE3o entendeu.")
+    `<div class="toolbar">${tabs}${problems.length ? `<div class="filters needs-js" role="group" aria-label="Filtrar por tipo">${chip("all", "Todos", problems.length, true)}${chip("erro", "Erros", by("erro"))}${chip("duvida", "N\xE3o entendeu", by("duvida"))}${chip("recusado", "Recusado", by("recusado"))}</div>` : ""}</div>${problems.length ? `${list}<div class="empty filtered" data-noresults hidden>${icon("search")}<div><strong>Nada deste tipo</strong><p>Escolha outro filtro.</p></div></div>` : empty}`
   );
 }
 function turnPage(t, ctx) {
@@ -1055,7 +1166,7 @@ function turnPage(t, ctx) {
     "problemas",
     ctx,
     { title: name || fmtPhone(t.phone), back: "/admin?v=problemas", lead: `<span class="sev ${tone}">${icon(sevIcon[key] ?? "alert")}${esc(label)}${t.error_code ? `<code>${esc(t.error_code)}</code>` : ""}</span> ${esc(fmtFull(t.created_at))}` },
-    `${help ? `<div class="notice ${tone}">${icon("info")}<p><strong>O que significa:</strong> ${esc(help)}</p></div>` : ""}
+    `${ctx.can?.resolve ? `<div class="state-bar ${t.resolved_at ? "done" : ""}">${t.resolved_at ? `${icon("check")}<p><strong>Resolvido</strong> ${esc(fmtFull(t.resolved_at))}</p>` : `${icon("clock")}<p><strong>Aberto.</strong> Quando voc\xEA corrigir a causa ou decidir que n\xE3o precisa de a\xE7\xE3o, marque como resolvido.</p>`}${resolveForm(t, `/admin?v=turno&amp;id=${encodeURIComponent(t.message_id)}`, true)}</div>` : ""}${help ? `<div class="notice ${tone}">${icon("info")}<p><strong>O que significa:</strong> ${esc(help)}</p></div>` : ""}
 <div class="split wide-left">
  <section class="block"><div class="block-head"><h2>Conversa</h2><span class="meta">${t.source === "audio" ? `${icon("mic")}\xE1udio transcrito` : "texto"}</span></div>
   <div class="thread"><div class="msg in"><span>O usu\xE1rio mandou</span><p>${esc(t.user_text ?? "(n\xE3o registrado)")}</p></div><div class="msg out"><span>O Pulse respondeu</span><p>${esc(t.reply_text ?? "(n\xE3o registrado)")}</p></div></div></section>
@@ -1076,13 +1187,61 @@ ${row("lock", "Acesso ao painel", "Ativo", "authorized", "Senha com 16 ou mais c
 ${row("coin", "Pre\xE7o do modelo", p ? "Configurado" : "N\xE3o configurado", p ? "authorized" : "pending", p ? `US$ ${esc(p.inputPerMTok)} por 1 milh\xE3o de tokens de entrada e US$ ${esc(p.outputPerMTok)} de sa\xEDda (<code>OPENAI_PRICE_IN_PER_MTOK</code>, <code>OPENAI_PRICE_OUT_PER_MTOK</code>).` : "Sem pre\xE7o, o painel mostra tokens mas n\xE3o custo. Defina <code>OPENAI_PRICE_IN_PER_MTOK</code> e <code>OPENAI_PRICE_OUT_PER_MTOK</code> em d\xF3lares por 1 milh\xE3o de tokens.")}
 ${row("pulse", "Registro de consumo", "Ativo", "authorized", `Cada mensagem do WhatsApp grava tokens, modelo e status desde ${trackingLabel}/2026. O painel l\xEA os \xFAltimos 30 dias.`)}
 ${row("message", "Texto das conversas", "S\xF3 em problemas", "neutral", "O texto da mensagem e da resposta s\xF3 \xE9 guardado quando o agente erra, n\xE3o entende ou recusa, para voc\xEA depurar.")}
+${row("bell", "Lembretes proativos", "Todo dia \xE0s 9h", "authorized", 'Agendados no <code>vercel.json</code> (cron da Vercel). Ligue ou desligue por pessoa em <a href="/admin?v=lembretes">Lembretes</a>. As regras (1 mensagem por dia, at\xE9 3 perguntas por lan\xE7amento) ficam no c\xF3digo.')}
 </ul></section>
-<p class="foot">Lembretes proativos e outras configura\xE7\xF5es do agente ainda n\xE3o t\xEAm controle por aqui.</p>`
+<p class="foot">Hor\xE1rio e regras dos lembretes ainda n\xE3o s\xE3o edit\xE1veis pelo painel.</p>`
+  );
+}
+function reminderToggle(c, view) {
+  if (c.status !== "authorized") return '<span class="na">\u2014</span>';
+  const on = c.reminders_enabled !== false;
+  const name = c.name || fmtPhone(c.phone);
+  return `<form method="post" action="/admin?v=${view}" class="toggle-form" data-busy="${on ? "Desligando\u2026" : "Ligando\u2026"}"><input type="hidden" name="action" value="reminders"><input type="hidden" name="phone" value="${esc(c.phone)}"><input type="hidden" name="enabled" value="${on ? "0" : "1"}"><button type="submit" class="switch" role="switch" aria-checked="${on}" aria-label="${esc(`Lembretes para ${name}`)}"><span class="knob" aria-hidden="true"></span><span class="switch-label">${on ? "Ligados" : "Desligados"}</span></button></form>`;
+}
+function remindersPage(history, preview, ctx) {
+  const authorized = ctx.contacts.filter((c) => c.status === "authorized");
+  const enabled = authorized.filter((c) => c.reminders_enabled !== false).length;
+  const h = history ?? [];
+  const asked = h.filter((r) => r.last_sent_at).length;
+  const answered = h.filter((r) => r.answered_at).length;
+  const waiting = h.filter((r) => r.last_sent_at && !r.answered_at && ctx.now - Date.parse(r.last_sent_at) <= 48 * 36e5).length;
+  const stat = (label, value, sub) => `<div class="stat"><span class="stat-label">${esc(label)}</span><strong class="figure">${value}</strong><p>${sub}</p></div>`;
+  const stats = [
+    stat("Lembretes ligados", `${fmtInt(enabled)}<small class="of">/${fmtInt(authorized.length)}</small>`, "pessoas autorizadas"),
+    stat("Lan\xE7amentos perguntados", history ? fmtInt(asked) : '<span class="na">\u2014</span>', history ? "nos \xFAltimos 30 dias" : "hist\xF3rico indispon\xEDvel"),
+    stat("Respondidos", history ? fmtInt(answered) : '<span class="na">\u2014</span>', history && asked ? `${Math.round(answered / asked * 100)}% dos perguntados` : "nenhuma pergunta ainda"),
+    stat("Aguardando resposta", history ? fmtInt(waiting) : '<span class="na">\u2014</span>', "perguntados nas \xFAltimas 48 h")
+  ].join("");
+  const byPhone = /* @__PURE__ */ new Map();
+  for (const r of h) byPhone.set(r.phone, [...byPhone.get(r.phone) ?? [], r]);
+  const rows = authorized.map((c) => {
+    const mine = byPhone.get(c.phone) ?? [];
+    const last = mine.map((r) => r.last_sent_at ?? "").sort().at(-1) || null;
+    const got = mine.filter((r) => r.answered_at).length;
+    return `<tr><td class="who-cell"><div class="person">${avatar(c.name, c.phone)}<div><span class="pname">${esc(c.name || "Sem nome")}</span><span class="phone">${esc(fmtPhone(c.phone))}</span></div></div></td>
+<td data-l="\xDAltimo lembrete">${last ? `<time datetime="${esc(last)}" title="${esc(fmtDate(last))}">${esc(relTime(last, ctx.now))}</time>` : '<span class="na">nunca</span>'}</td>
+<td data-l="Perguntados" class="num">${mine.length ? fmtInt(mine.length) : '<span class="na">\u2014</span>'}</td>
+<td data-l="Respondidos" class="num">${mine.length ? fmtInt(got) : '<span class="na">\u2014</span>'}</td>
+<td data-l="Lembretes">${ctx.can?.reminders ? reminderToggle(c, "lembretes") : esc(c.reminders_enabled === false ? "Desligados" : "Ligados")}</td></tr>`;
+  }).join("");
+  const name = (phone) => ctx.contacts.find((c) => c.phone === phone)?.name || maskPhone(phone);
+  const previewBlock = preview === void 0 ? `<div class="notice warn">${icon("info")}<p><strong>N\xE3o consegui montar a pr\xE9via agora.</strong> O envio di\xE1rio n\xE3o \xE9 afetado; tente atualizar a p\xE1gina.</p></div>` : preview.length ? `<ul class="previews">${preview.map((m) => `<li><div class="person">${avatar(name(m.phone), m.phone)}<span class="pname">${esc(name(m.phone))}</span></div><div class="msg out wa"><span>Pulse</span><p>${esc(m.text)}</p></div></li>`).join("")}</ul>` : emptyState("check", "Ningu\xE9m para lembrar agora", "Ou n\xE3o h\xE1 lan\xE7amentos previstos vencendo, ou o lembrete de hoje j\xE1 saiu para quem tinha.");
+  return shell(
+    "lembretes",
+    ctx,
+    { title: "Lembretes", lead: "Todo dia \xE0s 9h o Pulse pergunta no WhatsApp se o que estava previsto j\xE1 aconteceu, e d\xE1 baixa quando a pessoa confirma." },
+    `<section class="stats" aria-label="Resumo dos lembretes">${stats}</section>
+<div class="split wide-left">
+ <section class="block flush"><div class="block-head pad"><h2>Por pessoa</h2></div>${rows ? `<div class="table-wrap"><table class="data users reminders"><caption class="sr-only">Lembretes por pessoa</caption><thead><tr><th scope="col">Pessoa</th><th scope="col">\xDAltimo lembrete</th><th scope="col" class="num">Perguntados</th><th scope="col" class="num">Respondidos</th><th scope="col">Lembretes</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="pad-b">${emptyState("users", "Ningu\xE9m autorizado ainda", "Lembretes s\xF3 v\xE3o para n\xFAmeros autorizados.")}</div>`}</section>
+ <section class="block"><div class="block-head"><h2>Se rodasse agora</h2><span class="meta">${icon("lock")}pr\xE9via, nada \xE9 enviado</span></div>${previewBlock}</section>
+</div>
+<p class="foot">Regras fixas no c\xF3digo: no m\xE1ximo 1 mensagem proativa por pessoa por dia, cada lan\xE7amento \xE9 perguntado at\xE9 3 vezes e a pessoa pode pedir "parar lembretes" a qualquer momento; nesse caso o lembrete dela aparece aqui como desligado.</p>`
   );
 }
 
 // server/admin/panel.ts
 var COOKIE = "pulse_admin";
+var FLASH = "pulse_admin_flash";
 var MIN_PASSWORD = 16;
 var DAY2 = 864e5;
 var same = (a, b) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
@@ -1161,11 +1320,28 @@ function summarize(contacts, usage, nowMs, price) {
     people
   };
 }
+function backTo(url) {
+  let q = new URLSearchParams();
+  try {
+    q = new URL(url ?? "", "https://x.invalid").searchParams;
+  } catch {
+  }
+  const out = new URLSearchParams();
+  const v = q.get("v");
+  if (v && /^[a-z]{2,12}$/.test(v)) out.set("v", v);
+  const id = q.get("id");
+  if (id && id.length <= 200) out.set("id", id);
+  const estado = q.get("estado");
+  if (estado === "resolvidos") out.set("estado", estado);
+  const qs = out.toString();
+  return `/admin${qs ? `?${qs}` : ""}`;
+}
 function createAdmin(config, deps) {
   const token = config.password ? sessionToken(config.password) : "";
-  const html = (res, status, body) => {
+  const html = (res, status, body, setCookie) => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Type", "text/html; charset=utf-8");
+    if (setCookie) res.setHeader("Set-Cookie", setCookie);
     res.status(status).send(body);
   };
   const redirect = (res, to, cookie2) => {
@@ -1175,6 +1351,30 @@ function createAdmin(config, deps) {
     res.status(303).end();
   };
   const cookie = (value, maxAge) => `${COOKIE}=${value}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${maxAge}`;
+  const flashCookie = (msg, maxAge) => `${FLASH}=${encodeURIComponent(msg.slice(0, 300))}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${maxAge}`;
+  async function act(form) {
+    const now = deps.now?.() ?? Date.now();
+    if (form.action === "authorize" || form.action === "block") {
+      const phone = (form.phone ?? "").replace(/\D/g, "");
+      const command = `${form.action === "authorize" ? "autorizar" : "bloquear"} ${phone}`;
+      if (!phone || parseOwnerCommand(command)?.kind === "invalid") return "N\xFAmero inv\xE1lido.";
+      return deps.run(command);
+    }
+    if ((form.action === "resolve" || form.action === "reopen") && deps.source.setResolved) {
+      const id = (form.id ?? "").trim();
+      if (!id || id.length > 200) return "Problema inv\xE1lido.";
+      await deps.source.setResolved(id, form.action === "resolve" ? new Date(now).toISOString() : null);
+      return form.action === "resolve" ? "Problema marcado como resolvido." : "Problema reaberto.";
+    }
+    if (form.action === "reminders" && deps.source.setReminders) {
+      const phone = (form.phone ?? "").replace(/\D/g, "");
+      if (!/^\d{12,15}$/.test(phone)) return "N\xFAmero inv\xE1lido.";
+      const on = form.enabled === "1";
+      await deps.source.setReminders(phone, on);
+      return on ? "Lembretes ligados para esse n\xFAmero." : "Lembretes desligados para esse n\xFAmero.";
+    }
+    return void 0;
+  }
   return async function handler(req, res) {
     if (config.password.length < MIN_PASSWORD) return html(res, 503, plainPage("Painel desativado", `Defina ADMIN_PASSWORD (m\xEDnimo ${MIN_PASSWORD} caracteres) nas vari\xE1veis da Vercel e fa\xE7a um novo deploy.`));
     const authed = same(cookieOf(req, COOKIE), token);
@@ -1191,19 +1391,25 @@ function createAdmin(config, deps) {
     }
     if (!authed) return html(res, method === "POST" ? 401 : 200, loginPage());
     if (method === "POST" && form.action === "logout") return redirect(res, "/admin", cookie("", 0));
+    if (method === "POST") {
+      let msg;
+      try {
+        msg = await act(form);
+      } catch {
+        msg = "N\xE3o consegui concluir agora. Tente de novo.";
+      }
+      return redirect(res, backTo(req.url), msg ? flashCookie(msg, 60) : void 0);
+    }
+    const rawFlash = cookieOf(req, FLASH);
     let flash;
-    if (method === "POST" && (form.action === "authorize" || form.action === "block")) {
-      const phone = (form.phone ?? "").replace(/\D/g, "");
-      const command = `${form.action === "authorize" ? "autorizar" : "bloquear"} ${phone}`;
-      if (!phone || parseOwnerCommand(command)?.kind === "invalid") flash = "N\xFAmero inv\xE1lido.";
-      else {
-        try {
-          flash = await deps.run(command);
-        } catch {
-          flash = "N\xE3o consegui concluir agora. Tente de novo.";
-        }
+    if (rawFlash) {
+      try {
+        flash = decodeURIComponent(rawFlash);
+      } catch {
+        flash = void 0;
       }
     }
+    const clear = rawFlash ? flashCookie("", 0) : void 0;
     try {
       const now = deps.now?.() ?? Date.now();
       const since = new Date(now - 30 * DAY2).toISOString();
@@ -1214,40 +1420,54 @@ function createAdmin(config, deps) {
       }
       const view = q.get("v");
       const contacts = await deps.source.contacts();
-      const ctx = (problems2) => ({ now, contacts, problems: problems2, pending: contacts.filter((c2) => c2.status === "pending").length, flash, price: deps.price });
+      const can = { resolve: Boolean(deps.source.setResolved), reminders: Boolean(deps.source.setReminders) };
+      const ctx = (problems2) => ({ now, contacts, problems: problems2.filter((t) => !t.resolved_at).length, pending: contacts.filter((c2) => c2.status === "pending").length, flash, price: deps.price, can });
       if (view === "turno") {
         const [turn, problems2] = await Promise.all([deps.source.turn(q.get("id") ?? ""), deps.source.problemTurns(since)]);
-        return html(res, 200, turnPage(turn, ctx(problems2.length)));
+        return html(res, 200, turnPage(turn, ctx(problems2)), clear);
+      }
+      if (view === "lembretes") {
+        const [problems2, history, preview] = await Promise.all([
+          deps.source.problemTurns(since),
+          deps.source.reminders ? deps.source.reminders(since).catch(() => void 0) : Promise.resolve(void 0),
+          deps.source.reminderPreview ? deps.source.reminderPreview().catch(() => void 0) : Promise.resolve(void 0)
+        ]);
+        return html(res, 200, remindersPage(history, preview, ctx(problems2)), clear);
       }
       const [usage, problems] = await Promise.all([deps.source.usageSince(since), deps.source.problemTurns(since)]);
-      const c = ctx(problems.length);
-      if (view === "problemas") return html(res, 200, problemsPage(problems, c));
-      if (view === "config") return html(res, 200, configPage(c));
+      const c = ctx(problems);
+      if (view === "problemas") return html(res, 200, problemsPage(problems, c, q.get("estado") === "resolvidos" ? "resolved" : "open"), clear);
+      if (view === "config") return html(res, 200, configPage(c), clear);
       const s = summarize(contacts, usage, now, deps.price);
-      if (view === "usuarios") return html(res, 200, usersPage(s, c));
-      if (view === "ia") return html(res, 200, aiPage(s, c));
-      return html(res, 200, homePage(s, problems, c));
+      if (view === "usuarios") return html(res, 200, usersPage(s, c), clear);
+      if (view === "ia") return html(res, 200, aiPage(s, c), clear);
+      return html(res, 200, homePage(s, problems.filter((t) => !t.resolved_at), c), clear);
     } catch {
       return html(res, 502, plainPage("N\xE3o consegui ler o banco agora", "Atualize a p\xE1gina em instantes. Se continuar, confira o Supabase."));
     }
   };
 }
 var log = (event) => console.warn(JSON.stringify({ ...event, at: (/* @__PURE__ */ new Date()).toISOString() }));
+var offline = { contacts: async () => [], usageSince: async () => [], problemTurns: async () => [], turn: async () => null };
 async function entry(req, res) {
   const e = process.env;
   const password = e.ADMIN_PASSWORD?.trim() ?? "";
+  if (password.length < MIN_PASSWORD) return createAdmin({ password }, { source: offline, run: async () => "" })(req, res);
   const url = e.SUPABASE_URL?.trim() ?? "", key = e.SUPABASE_SERVICE_ROLE_KEY?.trim() ?? "";
   const ownerPhone = normalizePhone(e.OWNER_PHONE);
-  if (password.length >= MIN_PASSWORD && (!url || !key || !ownerPhone || !e.ZAPI_INSTANCE_ID || !e.ZAPI_TOKEN || !e.ZAPI_CLIENT_TOKEN)) {
+  const missing = [!url && "SUPABASE_URL", !key && "SUPABASE_SERVICE_ROLE_KEY", !ownerPhone && "OWNER_PHONE", !e.ZAPI_INSTANCE_ID && "ZAPI_INSTANCE_ID", !e.ZAPI_TOKEN && "ZAPI_TOKEN", !e.ZAPI_CLIENT_TOKEN && "ZAPI_CLIENT_TOKEN"].filter(Boolean);
+  if (missing.length) {
     res.setHeader("Cache-Control", "no-store");
-    return res.status(503).send("Painel sem configura\xE7\xE3o completa (Supabase, Z-API e OWNER_PHONE).");
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(503).send(plainPage("Painel sem configura\xE7\xE3o completa", `Faltam estas vari\xE1veis na Vercel: ${missing.join(", ")}.`));
   }
-  const store = new SupabaseStore(url || "x", key || "x");
+  const store = new SupabaseStore(url, key);
+  const ledger = new SupabaseLedger(url, key);
   const price = Number(e.OPENAI_PRICE_IN_PER_MTOK) > 0 && Number(e.OPENAI_PRICE_OUT_PER_MTOK) > 0 ? { inputPerMTok: Number(e.OPENAI_PRICE_IN_PER_MTOK), outputPerMTok: Number(e.OPENAI_PRICE_OUT_PER_MTOK) } : void 0;
   const ownerDeps = {
     ownerPhone,
     store,
-    ledger: new SupabaseLedger(url, key),
+    ledger,
     messenger: new ZApiClient(e.ZAPI_INSTANCE_ID ?? "", e.ZAPI_TOKEN ?? "", e.ZAPI_CLIENT_TOKEN ?? ""),
     provider: () => {
       throw new Error("NOT_USED");
@@ -1257,8 +1477,30 @@ async function entry(req, res) {
     },
     log
   };
+  const readOnlyLedger = {
+    resolve: async (phone) => {
+      const ws = await ledger.lookup(phone);
+      if (!ws) throw new Error("NO_ACCOUNT");
+      return ws;
+    },
+    due: (ws, today) => ledger.due(ws, today)
+  };
+  const silent = { sendText: async () => {
+    throw new Error("PREVIEW_NEVER_SENDS");
+  }, downloadAudio: async () => {
+    throw new Error("PREVIEW_NEVER_SENDS");
+  } };
   return createAdmin({ password }, {
-    source: { contacts: () => store.listContacts(), usageSince: (since) => store.usageSince(since), problemTurns: (since) => store.problemTurns(since), turn: (id) => store.turn(id) },
+    source: {
+      contacts: () => store.listContacts(),
+      usageSince: (since) => store.usageSince(since),
+      problemTurns: (since) => store.problemTurns(since),
+      turn: (id) => store.turn(id),
+      setResolved: (id, at) => store.setResolved(id, at),
+      setReminders: (phone, on) => store.setRemindersEnabled(phone, on),
+      reminders: (since) => store.remindersSince(since),
+      reminderPreview: async () => (await runReminders({ store, ledger: readOnlyLedger, messenger: silent, log }, { dry: true })).messages
+    },
     run: async (command) => {
       const cmd = parseOwnerCommand(command);
       return cmd ? execOwnerCommand(ownerDeps, cmd) : "Comando inv\xE1lido.";
@@ -1269,8 +1511,10 @@ async function entry(req, res) {
 export {
   COOKIE,
   ERROR_HELP,
+  FLASH,
   MIN_PASSWORD,
   TRACKING_SINCE,
+  backTo,
   createAdmin,
   entry as default,
   esc,

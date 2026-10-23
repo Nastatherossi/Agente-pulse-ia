@@ -94,7 +94,9 @@
       if (!btn) return;
       btn.setAttribute('aria-busy', 'true');
       var label = form.getAttribute('data-busy');
-      if (label) btn.textContent = label;
+      var text = btn.querySelector('.switch-label');
+      if (text) text.textContent = label || text.textContent;
+      else if (label) btn.textContent = label;
     }
     document.querySelectorAll('form[data-busy]:not([data-confirm])').forEach(function (form) {
       form.addEventListener('submit', function () { busy(form); });
