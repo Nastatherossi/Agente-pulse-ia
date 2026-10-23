@@ -13,6 +13,7 @@ import {
 import { decideAccess, messages, normalizePhone, parseOwnerCommand, renderContactList, type OwnerCommand } from '../../shared/whatsapp/access.js';
 import { OpenAIConversationProvider } from '../v2/openai.js';
 import { OpenAITranscriptionProvider } from '../v2/transcription.js';
+import { handleReminderReply } from './reminders.js';
 import { parseInbound, ZApiClient, type Inbound, type Messenger } from './zapi.js';
 import { SupabaseStore, type Store, type UsageRow } from './store.js';
 import { SupabaseLedger, diffEntries, type Ledger } from './ledger.js';
@@ -74,7 +75,7 @@ async function runAgent(deps: Deps, phone: string, message: string, messageId: s
       session.state.categories = before.customCategories;
       session.state.lastRecordId = before.lastRecordId;
     }
-    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws) });
+    const out = await processMessage(deps.provider(), session, message, requestIdFor(messageId), deps.today?.() ?? todayBR(), whatsappContext(session), { source, realData: Boolean(ws), userName: name?.trim().split(/\s+/)[0] || undefined });
     out.session.expiresAt = now + DAY; // a sessão de WhatsApp não expira como a do laboratório
     // Grava no banco ANTES de responder e de salvar a sessão: se falhar, o usuário não recebe um "registrado" que não aconteceu.
     if (ws && deps.ledger && before && !out.trace.errorCode) {
@@ -225,9 +226,17 @@ export async function handleInbound(deps: Deps, input: Inbound): Promise<void> {
       heard = t.text;
     } else text = input.text.slice(0, 2000);
 
+    // Resposta a um lembrete do Pulse ("caiu sim", "ainda não") ou pedido para parar os lembretes.
+    if (deps.ledger) {
+      const reminderReply = await handleReminderReply({ store: deps.store, ledger: deps.ledger, messenger: deps.messenger, today: deps.today, now: deps.now, log: deps.log }, phone, contact?.name || input.name, text).catch(() => undefined);
+      if (reminderReply) {
+        await deps.messenger.sendText(phone, reminderReply);
+        return;
+      }
+    }
     const source = input.kind === 'audio' ? 'audio' : 'text';
     userText = text;
-    const out = await runAgent(deps, phone, text, messageId, source, input.name);
+    const out = await runAgent(deps, phone, text, messageId, source, contact?.name || input.name);
     if (out.trace.errorCode) {
       deps.log?.({ event: 'whatsapp_agent_error', code: out.trace.errorCode });
       await recordTurn(deps, { phone, messageId, source, userText: text, replyText: messages.technicalProblem, trace: out.trace });

@@ -8,3 +8,5 @@ await build({entryPoints:['server/whatsapp/handler.ts'],outfile:'api/whatsapp.js
 await build({entryPoints:['server/whatsapp/smsHook.ts'],outfile:'api/auth-sms-hook.js',bundle:true,platform:'node',format:'esm',target:'node24',packages:'external',legalComments:'none'});
 // Painel de gestão (/admin).
 await build({entryPoints:['server/admin/panel.ts'],outfile:'api/admin.js',bundle:true,platform:'node',format:'esm',target:'node24',packages:'external',legalComments:'none'});
+// Lembretes proativos (cron diário).
+await build({entryPoints:['server/whatsapp/reminders.ts'],outfile:'api/reminders.js',bundle:true,platform:'node',format:'esm',target:'node24',packages:'external',legalComments:'none'});

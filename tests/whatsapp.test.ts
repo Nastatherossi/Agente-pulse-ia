@@ -112,7 +112,7 @@ describe('autorização de números',()=>{
   await handleInbound(deps,{...text(GUEST,'A1','oi'),name:'Ana Souza'});
   await handleInbound(deps,text(OWNER,'O1','autorizar'));
   expect((await store.getContact(GUEST))?.status).toBe('authorized');
-  expect(messenger.to(GUEST)[0]).toContain('Oi, Ana!');
+  expect(messenger.to(GUEST)[0]).toContain('Ei, Ana!');
   expect(messenger.to(OWNER).at(-1)).toContain('liberado');
  });
  it('"autorizar" sem ninguém esperando explica o que fazer',async()=>{

@@ -109,7 +109,7 @@ describe('autorizar já cria a conta do número',()=>{
   const deps:Deps={ownerPhone:OWNER,store,ledger,messenger,provider:()=>({mode:'real',next:async()=>({content:'ok'})}),transcriber:()=>({name:'f',transcribe:async()=>({text:'',model:'f'})}),today:()=>'2026-10-20',log:()=>{}};
   await handleInbound(deps,{kind:'text',phone:OWNER,messageId:'O1',text:`autorizar ${GUEST} Ana`});
   expect(ledger.workspaces.has(GUEST)).toBe(true);
-  expect(messenger.sent.some(s=>s.phone===GUEST&&s.message.includes('liberado'))).toBe(true);
+  expect(messenger.sent.some(s=>s.phone===GUEST&&s.message.includes('bem-vindo'))).toBe(true);
  });
  it('falha ao criar a conta não impede a liberação',async()=>{
   const store=new MemoryStore(),messenger=new Fake(),ledger=new MemoryLedger();

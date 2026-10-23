@@ -28,7 +28,7 @@ jobs:
         run: npm run build
       - name: Generated API bundle matches the sources
         run: |
-          if ! git diff --exit-code -- api/conversation.js api/whatsapp.js api/auth-sms-hook.js api/admin.js; then
+          if ! git diff --exit-code -- api/conversation.js api/whatsapp.js api/auth-sms-hook.js api/admin.js api/reminders.js; then
             echo "api/ bundles are stale - run npm run build:api and commit"
             exit 1
           fi
