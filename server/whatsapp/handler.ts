@@ -13,6 +13,7 @@ import {
 import { decideAccess, messages, normalizePhone, parseOwnerCommand, renderContactList, type OwnerCommand } from '../../shared/whatsapp/access.js';
 import { OpenAIConversationProvider } from '../v2/openai.js';
 import { OpenAITranscriptionProvider } from '../v2/transcription.js';
+import { handleReminderReply } from './reminders.js';
 import { parseInbound, ZApiClient, type Inbound, type Messenger } from './zapi.js';
 import { SupabaseStore, type Store } from './store.js';
 import { SupabaseLedger, diffEntries, type Ledger } from './ledger.js';
@@ -194,6 +195,14 @@ export async function handleInbound(deps: Deps, input: Inbound): Promise<void> {
       heard = t.text;
     } else text = input.text.slice(0, 2000);
 
+    // Resposta a um lembrete do Pulse ("caiu sim", "ainda não") ou pedido para parar os lembretes.
+    if (deps.ledger) {
+      const reminderReply = await handleReminderReply({ store: deps.store, ledger: deps.ledger, messenger: deps.messenger, today: deps.today, now: deps.now, log: deps.log }, phone, contact?.name || input.name, text).catch(() => undefined);
+      if (reminderReply) {
+        await deps.messenger.sendText(phone, reminderReply);
+        return;
+      }
+    }
     const out = await runAgent(deps, phone, text, messageId, input.kind === 'audio' ? 'audio' : 'text', contact?.name || input.name);
     if (out.trace.errorCode) {
       deps.log?.({ event: 'whatsapp_agent_error', code: out.trace.errorCode });
