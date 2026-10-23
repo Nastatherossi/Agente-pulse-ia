@@ -1,6 +1,12 @@
 import type { Contact, ContactStatus } from '../../shared/whatsapp/access.js';
 
-export type UsageRow = { phone: string; messageId: string; source: 'text' | 'audio'; model?: string; modelCalls: number; inputTokens: number; outputTokens: number; status: string; errorCode?: string };
+export type UsageRow = { phone: string; messageId: string; source: 'text' | 'audio'; model?: string; modelCalls: number; inputTokens: number; outputTokens: number; status: string; errorCode?: string;
+  /** Só preenchidos em turnos com problema (erro, não entendeu, ferramenta bloqueada), para o dono depurar no painel. */
+  userText?: string; replyText?: string; intent?: string; durationMs?: number; confirmation?: string; steps?: unknown };
+
+export type TurnDetail = UsageRecord & { message_id: string; source?: string; model_calls?: number; user_text: string | null; reply_text: string | null; intent: string | null; duration_ms: number | null; confirmation: string | null; steps: unknown; resolved_at?: string | null };
+
+export type UsageRecord = { phone: string; model: string | null; input_tokens: number; output_tokens: number; status: string; error_code: string | null; created_at: string };
 
 export type ReminderState = { transaction_id: string; workspace_id: string; phone: string; sent_count: number; last_sent_at: string | null; answered_at: string | null };
 
@@ -20,6 +26,7 @@ export interface Store {
   recentMessageCount(phone: string, sinceMs: number): Promise<number>;
   /** Consumo de IA por mensagem (tokens, modelo, erro). Nunca guarda o texto nem valores financeiros. */
   recordUsage(row: UsageRow): Promise<void>;
+  usageSince(iso: string): Promise<UsageRecord[]>;
   reminderStates(ids: string[]): Promise<ReminderState[]>;
   /** Registra que estes lançamentos foram perguntados agora (soma 1 ao contador de cada um). */
   markReminded(items: { id: string; workspaceId: string }[], phone: string, atIso: string): Promise<void>;
@@ -119,7 +126,31 @@ export class SupabaseStore implements Store {
   }
 
   async recordUsage(r: UsageRow) {
-    await this.rest('whatsapp_usage', { method: 'POST', body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null }), prefer: 'resolution=ignore-duplicates,return=minimal' });
+    await this.rest('whatsapp_usage', { method: 'POST', body: JSON.stringify({ message_id: r.messageId, phone: r.phone, source: r.source, model: r.model ?? null, model_calls: r.modelCalls, input_tokens: r.inputTokens, output_tokens: r.outputTokens, status: r.status, error_code: r.errorCode ?? null, user_text: r.userText ?? null, reply_text: r.replyText ?? null, intent: r.intent ?? null, duration_ms: r.durationMs ?? null, confirmation: r.confirmation ?? null, steps: r.steps ?? null }), prefer: 'resolution=ignore-duplicates,return=minimal' });
+  }
+
+  async problemTurns(iso: string, limit = 100) {
+    return this.rest<TurnDetail[]>(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&or=(user_text.not.is.null,error_code.not.is.null)&select=*&order=created_at.desc&limit=${limit}`);
+  }
+
+  /** Painel de gestão: marca (ou desmarca, com null) um problema como resolvido. */
+  async setResolved(messageId: string, atIso: string | null) {
+    await this.rest(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}`, { method: 'PATCH', body: JSON.stringify({ resolved_at: atIso }), prefer: 'return=minimal' });
+  }
+
+  /** Painel de gestão: lembretes enviados ou criados desde `iso` (histórico, só leitura). */
+  remindersSince(iso: string) {
+    const t = encodeURIComponent(iso);
+    return this.rest<ReminderState[]>(`whatsapp_reminders?or=(last_sent_at.gte.${t},created_at.gte.${t})&select=*&order=last_sent_at.desc.nullslast&limit=1000`);
+  }
+
+  async turn(messageId: string) {
+    const rows = await this.rest<TurnDetail[]>(`whatsapp_usage?message_id=eq.${encodeURIComponent(messageId)}&select=*&limit=1`);
+    return rows[0] ?? null;
+  }
+
+  async usageSince(iso: string) {
+    return this.rest<UsageRecord[]>(`whatsapp_usage?created_at=gte.${encodeURIComponent(iso)}&select=phone,model,input_tokens,output_tokens,status,error_code,created_at&order=created_at.desc&limit=20000`);
   }
 
   async reminderStates(ids: string[]) {
@@ -181,6 +212,7 @@ export class MemoryStore implements Store {
   private tick = 0;
 
   usage: UsageRow[] = [];
+  async usageSince(): Promise<UsageRecord[]> { return []; }
   async recordUsage(r: UsageRow) { this.usage.push(r); }
   reminders = new Map<string, ReminderState>();
   async reminderStates(ids: string[]) { return ids.map(i => this.reminders.get(i)).filter((x): x is ReminderState => Boolean(x)); }

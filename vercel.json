@@ -35,10 +35,19 @@
     "api/auth-sms-hook.js": {
       "maxDuration": 20
     },
+    "api/admin.js": {
+      "maxDuration": 20
+    },
     "api/reminders.js": {
       "maxDuration": 60
     }
   },
+  "rewrites": [
+    {
+      "source": "/admin",
+      "destination": "/api/admin"
+    }
+  ],
   "crons": [
     {
       "path": "/api/reminders",

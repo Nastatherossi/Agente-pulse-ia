@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { processMessage, whatsappContext } from '../../shared/v2/channel.js';
-import { createSession, sessionSchema, todayBR, type Provider, type Session } from '../../shared/v2/contracts.js';
+import { createSession, sessionSchema, todayBR, type Provider, type Session, type Trace } from '../../shared/v2/contracts.js';
 import {
   MAX_AUDIO_BYTES,
   MAX_AUDIO_SECONDS,
@@ -15,7 +15,7 @@ import { OpenAIConversationProvider } from '../v2/openai.js';
 import { OpenAITranscriptionProvider } from '../v2/transcription.js';
 import { handleReminderReply } from './reminders.js';
 import { parseInbound, ZApiClient, type Inbound, type Messenger } from './zapi.js';
-import { SupabaseStore, type Store } from './store.js';
+import { SupabaseStore, type Store, type UsageRow } from './store.js';
 import { SupabaseLedger, diffEntries, type Ledger } from './ledger.js';
 
 export type Deps = {
@@ -81,18 +81,48 @@ async function runAgent(deps: Deps, phone: string, message: string, messageId: s
     if (ws && deps.ledger && before && !out.trace.errorCode) {
       await deps.ledger.apply(ws, diffEntries(before.transactions, out.session.state.transactions), `wa:${messageId}`);
     }
-    if (await deps.store.saveSession(phone, out.session, version)) {
-      // Melhor esforço: falha ao registrar consumo nunca atrapalha a resposta ao usuário.
-      const u = out.trace.usage;
-      await deps.store.recordUsage({ phone, messageId, source, model: out.trace.model, modelCalls: out.trace.modelCalls ?? 0, inputTokens: u?.inputTokens ?? 0, outputTokens: u?.outputTokens ?? 0, status: out.trace.status ?? 'unknown', errorCode: out.trace.errorCode }).catch(() => undefined);
-      return out;
-    }
+    if (await deps.store.saveSession(phone, out.session, version)) return out;
     // Outra mensagem do mesmo número gravou primeiro: relê e refaz.
   }
   throw new Error('SESSION_CONFLICT');
 }
 
-async function execOwnerCommand(deps: Deps, cmd: OwnerCommand): Promise<string> {
+const clip = (t: string | undefined, n: number) => (t && t.length > n ? `${t.slice(0, n)}…` : t);
+
+/** Turno com problema: erro, agente não entendeu, ou ferramenta recusada. Só nesses casos o texto fica guardado. */
+export function isProblemTurn(t: Trace): boolean {
+  return Boolean(t.errorCode) || (t.status !== 'success' && t.confirmation !== 'pending') || t.steps.some(st => st.status !== 'success');
+}
+
+/** Melhor esforço: falha ao registrar consumo nunca atrapalha a resposta ao usuário. */
+async function recordTurn(deps: Deps, info: { phone: string; messageId: string; source: 'text' | 'audio'; userText?: string; replyText: string; trace?: Trace; errorCode?: string; durationMs?: number }) {
+  const t = info.trace;
+  const problem = t ? isProblemTurn(t) : true;
+  const row: UsageRow = {
+    phone: info.phone,
+    messageId: info.messageId,
+    source: info.source,
+    model: t?.model,
+    modelCalls: t?.modelCalls ?? 0,
+    inputTokens: t?.usage?.inputTokens ?? 0,
+    outputTokens: t?.usage?.outputTokens ?? 0,
+    status: t ? (t.errorCode ? 'error' : t.status) : 'error',
+    errorCode: t?.errorCode ?? info.errorCode,
+    ...(problem
+      ? {
+          userText: clip(info.userText, 2000),
+          replyText: clip(info.replyText, 2000),
+          intent: t?.intent,
+          durationMs: t?.durationMs ?? info.durationMs,
+          confirmation: t?.confirmation,
+          steps: t?.steps.map(st => ({ name: st.name, status: st.status, durationMs: st.durationMs, arguments: st.arguments, error: st.error })),
+        }
+      : {}),
+  };
+  await deps.store.recordUsage(row).catch(() => undefined);
+}
+
+export async function execOwnerCommand(deps: Deps, cmd: OwnerCommand): Promise<string> {
   if (cmd.kind === 'help') return messages.ownerHelp;
   if (cmd.kind === 'invalid') return messages.ownerBadPhone;
   if (cmd.kind === 'list') return renderContactList(await deps.store.listContacts());
@@ -182,6 +212,7 @@ export async function handleInbound(deps: Deps, input: Inbound): Promise<void> {
   }
 
   // 5. Agente.
+  let userText: string | undefined;
   try {
     let text: string;
     let heard: string | undefined;
@@ -203,18 +234,23 @@ export async function handleInbound(deps: Deps, input: Inbound): Promise<void> {
         return;
       }
     }
-    const out = await runAgent(deps, phone, text, messageId, input.kind === 'audio' ? 'audio' : 'text', contact?.name || input.name);
+    const source = input.kind === 'audio' ? 'audio' : 'text';
+    userText = text;
+    const out = await runAgent(deps, phone, text, messageId, source, contact?.name || input.name);
     if (out.trace.errorCode) {
       deps.log?.({ event: 'whatsapp_agent_error', code: out.trace.errorCode });
+      await recordTurn(deps, { phone, messageId, source, userText: text, replyText: messages.technicalProblem, trace: out.trace });
       await deps.messenger.sendText(phone, messages.technicalProblem);
       return;
     }
     // Não repete o áudio inteiro ao usuário. A transcrição só aparece quando o agente não conseguiu agir sobre ela.
     const understood = out.trace.status === 'success' || out.trace.confirmation === 'pending';
     const heardLine = heard && !understood ? `🎤 "${heard.length > 200 ? `${heard.slice(0, 200)}…` : heard}"\n\n` : '';
+    await recordTurn(deps, { phone, messageId, source, userText: text, replyText: out.trace.message, trace: out.trace });
     await deps.messenger.sendText(phone, `${heardLine}${out.trace.message}`);
   } catch (e) {
     deps.log?.({ event: 'whatsapp_error', message: e instanceof Error ? e.message : 'unknown' });
+    await recordTurn(deps, { phone, messageId, source: input.kind === 'audio' ? 'audio' : 'text', userText, replyText: messages.technicalProblem, errorCode: e instanceof Error ? e.message.slice(0, 80) : 'UNKNOWN' });
     try {
       await deps.messenger.sendText(phone, messages.technicalProblem);
     } catch {
